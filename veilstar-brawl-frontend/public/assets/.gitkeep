@@ -1,0 +1,7 @@
+// public/assets/.gitkeep
+// Game assets directory
+// Subdirectories:
+// - sprites/     : Character sprite sheets
+// - effects/     : Particle effects
+// - audio/       : Sound effects
+// - backgrounds/ : Arena backgrounds

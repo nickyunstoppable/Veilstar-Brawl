@@ -1,13 +1,56 @@
+import { useState, useEffect } from 'react';
 import { config } from './config';
 import { Layout } from './components/Layout';
 import { useWallet } from './hooks/useWallet';
 import { VeilstarBrawlGame } from './games/veilstar-brawl/VeilstarBrawlGame';
+import HomePage from './pages/HomePage';
 
 const GAME_ID = 'veilstar-brawl';
 const GAME_TITLE = import.meta.env.VITE_GAME_TITLE || 'Veilstar Brawl';
-const GAME_TAGLINE = import.meta.env.VITE_GAME_TAGLINE || 'On-chain game on Stellar';
+const GAME_TAGLINE = import.meta.env.VITE_GAME_TAGLINE || 'ZK Fighting Game on Stellar';
+
+function useSimpleRouter() {
+  const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Intercept link clicks for SPA navigation
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('http') || href.startsWith('#') || href.startsWith('mailto:'))
+        return;
+      e.preventDefault();
+      window.history.pushState({}, '', href);
+      setPath(href);
+      window.scrollTo({ top: 0 });
+    };
+    document.addEventListener('click', onClick);
+    return () => document.removeEventListener('click', onClick);
+  }, []);
+
+  return path;
+}
 
 export default function App() {
+  const path = useSimpleRouter();
+
+  // Landing page (homepage)
+  if (path === '/' || path === '') {
+    return <HomePage />;
+  }
+
+  // Game page
+  return <GameView />;
+}
+
+function GameView() {
   const { publicKey, isConnected, isConnecting, error, isDevModeAvailable } = useWallet();
   const userAddress = publicKey ?? '';
   const contractId = config.contractIds[GAME_ID] || '';
