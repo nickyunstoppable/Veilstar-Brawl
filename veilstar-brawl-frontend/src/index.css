@@ -166,3 +166,24 @@ button:disabled {
 .border-gradient-cyber {
   border-image: linear-gradient(90deg, #F0B71F, #E03609) 1;
 }
+
+/* Wormhole transition animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes warpSpeed {
+  0% { transform: scale(1) rotate(0deg); opacity: 0.4; }
+  100% { transform: scale(20) rotate(45deg); opacity: 0; }
+}
+
+@keyframes expandBlackhole {
+  0% { transform: scale(1); }
+  40% { transform: scale(10); }
+  100% { transform: scale(300); background-color: black; }
+}
+
+@keyframes fadeOut {
+  to { opacity: 0; transform: scale(2); }
+}
