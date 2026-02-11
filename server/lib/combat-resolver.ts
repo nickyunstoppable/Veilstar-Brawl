@@ -153,6 +153,7 @@ export async function resolveTurn(
             .eq("id", roundId);
 
         // Update match state
+        let eloChanges: EloChanges | null = null;
         if (matchOver && matchWinner) {
             const winnerAddress = matchWinner === "player1"
                 ? match.player1_address
@@ -171,7 +172,7 @@ export async function resolveTurn(
                 .eq("id", matchId);
 
             // Update Elo ratings
-            await updateElo(match, winnerAddress);
+            eloChanges = await updateElo(match, winnerAddress);
         } else {
             await supabase
                 .from("matches")
@@ -234,6 +235,18 @@ export async function resolveTurn(
             ...result,
             player1Address: match.player1_address,
             player2Address: match.player2_address,
+            player1: {
+                move: p1Move,
+                damageDealt: resolution.player1.damageDealt,
+                healthAfter: resolution.player1HealthAfter,
+                energyAfter: resolution.player1EnergyAfter,
+            },
+            player2: {
+                move: p2Move,
+                damageDealt: resolution.player2.damageDealt,
+                healthAfter: resolution.player2HealthAfter,
+                energyAfter: resolution.player2EnergyAfter,
+            },
         });
 
         // If match is over, report result on-chain and broadcast match ended
@@ -272,6 +285,8 @@ export async function resolveTurn(
                 winnerAddress: winnerAddr,
                 player1RoundsWon: p1RoundsWon,
                 player2RoundsWon: p2RoundsWon,
+                reason: "knockout",
+                ratingChanges: eloChanges ?? undefined,
                 onChainSessionId: matchIdToSessionId(matchId),
                 onChainTxHash,
                 contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
@@ -284,6 +299,47 @@ export async function resolveTurn(
                 player1RoundsWon: p1RoundsWon,
                 player2RoundsWon: p2RoundsWon,
             });
+
+            // Broadcast next round starting after a short delay
+            const nextRoundNumber = currentRound.round_number + 1;
+            const countdownEndsAt = Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000 + 3000; // 3s UI delay + countdown
+            const moveDeadline = countdownEndsAt + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000;
+
+            setTimeout(async () => {
+                try {
+                    await broadcastGameEvent(matchId, "round_starting", {
+                        roundNumber: nextRoundNumber,
+                        turnNumber: 1,
+                        player1Health: GAME_CONSTANTS.MAX_HEALTH,
+                        player2Health: GAME_CONSTANTS.MAX_HEALTH,
+                        moveDeadlineAt: moveDeadline,
+                        countdownEndsAt,
+                    });
+                } catch (err) {
+                    console.error("[CombatResolver] Failed to broadcast round_starting:", err);
+                }
+            }, 3000);
+        } else if (!matchOver) {
+            // Same round, next turn — broadcast round_starting after animation delay
+            const nextTurn = (currentRound.turn_number || 1) + 1;
+            const animDelay = 2500; // Allow resolution animation to play
+            const countdownEndsAt = Date.now() + animDelay + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000;
+            const moveDeadlineNext = countdownEndsAt + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000;
+
+            setTimeout(async () => {
+                try {
+                    await broadcastGameEvent(matchId, "round_starting", {
+                        roundNumber: currentRound.round_number,
+                        turnNumber: nextTurn,
+                        player1Health: resolution.player1HealthAfter,
+                        player2Health: resolution.player2HealthAfter,
+                        moveDeadlineAt: moveDeadlineNext,
+                        countdownEndsAt: Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000,
+                    });
+                } catch (err) {
+                    console.error("[CombatResolver] Failed to broadcast next turn:", err);
+                }
+            }, animDelay);
         }
 
         return result;
@@ -436,7 +492,18 @@ export async function handleMoveTimeout(
 // ELO UPDATE
 // =============================================================================
 
-async function updateElo(match: any, winnerAddress: string): Promise<void> {
+interface EloChanges {
+    winner: { before: number; after: number; change: number };
+    loser: { before: number; after: number; change: number };
+}
+
+async function updateElo(match: any, winnerAddress: string): Promise<EloChanges | null> {
+    // Skip Elo for bot matches — bots don't have player records
+    if (match.is_bot_match) {
+        console.log("[CombatResolver] Skipping Elo update for bot match");
+        return null;
+    }
+
     const supabase = getSupabase();
 
     try {
@@ -452,18 +519,21 @@ async function updateElo(match: any, winnerAddress: string): Promise<void> {
             .eq("address", match.player2_address)
             .single();
 
-        if (!p1 || !p2) return;
+        if (!p1 || !p2) return null;
 
         const isP1Winner = winnerAddress === match.player1_address;
         const winnerRating = isP1Winner ? p1.rating : p2.rating;
         const loserRating = isP1Winner ? p2.rating : p1.rating;
         const { winnerChange, loserChange } = calculateEloChange(winnerRating, loserRating);
 
+        const winnerAfter = Math.max(100, winnerRating + winnerChange);
+        const loserAfter = Math.max(100, loserRating + loserChange);
+
         // Update winner
         await supabase
             .from("players")
             .update({
-                rating: Math.max(100, (isP1Winner ? p1.rating : p2.rating) + winnerChange),
+                rating: winnerAfter,
                 wins: (isP1Winner ? p1.wins : p2.wins) + 1,
                 updated_at: new Date().toISOString(),
             })
@@ -474,15 +544,21 @@ async function updateElo(match: any, winnerAddress: string): Promise<void> {
         await supabase
             .from("players")
             .update({
-                rating: Math.max(100, (isP1Winner ? p2.rating : p1.rating) + loserChange),
+                rating: loserAfter,
                 losses: (isP1Winner ? p2.losses : p1.losses) + 1,
                 updated_at: new Date().toISOString(),
             })
             .eq("address", loserAddress);
 
         console.log(`[CombatResolver] Elo updated: winner ${winnerChange > 0 ? "+" : ""}${winnerChange}, loser ${loserChange}`);
+
+        return {
+            winner: { before: winnerRating, after: winnerAfter, change: winnerChange },
+            loser: { before: loserRating, after: loserAfter, change: loserChange },
+        };
     } catch (err) {
         console.error("[CombatResolver] Failed to update Elo:", err);
+        return null;
     }
 }
 

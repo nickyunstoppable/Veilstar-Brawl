@@ -6,11 +6,13 @@
  */
 
 import { handleJoinQueue, handleQueueStatus, handleLeaveQueue } from "./routes/matchmaking/queue";
-import { handleCreateBotMatch } from "./routes/matchmaking/bot-match";
 import { handleGetMatch } from "./routes/matches/match";
 import { handleSubmitMove } from "./routes/matches/move";
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleForfeit } from "./routes/matches/forfeit";
+import { handlePrepareRegistration, handleSubmitAuth } from "./routes/matches/register";
+import { handleGetLeaderboard } from "./routes/leaderboard";
+import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 
 const PORT = parseInt(process.env.SERVER_PORT || "3001", 10);
 
@@ -78,9 +80,27 @@ async function handleRequest(req: Request): Promise<Response> {
         if (method === "DELETE") return corsResponse(await handleLeaveQueue(req));
     }
 
-    // Bot match creation
-    if (pathname === "/api/matchmaking/create-bot-match" && method === "POST") {
-        return corsResponse(await handleCreateBotMatch(req));
+    // -----------------------------------------------
+    // Leaderboard
+    // -----------------------------------------------
+    if (pathname === "/api/leaderboard" && method === "GET") {
+        return corsResponse(await handleGetLeaderboard(req));
+    }
+
+    // -----------------------------------------------
+    // Player Profile & Match History
+    // -----------------------------------------------
+    const playerMatch = pathname.match(/^\/api\/players\/([A-Z0-9]+)(\/matches)?$/);
+    if (playerMatch) {
+        const playerAddress = playerMatch[1];
+        const isMatches = !!playerMatch[2];
+
+        if (isMatches && method === "GET") {
+            return corsResponse(await handleGetPlayerMatches(playerAddress, req));
+        }
+        if (!isMatches && method === "GET") {
+            return corsResponse(await handleGetPlayer(playerAddress));
+        }
     }
 
     // -----------------------------------------------
@@ -106,6 +126,16 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/select
         if (pathname === `/api/matches/${matchId}/select` && method === "POST") {
             return corsResponse(await handleCharacterSelect(matchId, req));
+        }
+
+        // POST /api/matches/:matchId/register/prepare
+        if (pathname === `/api/matches/${matchId}/register/prepare` && method === "POST") {
+            return corsResponse(await handlePrepareRegistration(matchId, req));
+        }
+
+        // POST /api/matches/:matchId/register/auth
+        if (pathname === `/api/matches/${matchId}/register/auth` && method === "POST") {
+            return corsResponse(await handleSubmitAuth(matchId, req));
         }
 
         // POST /api/matches/:matchId/forfeit

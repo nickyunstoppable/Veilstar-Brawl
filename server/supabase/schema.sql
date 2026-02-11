@@ -53,10 +53,12 @@ CREATE TABLE IF NOT EXISTS public.matches (
   ),
   fight_phase_started_at timestamptz,
   power_surge_deck jsonb,
+  is_bot_match boolean NOT NULL DEFAULT false,
+  bot_character_id text,
   CONSTRAINT matches_pkey PRIMARY KEY (id),
   CONSTRAINT matches_player1_fkey FOREIGN KEY (player1_address) REFERENCES public.players(address),
-  CONSTRAINT matches_player2_fkey FOREIGN KEY (player2_address) REFERENCES public.players(address),
   CONSTRAINT matches_winner_fkey FOREIGN KEY (winner_address) REFERENCES public.players(address)
+  -- Note: player2_address FK removed to allow bot addresses that don't exist in players table
 );
 
 -- =====================================================================
@@ -99,8 +101,8 @@ CREATE TABLE IF NOT EXISTS public.rounds (
   player2_is_stunned boolean DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT rounds_pkey PRIMARY KEY (id),
-  CONSTRAINT rounds_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
-  CONSTRAINT rounds_winner_fkey FOREIGN KEY (winner_address) REFERENCES public.players(address)
+  CONSTRAINT rounds_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id)
+  -- Note: winner_address FK removed to allow bot addresses
 );
 
 -- =====================================================================
@@ -115,8 +117,8 @@ CREATE TABLE IF NOT EXISTS public.moves (
   signed_message text,  -- The signed message payload
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT moves_pkey PRIMARY KEY (id),
-  CONSTRAINT moves_round_fkey FOREIGN KEY (round_id) REFERENCES public.rounds(id),
-  CONSTRAINT moves_player_fkey FOREIGN KEY (player_address) REFERENCES public.players(address)
+  CONSTRAINT moves_round_fkey FOREIGN KEY (round_id) REFERENCES public.rounds(id)
+  -- Note: player_address FK removed to allow bot addresses
 );
 
 -- =====================================================================

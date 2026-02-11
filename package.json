@@ -9,9 +9,10 @@
     "bindings": "bun run scripts/bindings.ts",
     "create": "bun run scripts/create.ts",
     "publish": "bun run scripts/publish.ts",
-    "dev": "bun --cwd=sgs_frontend run dev",
+    "dev": "bun run dev:game veilstar-brawl",
+    "dev:catalog": "bun --cwd=sgs_frontend run dev",
     "dev:game": "bun run scripts/dev-game.ts",
-    "dev:server": "bun run server/index.ts"
+    "dev:server": "bun --watch run server/index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

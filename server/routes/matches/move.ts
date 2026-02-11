@@ -185,7 +185,7 @@ export async function handleSubmitMove(
             .eq("id", currentRound.id)
             .single();
 
-        const bothSubmitted = updatedRound?.player1_move && updatedRound?.player2_move;
+        let bothSubmitted = updatedRound?.player1_move && updatedRound?.player2_move;
 
         if (bothSubmitted) {
             // Resolve the turn

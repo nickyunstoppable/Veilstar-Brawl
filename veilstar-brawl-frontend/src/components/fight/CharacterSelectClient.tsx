@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { PhaserGame } from "@/game/PhaserGame";
 import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
+import { useOnChainRegistration, type RegistrationStatus } from "@/hooks/useOnChainRegistration";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { CharacterSelectSceneConfig } from "@/game/scenes/CharacterSelectScene";
@@ -49,6 +50,15 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    // On-chain registration (client-signed via Freighter)
+    const {
+        status: regStatus,
+        error: regError,
+        registerOnChain,
+        markComplete,
+        markSkipped,
+    } = useOnChainRegistration();
+
     const onMatchEndRef = useRef(onMatchEnd);
     const onExitRef = useRef(onExit);
     useEffect(() => {
@@ -72,7 +82,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const match = data.match;
 
                 const isHost = match.player1_address === publicKey;
-                const isBot = !match.player2_address || match.player2_address.startsWith("GBOT");
 
                 const config: CharacterSelectSceneConfig = {
                     matchId,
@@ -85,8 +94,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     existingOpponentCharacter: isHost ? match.player2_character_id : match.player1_character_id,
                     existingPlayerBan: null,
                     existingOpponentBan: null,
-                    isBot,
-                    botBanId: null,
                 };
 
                 setSceneConfig(config);
@@ -133,14 +140,73 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         countdownSeconds: number;
                         player1CharacterId?: string;
                         player2CharacterId?: string;
+                        requiresOnChainRegistration?: boolean;
                     };
+
+                    // Trigger on-chain registration signing if required
+                    if (data.requiresOnChainRegistration) {
+                        registerOnChain(matchId).catch((err) =>
+                            console.error("[CharacterSelectClient] Registration signing failed:", err),
+                        );
+                    } else {
+                        markSkipped();
+                    }
+
                     EventBus.emit("match_starting", {
                         countdown: data.countdownSeconds,
                         player1CharacterId: data.player1CharacterId,
                         player2CharacterId: data.player2CharacterId,
                     });
                 })
-                .subscribe();
+                .on("broadcast", { event: "registration_complete" }, (payload) => {
+                    const data = payload.payload as { sessionId?: number; txHash?: string };
+                    markComplete(data.txHash);
+                })
+                .on("broadcast", { event: "match_cancelled" }, () => {
+                    console.log("[CharacterSelectClient] Match cancelled");
+                    navigateTo("/play");
+                })
+                .on("broadcast", { event: "player_disconnected" }, (payload) => {
+                    EventBus.emit("opponent_disconnected", payload.payload);
+                    EventBus.emit("game:playerDisconnected", payload.payload);
+                })
+                .on("broadcast", { event: "player_reconnected" }, (payload) => {
+                    EventBus.emit("opponent_reconnected", payload.payload);
+                    EventBus.emit("game:playerReconnected", payload.payload);
+                })
+                // FightScene events (forwarded via EventBus so FightScene can receive them)
+                .on("broadcast", { event: "round_starting" }, (payload) => {
+                    EventBus.emit("game:roundStarting", payload.payload);
+                })
+                .on("broadcast", { event: "move_submitted" }, (payload) => {
+                    EventBus.emit("game:moveSubmitted", payload.payload);
+                })
+                .on("broadcast", { event: "move_confirmed" }, (payload) => {
+                    EventBus.emit("game:moveConfirmed", payload.payload);
+                })
+                .on("broadcast", { event: "round_resolved" }, (payload) => {
+                    EventBus.emit("game:roundResolved", payload.payload);
+                })
+                .on("broadcast", { event: "match_ended" }, (payload) => {
+                    EventBus.emit("game:matchEnded", payload.payload);
+                })
+                .on("broadcast", { event: "move_rejected" }, (payload) => {
+                    EventBus.emit("game:moveRejected", payload.payload);
+                })
+                .on("broadcast", { event: "fight_state_update" }, (payload) => {
+                    EventBus.emit("game:fightStateUpdate", payload.payload);
+                })
+                .on("broadcast", { event: "chat_message" }, (payload) => {
+                    EventBus.emit("game:chatMessage", payload.payload);
+                })
+                .on("broadcast", { event: "sticker_displayed" }, (payload) => {
+                    EventBus.emit("game:stickerMessage", payload.payload);
+                })
+                .subscribe((status) => {
+                    if (status === "SUBSCRIBED") {
+                        EventBus.emit("channel_ready", { matchId });
+                    }
+                });
         } catch (err) {
             console.warn("[CharacterSelectClient] Failed to set up Realtime:", err);
         }
@@ -192,14 +258,63 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             onMatchEndRef.current?.(payload);
         };
 
+        const handleSubmitMove = async (data: unknown) => {
+            const payload = data as {
+                matchId: string;
+                roundNumber: number;
+                turnNumber: number;
+                move: string;
+                message: string;
+                playerRole: string;
+                playerAddress: string;
+            };
+            try {
+                const res = await fetch(`${API_BASE}/api/matches/${payload.matchId}/move`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        address: payload.playerAddress,
+                        move: payload.move,
+                        roundNumber: payload.roundNumber,
+                        turnNumber: payload.turnNumber,
+                    }),
+                });
+                if (!res.ok) {
+                    console.error("[CharacterSelectClient] Move submission failed:", await res.text());
+                }
+            } catch (err) {
+                console.error("[CharacterSelectClient] Failed to submit move:", err);
+            }
+        };
+
+        const handleForfeit = async (data: unknown) => {
+            const payload = data as { matchId: string; playerRole: string };
+            try {
+                await fetch(`${API_BASE}/api/matches/${payload.matchId}/forfeit`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        address: publicKey,
+                        playerRole: payload.playerRole,
+                    }),
+                });
+            } catch (err) {
+                console.error("[CharacterSelectClient] Failed to forfeit:", err);
+            }
+        };
+
         EventBus.on("selection_confirmed", handleSelectionConfirmed);
         EventBus.on("game:sendBanConfirmed", handleBanConfirmed);
         EventBus.on("fight:matchResult", handleMatchResult);
+        EventBus.on("fight:submitMove", handleSubmitMove);
+        EventBus.on("fight:forfeit", handleForfeit);
 
         return () => {
             EventBus.off("selection_confirmed", handleSelectionConfirmed);
             EventBus.off("game:sendBanConfirmed", handleBanConfirmed);
             EventBus.off("fight:matchResult", handleMatchResult);
+            EventBus.off("fight:submitMove", handleSubmitMove);
+            EventBus.off("fight:forfeit", handleForfeit);
         };
     }, [sceneConfig, matchId, publicKey]);
 
@@ -244,6 +359,32 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     Match: <span className="text-cyber-gold">{matchId.slice(0, 8)}...</span>
                 </span>
             </div>
+
+            {/* On-chain registration status overlay */}
+            {regStatus !== "idle" && regStatus !== "complete" && regStatus !== "skipped" && (
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+                    <div className="bg-black/80 border border-cyber-gold/40 rounded-xl px-6 py-3 flex items-center gap-3 backdrop-blur-sm">
+                        {regStatus === "error" ? (
+                            <>
+                                <span className="w-3 h-3 rounded-full bg-red-500" />
+                                <span className="text-red-400 text-xs font-orbitron tracking-wider">
+                                    ON-CHAIN: {regError || "FAILED"}
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <div className="w-4 h-4 border-2 border-cyber-gold border-t-transparent rounded-full animate-spin" />
+                                <span className="text-cyber-gold text-xs font-orbitron tracking-wider">
+                                    {regStatus === "preparing" && "PREPARING TX..."}
+                                    {regStatus === "signing" && "SIGN IN WALLET..."}
+                                    {regStatus === "waiting_for_opponent" && "WAITING FOR OPPONENT SIGNATURE..."}
+                                    {regStatus === "submitting" && "SUBMITTING ON-CHAIN..."}
+                                </span>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
 
             <PhaserGame
                 currentScene="CharacterSelectScene"

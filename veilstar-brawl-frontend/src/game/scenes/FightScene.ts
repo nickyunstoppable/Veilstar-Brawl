@@ -114,9 +114,6 @@ export class FightScene extends Phaser.Scene {
     } = { player1: null, player2: null };
     private stunTweens: Map<"player1" | "player2", Phaser.Tweens.Tween> = new Map();
 
-    // Match result overlay
-    private matchResultOverlay!: Phaser.GameObjects.Container;
-
     // Audio settings
     private bgmVolume: number = 0.3;
     private sfxVolume: number = 0.5;
@@ -124,9 +121,6 @@ export class FightScene extends Phaser.Scene {
     // Settings menu
     private settingsContainer!: Phaser.GameObjects.Container;
     private isSettingsOpen: boolean = false;
-
-    // Bot match detection
-    private isBotMatch: boolean = false;
 
     constructor() {
         super({ key: "FightScene" });
@@ -139,7 +133,6 @@ export class FightScene extends Phaser.Scene {
     init(data: FightSceneConfig): void {
         this.config = { ...data };
         this.resetFullState();
-        this.isBotMatch = this.config.player2Address.startsWith("bot_");
     }
 
     private resetFullState(): void {
@@ -456,7 +449,7 @@ export class FightScene extends Phaser.Scene {
         const winner = payload.winner;
         const isWinner = winner === this.config.playerRole;
 
-        this.showMatchResult(isWinner, payload);
+        this.showMatchFlashAndTransition(isWinner, payload);
     }
 
     private onMatchStarting(payload: any): void {
@@ -804,13 +797,32 @@ export class FightScene extends Phaser.Scene {
         this.createHealthBar(UI_POSITIONS.HEALTH_BAR.PLAYER2.X, UI_POSITIONS.HEALTH_BAR.PLAYER2.Y, barWidth, barHeight, "player2");
 
         const state = this.combatEngine.getState();
+        const isP1 = this.config.playerRole === "player1";
+
+        // P1 label — highlight if it's local player
+        const p1Label = isP1
+            ? `P1 (YOU): ${state.player1.characterId.toUpperCase()} (${state.player1.maxHp} HP)`
+            : `P1: ${state.player1.characterId.toUpperCase()} (${state.player1.maxHp} HP)`;
         this.add.text(UI_POSITIONS.HEALTH_BAR.PLAYER1.X, UI_POSITIONS.HEALTH_BAR.PLAYER1.Y - 18,
-            `P1: ${state.player1.characterId.toUpperCase()} (${state.player1.maxHp} HP)`,
-            { fontFamily: "monospace", fontSize: "12px", color: "#22c55e", fontStyle: "bold" }
+            p1Label,
+            {
+                fontFamily: "monospace", fontSize: "12px",
+                color: isP1 ? "#22c55e" : "#40e0d0",
+                fontStyle: isP1 ? "bold" : "normal",
+            }
         );
+
+        // P2 label — highlight if it's local player
+        const p2Label = !isP1
+            ? `P2 (YOU): ${state.player2.characterId.toUpperCase()} (${state.player2.maxHp} HP)`
+            : `P2: ${state.player2.characterId.toUpperCase()} (${state.player2.maxHp} HP)`;
         this.add.text(UI_POSITIONS.HEALTH_BAR.PLAYER2.X + barWidth, UI_POSITIONS.HEALTH_BAR.PLAYER2.Y - 18,
-            `P2: ${state.player2.characterId.toUpperCase()} (${state.player2.maxHp} HP)`,
-            { fontFamily: "monospace", fontSize: "12px", color: "#40e0d0" }
+            p2Label,
+            {
+                fontFamily: "monospace", fontSize: "12px",
+                color: !isP1 ? "#22c55e" : "#40e0d0",
+                fontStyle: !isP1 ? "bold" : "normal",
+            }
         ).setOrigin(1, 0);
     }
 
@@ -833,6 +845,14 @@ export class FightScene extends Phaser.Scene {
 
         this.createEnergyBar(UI_POSITIONS.HEALTH_BAR.PLAYER1.X, UI_POSITIONS.HEALTH_BAR.PLAYER1.Y + yOffset, barWidth, barHeight, "player1");
         this.createEnergyBar(UI_POSITIONS.HEALTH_BAR.PLAYER2.X, UI_POSITIONS.HEALTH_BAR.PLAYER2.Y + yOffset, barWidth, barHeight, "player2");
+
+        // "EN" labels
+        this.add.text(UI_POSITIONS.HEALTH_BAR.PLAYER1.X - 22, UI_POSITIONS.HEALTH_BAR.PLAYER1.Y + yOffset, "EN", {
+            fontFamily: "monospace", fontSize: "10px", color: "#3b82f6",
+        });
+        this.add.text(UI_POSITIONS.HEALTH_BAR.PLAYER2.X + barWidth + 4, UI_POSITIONS.HEALTH_BAR.PLAYER2.Y + yOffset, "EN", {
+            fontFamily: "monospace", fontSize: "10px", color: "#3b82f6",
+        });
     }
 
     private createEnergyBar(x: number, y: number, width: number, height: number, player: "player1" | "player2"): void {
@@ -873,7 +893,7 @@ export class FightScene extends Phaser.Scene {
         timerBg.lineStyle(3, 0x40e0d0, 1);
         timerBg.strokeCircle(UI_POSITIONS.TIMER.X, UI_POSITIONS.TIMER.Y, 35);
 
-        this.roundTimerText = TextFactory.createTimer(this, UI_POSITIONS.TIMER.X, UI_POSITIONS.TIMER.Y, "15").setOrigin(0.5);
+        this.roundTimerText = TextFactory.createTimer(this, UI_POSITIONS.TIMER.X, UI_POSITIONS.TIMER.Y, "20").setOrigin(0.5);
     }
 
     private createRoundScore(): void {
@@ -941,6 +961,19 @@ export class FightScene extends Phaser.Scene {
         }).setOrigin(0.5);
         container.add(costText);
 
+        // Advantage text (what this move beats)
+        const advantages: Record<string, string> = {
+            punch: "Beats Kick",
+            kick: "Beats Block",
+            block: "Beats Punch",
+            special: "Beats P+K",
+        };
+        const advantageText = this.add.text(0, 65, advantages[move] || "", {
+            fontFamily: "monospace", fontSize: "10px", color: "#aaaaaa",
+            fontStyle: "italic",
+        }).setOrigin(0.5);
+        container.add(advantageText);
+
         const hitArea = new Phaser.Geom.Rectangle(-width / 2, -height / 2, width, height);
         container.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
 
@@ -975,7 +1008,7 @@ export class FightScene extends Phaser.Scene {
 
     private createNarrativeDisplay(): void {
         this.narrativeText = TextFactory.createLabel(
-            this, GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y + 40, "", {
+            this, GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y - 80, "", {
             fontSize: "18px", color: "#ffffff",
         }
         ).setOrigin(0.5).setAlpha(0);
@@ -983,15 +1016,15 @@ export class FightScene extends Phaser.Scene {
 
     private createTurnIndicator(): void {
         this.turnIndicatorText = TextFactory.createLabel(
-            this, GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 190, "Waiting...", {
-            fontSize: "14px", color: "#aaaaaa",
+            this, GAME_DIMENSIONS.CENTER_X, 130, "Select your move!", {
+            fontSize: "14px", color: "#40e0d0",
         }
         ).setOrigin(0.5);
     }
 
     private createCountdownOverlay(): void {
         this.countdownText = this.add.text(
-            GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y - 50, "", {
+            GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y, "", {
             fontFamily: "monospace", fontSize: "72px", color: "#40e0d0",
             fontStyle: "bold", stroke: "#000000", strokeThickness: 6,
         }
@@ -999,13 +1032,105 @@ export class FightScene extends Phaser.Scene {
     }
 
     private createSettingsButton(): void {
-        const btn = this.add.text(GAME_DIMENSIONS.WIDTH - 50, 20, "⚙", {
-            fontFamily: "monospace", fontSize: "28px", color: "#888888",
-        }).setOrigin(0.5).setInteractive();
+        const x = 50;
+        const y = GAME_DIMENSIONS.HEIGHT - 50;
+        const radius = 24;
 
-        btn.on("pointerdown", () => {
-            this.toggleAudio();
+        // Circle background
+        const bg = this.add.graphics();
+        bg.fillStyle(0x1a1a2e, 0.9);
+        bg.fillCircle(x, y, radius);
+        bg.lineStyle(2, 0x40e0d0, 0.5);
+        bg.strokeCircle(x, y, radius);
+
+        const btn = this.add.text(x, y, "⚙", {
+            fontFamily: "monospace", fontSize: "24px", color: "#40e0d0",
+        }).setOrigin(0.5);
+
+        const hitArea = new Phaser.Geom.Circle(x, y, radius);
+        bg.setInteractive(hitArea, Phaser.Geom.Circle.Contains);
+
+        bg.on("pointerover", () => {
+            this.tweens.add({ targets: btn, rotation: 0.3, duration: 300, ease: "Power2" });
         });
+        bg.on("pointerout", () => {
+            this.tweens.add({ targets: btn, rotation: 0, duration: 300, ease: "Power2" });
+        });
+        bg.on("pointerdown", () => {
+            this.toggleSettingsMenu();
+        });
+    }
+
+    private toggleSettingsMenu(): void {
+        if (this.isSettingsOpen) {
+            this.settingsContainer.setVisible(false);
+            this.isSettingsOpen = false;
+            return;
+        }
+
+        this.isSettingsOpen = true;
+        this.settingsContainer.removeAll(true);
+
+        const panelX = 20;
+        const panelY = GAME_DIMENSIONS.HEIGHT - 200;
+        const panelW = 220;
+        const panelH = 140;
+
+        const bg = this.add.graphics();
+        bg.fillStyle(0x1a1a2e, 0.95);
+        bg.fillRoundedRect(panelX, panelY, panelW, panelH, 10);
+        bg.lineStyle(2, 0x40e0d0, 0.5);
+        bg.strokeRoundedRect(panelX, panelY, panelW, panelH, 10);
+        this.settingsContainer.add(bg);
+
+        // BGM volume label + toggle
+        const bgmLabel = this.add.text(panelX + 15, panelY + 15, `BGM: ${this.bgmVolume > 0 ? "ON" : "OFF"}`, {
+            fontFamily: "monospace", fontSize: "14px", color: "#40e0d0",
+        }).setInteractive({ useHandCursor: true });
+        bgmLabel.on("pointerdown", () => {
+            this.bgmVolume = this.bgmVolume > 0 ? 0 : 0.3;
+            bgmLabel.setText(`BGM: ${this.bgmVolume > 0 ? "ON" : "OFF"}`);
+            const bgm = this.sound.get("bgm_fight");
+            if (bgm && "setVolume" in bgm) (bgm as Phaser.Sound.WebAudioSound).setVolume(this.bgmVolume);
+            try { localStorage.setItem("veilstar_brawl_bgm_volume", this.bgmVolume.toString()); } catch {}
+        });
+        this.settingsContainer.add(bgmLabel);
+
+        // SFX volume label + toggle
+        const sfxLabel = this.add.text(panelX + 15, panelY + 45, `SFX: ${this.sfxVolume > 0 ? "ON" : "OFF"}`, {
+            fontFamily: "monospace", fontSize: "14px", color: "#40e0d0",
+        }).setInteractive({ useHandCursor: true });
+        sfxLabel.on("pointerdown", () => {
+            this.sfxVolume = this.sfxVolume > 0 ? 0 : 0.5;
+            sfxLabel.setText(`SFX: ${this.sfxVolume > 0 ? "ON" : "OFF"}`);
+            try { localStorage.setItem("veilstar_brawl_sfx_volume", this.sfxVolume.toString()); } catch {}
+        });
+        this.settingsContainer.add(sfxLabel);
+
+        // Forfeit button
+        const forfeitBtn = this.add.text(panelX + 15, panelY + 85, "FORFEIT MATCH", {
+            fontFamily: "monospace", fontSize: "13px", color: "#ef4444",
+            fontStyle: "bold",
+        }).setInteractive({ useHandCursor: true });
+        forfeitBtn.on("pointerdown", () => {
+            this.forfeitMatch();
+            this.isSettingsOpen = false;
+            this.settingsContainer.setVisible(false);
+        });
+        this.settingsContainer.add(forfeitBtn);
+
+        // Close button
+        const closeBtn = this.add.text(panelX + panelW - 15, panelY + 10, "✕", {
+            fontFamily: "monospace", fontSize: "16px", color: "#888888",
+        }).setOrigin(1, 0).setInteractive({ useHandCursor: true });
+        closeBtn.on("pointerdown", () => {
+            this.isSettingsOpen = false;
+            this.settingsContainer.setVisible(false);
+        });
+        this.settingsContainer.add(closeBtn);
+
+        this.settingsContainer.setVisible(true);
+        this.settingsContainer.setDepth(200);
     }
 
     // ===========================================================================
@@ -1169,75 +1294,55 @@ export class FightScene extends Phaser.Scene {
         });
     }
 
-    private showMatchResult(isWinner: boolean, payload: any): void {
+    private showMatchFlashAndTransition(isWinner: boolean, payload: any): void {
         const text = isWinner ? "VICTORY!" : "DEFEAT!";
-        const color = isWinner ? "#22c55e" : "#ef4444";
+        const color = isWinner ? "#F0B71F" : "#ef4444";
 
-        // Overlay
+        // Full-screen overlay flash
         const overlay = this.add.graphics();
         overlay.fillStyle(0x000000, 0.7);
         overlay.fillRect(0, 0, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
         overlay.setDepth(300);
 
-        const resultText = this.add.text(GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y - 80, text, {
-            fontFamily: "monospace", fontSize: "64px", color, fontStyle: "bold",
+        const flashText = this.add.text(GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y, text, {
+            fontFamily: "Orbitron, monospace", fontSize: "80px", color, fontStyle: "bold",
             stroke: "#000000", strokeThickness: 8,
-        }).setOrigin(0.5).setDepth(301);
+        }).setOrigin(0.5).setDepth(301).setScale(0.5).setAlpha(0);
 
-        // Rating changes
-        let nextY = GAME_DIMENSIONS.CENTER_Y;
-        if (payload.ratingChanges) {
-            const myChanges = isWinner ? payload.ratingChanges.winner : payload.ratingChanges.loser;
-            const changeText = myChanges.change >= 0 ? `+${myChanges.change}` : `${myChanges.change}`;
-            this.add.text(GAME_DIMENSIONS.CENTER_X, nextY,
-                `Rating: ${myChanges.before} → ${myChanges.after} (${changeText})`, {
-                fontFamily: "monospace", fontSize: "18px", color: "#ffffff",
-            }
-            ).setOrigin(0.5).setDepth(301);
-            nextY += 30;
-        }
-
-        // On-chain status
-        if (payload.onChainSessionId) {
-            const chainLabel = payload.onChainTxHash
-                ? `⛓ On-Chain: Session #${payload.onChainSessionId} ✓`
-                : `⛓ On-Chain: Session #${payload.onChainSessionId} (pending...)`;
-            const chainColor = payload.onChainTxHash ? "#22c55e" : "#fbbf24";
-
-            this.add.text(GAME_DIMENSIONS.CENTER_X, nextY + 8, chainLabel, {
-                fontFamily: "monospace", fontSize: "13px", color: chainColor,
-            }).setOrigin(0.5).setDepth(301);
-            nextY += 22;
-
-            if (payload.onChainTxHash) {
-                const shortHash = `TX: ${payload.onChainTxHash.slice(0, 8)}...${payload.onChainTxHash.slice(-8)}`;
-                this.add.text(GAME_DIMENSIONS.CENTER_X, nextY + 4, shortHash, {
-                    fontFamily: "monospace", fontSize: "11px", color: "#888888",
-                }).setOrigin(0.5).setDepth(301);
-                nextY += 18;
-            }
-
-            if (payload.contractId) {
-                const shortContract = `Contract: ${payload.contractId.slice(0, 8)}...${payload.contractId.slice(-6)}`;
-                this.add.text(GAME_DIMENSIONS.CENTER_X, nextY + 4, shortContract, {
-                    fontFamily: "monospace", fontSize: "11px", color: "#666666",
-                }).setOrigin(0.5).setDepth(301);
-                nextY += 18;
-            }
-        }
-
-        // Back button
-        const backBtn = this.add.text(GAME_DIMENSIONS.CENTER_X, nextY + 30, "BACK TO MENU", {
-            fontFamily: "monospace", fontSize: "20px", color: "#40e0d0",
-            backgroundColor: "#1a1a2e", padding: { x: 20, y: 10 },
-        }).setOrigin(0.5).setDepth(301).setInteractive();
-
-        backBtn.on("pointerdown", () => {
-            window.location.href = "/play";
+        this.tweens.add({
+            targets: flashText,
+            alpha: 1,
+            scale: 1.2,
+            duration: 600,
+            ease: "Back.out",
+            onComplete: () => {
+                this.tweens.add({
+                    targets: flashText,
+                    scale: 1,
+                    duration: 300,
+                    ease: "Power2",
+                });
+            },
         });
 
-        // Emit to React
-        EventBus.emit("fight:matchResult", { isWinner, ...payload });
+        // Transition to ResultsScene after a brief delay
+        this.time.delayedCall(2500, () => {
+            // Emit to React layer for cleanup
+            EventBus.emit("fight:matchResult", { isWinner, ...payload });
+
+            this.scene.start("ResultsScene", {
+                isWinner,
+                playerRole: this.config.playerRole,
+                matchId: this.config.matchId,
+                player1RoundsWon: payload.player1RoundsWon ?? 0,
+                player2RoundsWon: payload.player2RoundsWon ?? 0,
+                reason: payload.reason,
+                ratingChanges: payload.ratingChanges,
+                onChainSessionId: payload.onChainSessionId ?? this.onChainSessionId,
+                onChainTxHash: payload.onChainTxHash ?? this.onChainTxHash,
+                contractId: payload.contractId ?? this.contractId,
+            });
+        });
     }
 
     private handleDisconnectTimeout(): void {

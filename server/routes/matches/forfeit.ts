@@ -6,6 +6,7 @@
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { calculateEloChange } from "../../lib/game-types";
+import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 
 interface ForfeitBody {
     address: string;
@@ -86,6 +87,11 @@ export async function handleForfeit(
             .eq("id", matchId);
 
         // Update Elo
+        let ratingChanges: {
+            winner: { before: number; after: number; change: number };
+            loser: { before: number; after: number; change: number };
+        } | undefined;
+
         const { data: forfeitingPlayer } = await supabase
             .from("players")
             .select("rating, losses")
@@ -104,10 +110,13 @@ export async function handleForfeit(
                 forfeitingPlayer.rating
             );
 
+            const winnerAfter = Math.max(100, winningPlayer.rating + winnerChange);
+            const loserAfter = Math.max(100, forfeitingPlayer.rating + loserChange);
+
             await supabase
                 .from("players")
                 .update({
-                    rating: Math.max(100, winningPlayer.rating + winnerChange),
+                    rating: winnerAfter,
                     wins: winningPlayer.wins + 1,
                 })
                 .eq("address", winnerAddress);
@@ -115,19 +124,54 @@ export async function handleForfeit(
             await supabase
                 .from("players")
                 .update({
-                    rating: Math.max(100, forfeitingPlayer.rating + loserChange),
+                    rating: loserAfter,
                     losses: forfeitingPlayer.losses + 1,
                 })
                 .eq("address", body.address);
+
+            ratingChanges = {
+                winner: { before: winningPlayer.rating, after: winnerAfter, change: winnerChange },
+                loser: { before: forfeitingPlayer.rating, after: loserAfter, change: loserChange },
+            };
+        }
+
+        // Report result on-chain
+        let onChainTxHash: string | undefined;
+        if (isStellarConfigured()) {
+            try {
+                const onChainResult = await reportMatchResultOnChain(
+                    matchId,
+                    match.player1_address,
+                    match.player2_address,
+                    winnerAddress,
+                );
+                onChainTxHash = onChainResult.txHash;
+                if (onChainResult.txHash) {
+                    await supabase.from('matches').update({
+                        onchain_result_tx_hash: onChainResult.txHash,
+                    }).eq('id', matchId);
+                }
+            } catch (err) {
+                console.error('[Forfeit] On-chain report error:', err);
+            }
         }
 
         // Broadcast
+        const p1RoundsWon = isPlayer1 ? (match.player1_rounds_won || 0) : winnerRoundsWon;
+        const p2RoundsWon = isPlayer1 ? winnerRoundsWon : (match.player2_rounds_won || 0);
+
         await broadcastGameEvent(matchId, "match_ended", {
             matchId,
             winner: isPlayer1 ? "player2" : "player1",
             winnerAddress,
             reason: "forfeit",
             forfeitedBy: body.address,
+            player1RoundsWon: p1RoundsWon,
+            player2RoundsWon: p2RoundsWon,
+            ratingChanges,
+            onChainSessionId: matchIdToSessionId(matchId),
+            onChainTxHash,
+            contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
         });
 
         return Response.json({ success: true, forfeited: true });

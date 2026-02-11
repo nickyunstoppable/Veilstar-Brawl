@@ -1,16 +1,19 @@
 /**
- * CharacterSelectScene — Phaser-based Ban → Pick → Reveal character selection
- * Adapted from KaspaClash's CharacterSelectScene for Veilstar Brawl
+ * CharacterSelectScene - Pre-match character selection screen
+ * Players select their fighter before entering the battle arena
  *
  * Phases: BANNING → TRANSITION → PICKING → REVEAL → FightScene
- * All UI is drawn with Phaser primitives (no external UI component deps).
+ * Uses dedicated UI components (CharacterCard, SelectionTimer, etc.)
  * Deadline-based timers via Date.now() so they work when the tab is backgrounded.
  */
 
 import Phaser from "phaser";
 import { EventBus } from "@/game/EventBus";
 import { GAME_DIMENSIONS } from "@/game/config";
+import { CharacterCard, SelectionTimer, OpponentStatus, StatsOverlay } from "@/game/ui";
 import { CHARACTER_ROSTER, getCharacter, getRandomCharacter } from "@/data/characters";
+import { getCharacterCombatStats } from "@/game/combat/CharacterStats";
+import { TextFactory } from "@/game/ui/TextFactory";
 import type { Character } from "@/types/game";
 
 // =============================================================================
@@ -18,18 +21,24 @@ import type { Character } from "@/types/game";
 // =============================================================================
 
 export interface CharacterSelectSceneConfig {
-    matchId: string;
-    playerAddress: string;
-    opponentAddress: string;
-    isHost: boolean;
-    selectionTimeLimit?: number;
-    selectionDeadlineAt?: string;
-    existingPlayerCharacter?: string | null;
-    existingOpponentCharacter?: string | null;
-    existingPlayerBan?: string | null;
-    existingOpponentBan?: string | null;
-    isBot?: boolean;
-    botBanId?: string | null;
+  matchId: string;
+  playerAddress: string;
+  opponentAddress: string;
+  isHost: boolean;
+  selectionTimeLimit?: number;
+  selectionDeadlineAt?: string;
+  existingPlayerCharacter?: string | null;
+  existingOpponentCharacter?: string | null;
+  existingPlayerBan?: string | null;
+  existingOpponentBan?: string | null;
+  ownedCharacterIds?: string[];
+}
+
+export interface CharacterSelectEvents {
+  character_selected: { characterId: string };
+  selection_confirmed: { characterId: string };
+  opponent_selected: { characterId: string };
+  both_ready: { player: string; opponent: string };
 }
 
 export type SelectionPhase = "BANNING" | "TRANSITION" | "PICKING" | "REVEAL";
@@ -39,874 +48,1035 @@ export type SelectionPhase = "BANNING" | "TRANSITION" | "PICKING" | "REVEAL";
 // =============================================================================
 
 export class CharacterSelectScene extends Phaser.Scene {
-    // Config
-    private config!: CharacterSelectSceneConfig;
+  // Configuration
+  private config!: CharacterSelectSceneConfig;
 
-    // Phase state
-    private phase: SelectionPhase = "BANNING";
-    private selectedCharacter: Character | null = null;
-    private confirmedCharacter: Character | null = null;
-    private opponentCharacter: Character | null = null;
-    private isConfirmed = false;
+  // UI Components
+  private characterCards: CharacterCard[] = [];
+  private selectionTimer!: SelectionTimer;
+  private opponentStatus!: OpponentStatus;
+  private titleText!: Phaser.GameObjects.Text;
+  private instructionText!: Phaser.GameObjects.Text;
+  private confirmButton!: Phaser.GameObjects.Container;
+  private statsPanel!: Phaser.GameObjects.Container;
+  private statsText!: Phaser.GameObjects.Text;
+  private selectedNameText!: Phaser.GameObjects.Text;
+  private selectedThemeText!: Phaser.GameObjects.Text;
+  private statsOverlay!: StatsOverlay;
 
-    // Ban state
-    private myBan: Character | null = null;
-    private opponentBan: Character | null = null;
-    private bannedCharacters = new Set<string>();
-    private hasLockedBan = false;
-    private hasOpponentLockedBan = false;
+  // State
+  private phase: SelectionPhase = "BANNING";
+  private selectedCharacter: Character | null = null;
+  private confirmedCharacter: Character | null = null;
+  private opponentCharacter: Character | null = null;
+  private isConfirmed: boolean = false;
 
-    // Deadline-based timers (Date.now ms)
-    private botBanRevealAt = 0;
-    private banToPickTransitionAt = 0;
-    private botPickAt = 0;
-    private revealBothReadyAt = 0;
-    private matchStartTransitionAt = 0;
-    private timerDeadlineAt = 0;
+  // Ban State
+  private myBan: Character | null = null;
+  private opponentBan: Character | null = null;
 
-    // Bot
-    private botBanTarget?: string;
-    private botPickTarget?: string;
+  private bannedCharacters: Set<string> = new Set();
+  private hasLockedBan: boolean = false;
+  private hasOpponentLockedBan: boolean = false;
 
-    // UI elements
-    private titleText!: Phaser.GameObjects.Text;
-    private instructionText!: Phaser.GameObjects.Text;
-    private timerText!: Phaser.GameObjects.Text;
-    private opponentStatusText!: Phaser.GameObjects.Text;
-    private nameText!: Phaser.GameObjects.Text;
-    private themeText!: Phaser.GameObjects.Text;
-    private confirmBtn!: Phaser.GameObjects.Container;
-    private confirmBtnBg!: Phaser.GameObjects.Graphics;
-    private confirmBtnText!: Phaser.GameObjects.Text;
-    private cardContainers: Phaser.GameObjects.Container[] = [];
-    private cardCharacterMap: Map<Phaser.GameObjects.Container, Character> = new Map();
-    private statBars!: Phaser.GameObjects.Container;
+  // Deadline-based timers (Date.now ms)
+  private channelReadyFallbackAt: number = 0;
+  private channelReadyHandler?: () => void;
+  private banToPickTransitionAt: number = 0;
+  private revealBothReadyAt: number = 0;
+  private matchStartTransitionAt: number = 0;
 
-    // Layout
-    private readonly CARD_W = 108;
-    private readonly CARD_H = 130;
-    private readonly CARD_GAP = 8;
-    private readonly GRID_COLS = 10;
-    private readonly GRID_Y = 370;
+  // Visibility change handler reference for cleanup
+  private visibilityHandler?: () => void;
 
-    // Visibility handler
-    private visibilityHandler?: () => void;
+  // Layout constants
+  private readonly CARD_WIDTH = 110;
+  private readonly CARD_HEIGHT = 140;
+  private readonly CARD_SPACING = 10;
+  private readonly GRID_COLS = 10;
+  private readonly GRID_START_Y = 360;
 
-    constructor() {
-        super({ key: "CharacterSelectScene" });
+  constructor() {
+    super({ key: "CharacterSelectScene" });
+  }
+
+  // =========================================================================
+  // LIFECYCLE
+  // =========================================================================
+
+  init(data: CharacterSelectSceneConfig): void {
+    this.config = {
+      matchId: data?.matchId || "unknown",
+      playerAddress: data?.playerAddress || "",
+      opponentAddress: data?.opponentAddress || "",
+      isHost: data?.isHost ?? true,
+      selectionTimeLimit: data?.selectionTimeLimit ?? 30,
+      selectionDeadlineAt: data?.selectionDeadlineAt,
+      existingPlayerCharacter: data?.existingPlayerCharacter,
+      existingOpponentCharacter: data?.existingOpponentCharacter,
+      existingPlayerBan: data?.existingPlayerBan,
+      existingOpponentBan: data?.existingOpponentBan,
+      ownedCharacterIds: data?.ownedCharacterIds || [
+        "cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter",
+      ],
+    };
+    this.resetState();
+  }
+
+  private resetState(): void {
+    this.phase = "BANNING";
+    this.selectedCharacter = null;
+    this.confirmedCharacter = null;
+    this.opponentCharacter = null;
+    this.isConfirmed = false;
+    this.characterCards = [];
+
+    this.myBan = null;
+    this.opponentBan = null;
+    this.bannedCharacters.clear();
+    this.hasLockedBan = false;
+    this.hasOpponentLockedBan = false;
+
+    this.channelReadyFallbackAt = 0;
+    this.channelReadyHandler = undefined;
+    this.banToPickTransitionAt = 0;
+    this.revealBothReadyAt = 0;
+    this.matchStartTransitionAt = 0;
+  }
+
+  preload(): void {
+    for (const character of CHARACTER_ROSTER) {
+      this.load.image(`portrait-${character.id}`, `/characters/${character.id}/portrait.webp`);
+      this.load.image(`portrait-${character.id}-fallback`, `/characters/${character.id}/idle.webp`);
     }
 
-    // =========================================================================
-    // LIFECYCLE
-    // =========================================================================
+    this.load.image("select-bg", "/assets/background_1.png");
+    this.load.image("lock-icon", "/assets/lock.png");
 
-    init(data: CharacterSelectSceneConfig): void {
-        this.config = {
-            matchId: data?.matchId || "unknown",
-            playerAddress: data?.playerAddress || "",
-            opponentAddress: data?.opponentAddress || "",
-            isHost: data?.isHost ?? true,
-            selectionTimeLimit: data?.selectionTimeLimit ?? 20,
-            selectionDeadlineAt: data?.selectionDeadlineAt,
-            existingPlayerCharacter: data?.existingPlayerCharacter,
-            existingOpponentCharacter: data?.existingOpponentCharacter,
-            existingPlayerBan: data?.existingPlayerBan,
-            existingOpponentBan: data?.existingOpponentBan,
-            isBot: data?.isBot,
-            botBanId: data?.botBanId,
-        };
-        this.resetState();
+    this.load.audio("bgm_select", "/assets/audio/character-selection.mp3");
+    this.load.audio("sfx_hover", "/assets/audio/hover.mp3");
+    this.load.audio("sfx_click", "/assets/audio/click.mp3");
+  }
+
+  create(): void {
+    this.createBackground();
+    this.createTitle();
+    this.createCharacterGrid();
+    this.createSelectionTimer();
+    this.createOpponentStatus();
+    this.createConfirmButton();
+    this.createSelectedNameDisplay();
+    this.createStatsDisplay();
+    this.createInstructions();
+
+    // Stats Overlay (Detailed)
+    this.statsOverlay = new StatsOverlay(this);
+
+    this.setupEventListeners();
+    this.setupVisibilityChangeHandler();
+
+    // Restore existing selections (reconnection)
+    this.restoreExistingSelectionsUI();
+
+    // Listen for channel ready to trigger API calls
+    this.setupChannelReadyHandler();
+
+    // Start the selection timer
+    this.selectionTimer.start();
+
+    // Background music
+    this.sound.pauseOnBlur = false;
+    if (this.sound.get("bgm_select")) {
+      if (!this.sound.get("bgm_select").isPlaying) {
+        this.sound.play("bgm_select", { loop: true, volume: 0.3 });
+      }
+    } else {
+      this.sound.play("bgm_select", { loop: true, volume: 0.3 });
     }
 
-    private resetState(): void {
-        this.phase = "BANNING";
-        this.selectedCharacter = null;
-        this.confirmedCharacter = null;
-        this.opponentCharacter = null;
-        this.isConfirmed = false;
-        this.myBan = null;
-        this.opponentBan = null;
-        this.bannedCharacters.clear();
-        this.hasLockedBan = false;
-        this.hasOpponentLockedBan = false;
-        this.botBanRevealAt = 0;
-        this.banToPickTransitionAt = 0;
-        this.botPickAt = 0;
-        this.revealBothReadyAt = 0;
-        this.matchStartTransitionAt = 0;
-        this.timerDeadlineAt = 0;
-        this.cardContainers = [];
-        this.cardCharacterMap = new Map();
-    }
+    EventBus.emit("character_select_ready", { matchId: this.config.matchId });
+  }
 
-    preload(): void {
-        for (const c of CHARACTER_ROSTER) {
-            this.load.image(`portrait-${c.id}`, `/characters/${c.id}/portrait.webp`);
-            this.load.image(`portrait-${c.id}-png`, `/characters/${c.id}/portrait.png`);
-            this.load.image(`portrait-${c.id}-idle`, `/characters/${c.id}/idle.png`);
+  // =========================================================================
+  // CHANNEL READY HANDLER
+  // =========================================================================
+
+  private setupChannelReadyHandler(): void {
+    const needsMatchStart = this.confirmedCharacter && this.opponentCharacter;
+    const needsConfirmation = this.confirmedCharacter && !this.opponentCharacter;
+
+    if (needsMatchStart || needsConfirmation) {
+      const handleChannelReady = () => {
+        EventBus.off("channel_ready", handleChannelReady);
+        if (this.confirmedCharacter) {
+          EventBus.emit("selection_confirmed", {
+            characterId: this.confirmedCharacter.id,
+          });
         }
+      };
+
+      EventBus.on("channel_ready", handleChannelReady);
+      this.channelReadyHandler = handleChannelReady;
+
+      this.channelReadyFallbackAt = Date.now() + 500;
+    }
+  }
+
+  // =========================================================================
+  // RESTORE (RECONNECTION)
+  // =========================================================================
+
+  private restoreExistingSelectionsUI(): void {
+    // STEP 1: Restore Bans
+    if (this.config.existingPlayerBan) {
+      const bannedChar = getCharacter(this.config.existingPlayerBan);
+      if (bannedChar) {
+        this.myBan = bannedChar;
+        this.hasLockedBan = true;
+        this.bannedCharacters.add(bannedChar.id);
+        this.markCardAsBanned(bannedChar.id);
+      }
     }
 
-    create(): void {
-        this.createBackground();
-        this.createTitle();
-        this.createTimer();
-        this.createOpponentStatus();
-        this.createNameDisplay();
-        this.createStatBars();
-        this.createCharacterGrid();
-        this.createConfirmButton();
-        this.createInstructions();
-        this.setupEventListeners();
-        this.setupVisibilityHandler();
+    const opponentBanId = this.config.existingOpponentBan;
 
-        // Bot init
-        if (this.config.isBot || !this.config.opponentAddress) {
-            this.config.isBot = true;
-            if (this.config.botBanId) {
-                this.botBanTarget = this.config.botBanId;
-            } else {
-                const ids = CHARACTER_ROSTER.map((c) => c.id);
-                this.botBanTarget = ids[Math.floor(Math.random() * ids.length)];
-            }
-            if (this.config.existingOpponentCharacter) {
-                this.botPickTarget = this.config.existingOpponentCharacter;
-            } else {
-                const available = CHARACTER_ROSTER.filter((c) => c.id !== this.botBanTarget).map((c) => c.id);
-                this.botPickTarget = available[Math.floor(Math.random() * available.length)];
-            }
-            if (!this.config.existingOpponentBan) {
-                this.botBanRevealAt = Date.now() + 3000 + Math.random() * 3000;
-            }
-        }
-
-        // Restore existing selections (reconnection)
-        this.restoreExistingSelections();
-
-        // Start timer
-        this.startTimer(this.config.selectionTimeLimit ?? 20);
-
-        EventBus.emit("character_select_ready", { matchId: this.config.matchId });
+    if (opponentBanId) {
+      const bannedChar = getCharacter(opponentBanId);
+      if (bannedChar) {
+        this.opponentBan = bannedChar;
+        this.hasOpponentLockedBan = true;
+        this.bannedCharacters.add(bannedChar.id);
+        this.markCardAsBanned(bannedChar.id);
+      }
     }
 
-    // =========================================================================
-    // BACKGROUND
-    // =========================================================================
+    // STEP 2: Determine current phase
+    const bothBansComplete = this.hasLockedBan && this.hasOpponentLockedBan;
 
-    private createBackground(): void {
-        const g = this.add.graphics();
-        // Dark gradient
-        g.fillGradientStyle(0x050505, 0x050505, 0x0a0a0a, 0x0a0a0a, 1);
-        g.fillRect(0, 0, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
-        // Subtle gold radial
-        const r = this.add.graphics();
-        r.fillStyle(0xf0b71f, 0.03);
-        r.fillCircle(GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y, 500);
-        // Overlay
-        const ov = this.add.graphics();
-        ov.fillStyle(0x000000, 0.15);
-        ov.fillRect(0, 0, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
+    if (bothBansComplete && !this.config.existingPlayerCharacter) {
+      this.phase = "PICKING";
+      this.isConfirmed = false;
+      this.titleText?.setText("CHOOSE YOUR FIGHTER");
+      this.titleText?.setColor("#ffffff");
+      this.instructionText?.setText("Bans Locked! Choose your fighter (Blind Pick)");
+      this.updateCardsForPickPhase();
+    } else if (this.hasLockedBan && !this.hasOpponentLockedBan) {
+      this.instructionText?.setText("Waiting for opponent to ban...");
     }
 
-    // =========================================================================
-    // TITLE
-    // =========================================================================
-
-    private createTitle(): void {
-        this.titleText = this.add.text(GAME_DIMENSIONS.CENTER_X, 40, "BAN PHASE", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "32px",
-            color: "#ef4444",
-            fontStyle: "bold",
-        }).setOrigin(0.5);
-
-        // Match id label
-        this.add.text(GAME_DIMENSIONS.CENTER_X, 75, `Match: ${this.config.matchId.slice(0, 8)}`, {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "12px",
-            color: "#555555",
-        }).setOrigin(0.5);
-    }
-
-    // =========================================================================
-    // TIMER
-    // =========================================================================
-
-    private createTimer(): void {
-        this.timerText = this.add.text(GAME_DIMENSIONS.WIDTH - 80, 40, "20", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "36px",
-            color: "#ffffff",
-            fontStyle: "bold",
-        }).setOrigin(0.5);
-    }
-
-    private startTimer(seconds: number): void {
-        if (this.config.selectionDeadlineAt) {
-            this.timerDeadlineAt = new Date(this.config.selectionDeadlineAt).getTime();
-        } else {
-            this.timerDeadlineAt = Date.now() + seconds * 1000;
-        }
-    }
-
-    // =========================================================================
-    // OPPONENT STATUS
-    // =========================================================================
-
-    private createOpponentStatus(): void {
-        this.opponentStatusText = this.add.text(GAME_DIMENSIONS.WIDTH - 80, 80, "SELECTING...", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "10px",
-            color: "#F0B71F",
-        }).setOrigin(0.5);
-
-        // Pulsing dot
-        const dot = this.add.circle(GAME_DIMENSIONS.WIDTH - 130, 80, 4, 0xf0b71f);
-        this.tweens.add({ targets: dot, alpha: { from: 1, to: 0.3 }, duration: 800, yoyo: true, repeat: -1 });
-    }
-
-    // =========================================================================
-    // NAME DISPLAY (CENTER)
-    // =========================================================================
-
-    private createNameDisplay(): void {
-        this.nameText = this.add.text(GAME_DIMENSIONS.CENTER_X, 220, "", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "40px",
-            color: "#ffffff",
-            fontStyle: "bold",
-        }).setOrigin(0.5).setAlpha(0);
-
-        this.themeText = this.add.text(GAME_DIMENSIONS.CENTER_X, 265, "", {
-            fontFamily: "Arial, sans-serif",
-            fontSize: "16px",
-            color: "#aaaaaa",
-            fontStyle: "italic",
-        }).setOrigin(0.5).setAlpha(0);
-    }
-
-    private showCharacterInfo(char: Character): void {
-        this.nameText.setText(char.name.toUpperCase()).setAlpha(1);
-        this.themeText.setText(char.theme).setAlpha(1);
-        this.tweens.add({
-            targets: this.nameText,
-            scale: { from: 1.1, to: 1 },
-            duration: 200,
-            ease: "Back.out",
-        });
-        this.updateStatBars(char);
-    }
-
-    // =========================================================================
-    // STAT BARS
-    // =========================================================================
-
-    private createStatBars(): void {
-        this.statBars = this.add.container(GAME_DIMENSIONS.CENTER_X, 310).setAlpha(0);
-    }
-
-    private updateStatBars(char: Character): void {
-        this.statBars.removeAll(true);
-        const stats = [
-            { label: "SPD", val: char.archetype === "speed" ? 5 : char.archetype === "precision" ? 3 : char.archetype === "tech" ? 3 : 1 },
-            { label: "PWR", val: char.archetype === "tank" ? 5 : char.archetype === "tech" ? 4 : char.archetype === "precision" ? 3 : 2 },
-            { label: "DEF", val: char.archetype === "tank" ? 5 : char.archetype === "tech" ? 3 : 2 },
-            { label: "TEC", val: char.archetype === "precision" ? 5 : char.archetype === "tech" ? 4 : char.archetype === "speed" ? 3 : 2 },
-        ];
-        const totalW = 300;
-        const barH = 6;
-        const gap = 18;
-        stats.forEach((s, i) => {
-            const y = i * gap;
-            const label = this.add.text(-totalW / 2, y - 4, s.label, {
-                fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: "#888",
-            });
-            const bgBar = this.add.graphics().fillStyle(0x222222).fillRoundedRect(-totalW / 2 + 40, y, totalW - 40, barH, 3);
-            const fillW = ((totalW - 40) * s.val) / 5;
-            const fillBar = this.add.graphics().fillStyle(0xf0b71f).fillRoundedRect(-totalW / 2 + 40, y, fillW, barH, 3);
-            this.statBars.add([label, bgBar, fillBar]);
-        });
-        this.statBars.setAlpha(1);
-    }
-
-    // =========================================================================
-    // CHARACTER GRID
-    // =========================================================================
-
-    private createCharacterGrid(): void {
-        const totalW = this.CARD_W * this.GRID_COLS + this.CARD_GAP * (this.GRID_COLS - 1);
-        const startX = (GAME_DIMENSIONS.WIDTH - totalW) / 2;
-
-        CHARACTER_ROSTER.forEach((char, idx) => {
-            const col = idx % this.GRID_COLS;
-            const row = Math.floor(idx / this.GRID_COLS);
-            const x = startX + col * (this.CARD_W + this.CARD_GAP);
-            const y = this.GRID_Y + row * (this.CARD_H + 12);
-
-            const container = this.add.container(x, y);
-
-            // Card background
-            const bg = this.add.graphics();
-            bg.fillStyle(0x111111, 1);
-            bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-            bg.lineStyle(1.5, 0x333333, 1);
-            bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-            container.add(bg);
-
-            // Portrait image — try various formats
-            const portraitKey = this.textures.exists(`portrait-${char.id}`)
-                ? `portrait-${char.id}`
-                : this.textures.exists(`portrait-${char.id}-png`)
-                ? `portrait-${char.id}-png`
-                : this.textures.exists(`portrait-${char.id}-idle`)
-                ? `portrait-${char.id}-idle`
-                : null;
-
-            if (portraitKey) {
-                const img = this.add.image(this.CARD_W / 2, this.CARD_H / 2 - 10, portraitKey);
-                img.setDisplaySize(this.CARD_W - 16, this.CARD_H - 36);
-                container.add(img);
-            }
-
-            // Archetype color bar at bottom
-            const color = Phaser.Display.Color.HexStringToColor(char.colors.primary).color;
-            const bar = this.add.graphics().fillStyle(color, 0.7).fillRect(4, this.CARD_H - 22, this.CARD_W - 8, 3);
-            container.add(bar);
-
-            // Name label
-            const nameLabel = this.add.text(this.CARD_W / 2, this.CARD_H - 12, char.name.split(" ")[0], {
-                fontFamily: "Orbitron, sans-serif",
-                fontSize: "9px",
-                color: "#cccccc",
-            }).setOrigin(0.5);
-            container.add(nameLabel);
-
-            // Make interactive
-            container.setSize(this.CARD_W, this.CARD_H);
-            container.setInteractive({ useHandCursor: true });
-
-            container.on("pointerover", () => {
-                if (!this.bannedCharacters.has(char.id)) {
-                    this.showCharacterInfo(char);
-                    bg.clear();
-                    bg.fillStyle(0x1a1a1a, 1);
-                    bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-                    bg.lineStyle(2, 0xf0b71f, 0.6);
-                    bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-                }
-            });
-
-            container.on("pointerout", () => {
-                if (this.selectedCharacter?.id !== char.id) {
-                    bg.clear();
-                    bg.fillStyle(0x111111, 1);
-                    bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-                    bg.lineStyle(1.5, 0x333333, 1);
-                    bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-                }
-            });
-
-            container.on("pointerdown", () => {
-                this.onCardClick(char);
-            });
-
-            this.cardContainers.push(container);
-            this.cardCharacterMap.set(container, char);
-        });
-    }
-
-    // =========================================================================
-    // CONFIRM BUTTON
-    // =========================================================================
-
-    private createConfirmButton(): void {
-        const w = 200, h = 48;
-        const x = GAME_DIMENSIONS.CENTER_X;
-        const y = GAME_DIMENSIONS.HEIGHT - 60;
-
-        this.confirmBtn = this.add.container(x, y);
-
-        this.confirmBtnBg = this.add.graphics();
-        this.confirmBtnBg.fillStyle(0xf0b71f, 1);
-        this.confirmBtnBg.fillRoundedRect(-w / 2, -h / 2, w, h, 8);
-
-        this.confirmBtnText = this.add.text(0, 0, "BAN CHARACTER", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "16px",
-            color: "#000000",
-            fontStyle: "bold",
-        }).setOrigin(0.5);
-
-        this.confirmBtn.add([this.confirmBtnBg, this.confirmBtnText]);
-        this.confirmBtn.setSize(w, h);
-        this.confirmBtn.setInteractive({ useHandCursor: true });
-
-        this.confirmBtn.on("pointerover", () => {
-            if (!this.isConfirmed && this.selectedCharacter) this.confirmBtn.setScale(1.05);
-        });
-        this.confirmBtn.on("pointerout", () => this.confirmBtn.setScale(1));
-        this.confirmBtn.on("pointerdown", () => this.confirmSelection());
-
-        this.confirmBtn.setVisible(false).setAlpha(0);
-    }
-
-    private showConfirmButton(): void {
-        this.confirmBtn.setVisible(true);
-        this.tweens.add({ targets: this.confirmBtn, alpha: 1, duration: 200, ease: "Power2" });
-    }
-
-    private hideConfirmButton(): void {
-        this.tweens.add({
-            targets: this.confirmBtn,
-            alpha: 0,
-            duration: 200,
-            ease: "Power2",
-            onComplete: () => this.confirmBtn.setVisible(false),
-        });
-    }
-
-    // =========================================================================
-    // INSTRUCTIONS
-    // =========================================================================
-
-    private createInstructions(): void {
-        this.instructionText = this.add.text(
-            GAME_DIMENSIONS.CENTER_X,
-            GAME_DIMENSIONS.HEIGHT - 20,
-            "Select a character to ban, then confirm",
-            { fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: "#666666" }
-        ).setOrigin(0.5);
-    }
-
-    // =========================================================================
-    // INPUT HANDLERS
-    // =========================================================================
-
-    private onCardClick(char: Character): void {
-        if (this.isConfirmed) return;
-        if (this.bannedCharacters.has(char.id)) return;
-
-        // Deselect previous
-        if (this.selectedCharacter) {
-            this.updateCardVisual(this.selectedCharacter.id, false);
-        }
-
-        this.selectedCharacter = char;
-        this.updateCardVisual(char.id, true);
-        this.showCharacterInfo(char);
-        this.showConfirmButton();
-    }
-
-    private updateCardVisual(charId: string, selected: boolean): void {
-        const container = this.cardContainers.find((c) => this.cardCharacterMap.get(c)?.id === charId);
-        if (!container) return;
-        const bg = container.getAt(0) as Phaser.GameObjects.Graphics;
-        bg.clear();
-        if (selected) {
-            bg.fillStyle(0x1a1500, 1);
-            bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-            bg.lineStyle(2, 0xf0b71f, 1);
-            bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-        } else {
-            bg.fillStyle(0x111111, 1);
-            bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-            bg.lineStyle(1.5, 0x333333, 1);
-            bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-        }
-    }
-
-    private markCardBanned(charId: string): void {
-        const container = this.cardContainers.find((c) => this.cardCharacterMap.get(c)?.id === charId);
-        if (!container) return;
-
-        container.disableInteractive();
-        container.setAlpha(0.35);
-
-        const bannedLabel = this.add.text(this.CARD_W / 2, this.CARD_H / 2, "BANNED", {
-            fontFamily: "Orbitron, sans-serif",
-            fontSize: "14px",
-            color: "#ff0000",
-            backgroundColor: "#000000cc",
-            padding: { x: 4, y: 2 },
-            fontStyle: "bold",
-        }).setOrigin(0.5).setRotation(-0.2);
-        container.add(bannedLabel);
-    }
-
-    // =========================================================================
-    // CONFIRM SELECTION
-    // =========================================================================
-
-    private confirmSelection(): void {
-        if (this.isConfirmed || !this.selectedCharacter) return;
+    // STEP 3: Restore Character Picks
+    if (this.config.existingPlayerCharacter) {
+      const character = getCharacter(this.config.existingPlayerCharacter);
+      if (character) {
+        this.phase = "PICKING";
+        this.selectedCharacter = character;
+        this.confirmedCharacter = character;
         this.isConfirmed = true;
 
-        if (this.phase === "BANNING") {
-            // ---- BAN ----
-            this.myBan = this.selectedCharacter;
-            this.hasLockedBan = true;
-            this.bannedCharacters.add(this.selectedCharacter.id);
-            this.markCardBanned(this.selectedCharacter.id);
-
-            EventBus.emit("game:sendBanConfirmed", { characterId: this.selectedCharacter.id });
-
-            this.hideConfirmButton();
-            this.instructionText.setText("Waiting for opponent to ban...");
-            this.checkBanPhaseComplete();
-            return;
+        const card = this.characterCards.find(
+          (c) => c.getCharacter()?.id === character.id
+        );
+        if (card) {
+          card.select();
+          card.lock();
         }
 
-        // ---- PICK ----
-        this.confirmedCharacter = this.selectedCharacter;
-
-        // Lock card visually (green border)
-        const container = this.cardContainers.find((c) => this.cardCharacterMap.get(c)?.id === this.selectedCharacter?.id);
-        if (container) {
-            const bg = container.getAt(0) as Phaser.GameObjects.Graphics;
-            bg.clear();
-            bg.fillStyle(0x0a1a0a, 1);
-            bg.fillRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-            bg.lineStyle(2.5, 0x22c55e, 1);
-            bg.strokeRoundedRect(0, 0, this.CARD_W, this.CARD_H, 8);
-        }
-
-        // Disable all other cards
-        this.cardContainers.forEach((c) => {
-            const ch = this.cardCharacterMap.get(c);
-            if (ch && ch.id !== this.selectedCharacter?.id) {
-                c.disableInteractive();
-                c.setAlpha(0.3);
-            }
+        this.characterCards.forEach((c) => {
+          if (c.getCharacter()?.id !== character.id) c.disable();
         });
 
         this.hideConfirmButton();
-        this.timerText.setText("✓").setColor("#22c55e");
-        this.instructionText.setText("Waiting for opponent...");
-
-        EventBus.emit("selection_confirmed", { characterId: this.confirmedCharacter.id });
-        this.checkBothReady();
+        this.selectionTimer?.showLockedIn();
+        this.instructionText?.setText("Waiting for opponent...");
+      }
     }
 
-    // =========================================================================
-    // BAN FLOW
-    // =========================================================================
+    if (this.config.existingOpponentCharacter) {
+      const opponent = getCharacter(this.config.existingOpponentCharacter);
+      if (opponent) {
+        this.opponentCharacter = opponent;
+        this.opponentStatus?.showCharacterPreview(opponent.name, opponent.theme);
+      }
+    }
 
-    private onOpponentBanConfirmed(characterId: string, playerRole?: string): void {
-        const myRole = this.config.isHost ? "player1" : "player2";
-        if (playerRole && playerRole === myRole) return;
-        if (this.opponentBan?.id === characterId) return;
+    // STEP 4: Update UI for final state
+    if (this.confirmedCharacter && this.opponentCharacter) {
+      this.instructionText?.setText("Both players ready! Connecting...");
+      this.instructionText?.setColor("#22c55e");
+    }
+  }
 
-        const char = getCharacter(characterId);
-        if (char) {
-            this.opponentBan = char;
-            this.bannedCharacters.add(characterId);
-            this.markCardBanned(characterId);
+  private markCardAsBanned(characterId: string): void {
+    const card = this.characterCards.find((c) => c.getCharacter()?.id === characterId);
+    if (!card) return;
+
+    card.disable();
+
+    const bannedText = this.add
+      .text(this.CARD_WIDTH / 2, this.CARD_HEIGHT / 2, "BANNED", {
+        fontFamily: "Orbitron, sans-serif",
+        fontSize: "24px",
+        color: "#ff0000",
+        backgroundColor: "#000000cc",
+        padding: { x: 8, y: 4 },
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5);
+    bannedText.setRotation(-0.2);
+    card.add(bannedText);
+    card.setAlpha(0.5);
+  }
+
+  private updateCardsForPickPhase(): void {
+    const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
+
+    this.characterCards.forEach((card) => {
+      const charId = card.getCharacter()?.id;
+      const isStarter = STARTERS.includes(charId || "");
+      const isOwned = this.config.ownedCharacterIds?.includes(charId || "");
+      const isUnlocked = isStarter || isOwned;
+
+      if (charId && (this.bannedCharacters.has(charId) || !isUnlocked)) {
+        card.disable();
+        card.setAlpha(0.3);
+      } else {
+        card.enable();
+        if ((card as any)["deselect"]) card.deselect();
+      }
+    });
+
+    const buttonText = this.confirmButton?.getAt(1) as Phaser.GameObjects.Text;
+    if (buttonText) buttonText.setText("LOCK IN");
+  }
+
+  // =========================================================================
+  // BACKGROUND
+  // =========================================================================
+
+  private createBackground(): void {
+    const graphics = this.add.graphics();
+    graphics.fillGradientStyle(0x1a1a2e, 0x1a1a2e, 0x16213e, 0x16213e, 1);
+    graphics.fillRect(0, 0, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
+
+    if (this.textures.exists("select-bg")) {
+      const bg = this.add.image(
+        GAME_DIMENSIONS.CENTER_X,
+        GAME_DIMENSIONS.CENTER_Y,
+        "select-bg"
+      );
+      bg.setDisplaySize(GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
+    }
+
+    const overlay = this.add.graphics();
+    overlay.fillStyle(0x000000, 0.3);
+    overlay.fillRect(0, 0, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
+  }
+
+  // =========================================================================
+  // TITLE
+  // =========================================================================
+
+  private createTitle(): void {
+    this.titleText = this.add.text(
+      GAME_DIMENSIONS.CENTER_X,
+      50,
+      "BAN PHASE - BAN 1 CHARACTER",
+      {
+        fontFamily: "Orbitron, sans-serif",
+        fontSize: "36px",
+        color: "#ef4444",
+        fontStyle: "bold",
+      }
+    );
+    this.titleText.setOrigin(0.5);
+
+    TextFactory.createLabel(
+      this,
+      GAME_DIMENSIONS.CENTER_X,
+      90,
+      `Match: ${this.config.matchId.slice(0, 8)}`,
+      { fontSize: "14px", color: "#888888" }
+    ).setOrigin(0.5);
+  }
+
+  // =========================================================================
+  // CHARACTER GRID
+  // =========================================================================
+
+  private createCharacterGrid(): void {
+    const totalWidth =
+      this.CARD_WIDTH * this.GRID_COLS +
+      this.CARD_SPACING * (this.GRID_COLS - 1);
+    const startX = (GAME_DIMENSIONS.WIDTH - totalWidth) / 2;
+
+    const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
+
+    CHARACTER_ROSTER.forEach((character, index) => {
+      const col = index % this.GRID_COLS;
+      const row = Math.floor(index / this.GRID_COLS);
+
+      const x = startX + col * (this.CARD_WIDTH + this.CARD_SPACING);
+      const y = this.GRID_START_Y + row * (this.CARD_HEIGHT + 20);
+
+      const isStarter = STARTERS.includes(character.id);
+      const isOwned = this.config.ownedCharacterIds?.includes(character.id);
+      const isUnlocked = isStarter || isOwned;
+
+      const card = new CharacterCard(this, {
+        x,
+        y,
+        character,
+        width: this.CARD_WIDTH,
+        height: this.CARD_HEIGHT,
+        onSelect: (char) => {
+          if (isUnlocked || this.phase === "BANNING") {
+            this.onCharacterSelect(char);
+          } else {
+            this.sound.play("sfx_click", { volume: 0.2, detune: -500 });
+          }
+        },
+        onHover: (char) => {
+          this.updateSelectedNameDisplay(char);
+        },
+        onInfo: (char) => this.statsOverlay.show(char),
+      });
+
+      this.characterCards.push(card);
+    });
+  }
+
+  // =========================================================================
+  // SELECTION TIMER
+  // =========================================================================
+
+  private createSelectionTimer(): void {
+    let deadlineTimestamp: number | undefined = undefined;
+    if (this.config.selectionDeadlineAt) {
+      const parsed = new Date(this.config.selectionDeadlineAt).getTime();
+      if (!Number.isNaN(parsed) && parsed > Date.now()) {
+        deadlineTimestamp = parsed;
+      }
+    }
+
+    this.selectionTimer = new SelectionTimer(this, {
+      x: GAME_DIMENSIONS.CENTER_X,
+      y: 150,
+      duration: this.config.selectionTimeLimit ?? 30,
+      deadlineTimestamp,
+      warningThreshold: 10,
+      criticalThreshold: 5,
+      onTimeUp: () => this.onTimeUp(),
+    });
+  }
+
+  // =========================================================================
+  // OPPONENT STATUS
+  // =========================================================================
+
+  private createOpponentStatus(): void {
+    this.opponentStatus = new OpponentStatus(this, {
+      x: GAME_DIMENSIONS.WIDTH - 120,
+      y: 150,
+      opponentAddress: this.config.opponentAddress,
+    });
+    this.opponentStatus.setWaiting();
+  }
+
+  // =========================================================================
+  // NAME DISPLAY (CENTER)
+  // =========================================================================
+
+  private createSelectedNameDisplay(): void {
+    const centerX = GAME_DIMENSIONS.CENTER_X;
+    const centerY = 280;
+
+    this.selectedNameText = this.add
+      .text(centerX, centerY, "", {
+        fontFamily: "Orbitron, sans-serif",
+        fontSize: "48px",
+        color: "#ffffff",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setAlpha(0);
+
+    this.selectedThemeText = this.add
+      .text(centerX, centerY + 50, "", {
+        fontFamily: "Arial, sans-serif",
+        fontSize: "20px",
+        color: "#aaa",
+        fontStyle: "italic",
+      })
+      .setOrigin(0.5)
+      .setAlpha(0);
+  }
+
+  private updateSelectedNameDisplay(character: Character): void {
+    if (!character) return;
+
+    this.selectedNameText.setText(character.name.toUpperCase());
+    this.selectedNameText.setAlpha(1);
+
+    this.selectedThemeText.setText(character.theme);
+    this.selectedThemeText.setAlpha(1);
+
+    this.tweens.add({
+      targets: [this.selectedNameText],
+      scale: { from: 1.1, to: 1 },
+      duration: 200,
+      ease: "Back.out",
+    });
+  }
+
+  // =========================================================================
+  // CONFIRM BUTTON
+  // =========================================================================
+
+  private createConfirmButton(): void {
+    const buttonWidth = 200;
+    const buttonHeight = 50;
+    const x = GAME_DIMENSIONS.CENTER_X;
+    const y = GAME_DIMENSIONS.HEIGHT - 80;
+
+    this.confirmButton = this.add.container(x, y);
+
+    const bg = this.add.graphics();
+    bg.fillStyle(0x22c55e, 1);
+    bg.fillRoundedRect(
+      -buttonWidth / 2,
+      -buttonHeight / 2,
+      buttonWidth,
+      buttonHeight,
+      8
+    );
+
+    const text = this.add.text(0, 0, "BAN CHARACTER", {
+      fontFamily: "Orbitron, sans-serif",
+      fontSize: "20px",
+      color: "#ffffff",
+      fontStyle: "bold",
+    });
+    text.setOrigin(0.5);
+
+    this.confirmButton.add([bg, text]);
+    this.confirmButton.setSize(buttonWidth, buttonHeight);
+    this.confirmButton.setInteractive({ useHandCursor: true });
+
+    this.confirmButton.on("pointerover", () => {
+      if (!this.isConfirmed && this.selectedCharacter) {
+        this.confirmButton.setScale(1.05);
+        this.sound.play("sfx_hover", { volume: 0.5 });
+      }
+    });
+
+    this.confirmButton.on("pointerout", () => {
+      this.confirmButton.setScale(1);
+    });
+
+    this.confirmButton.on("pointerdown", () => {
+      this.sound.play("sfx_click", { volume: 0.5 });
+      this.confirmSelection();
+    });
+
+    this.confirmButton.setVisible(false);
+    this.confirmButton.setAlpha(0);
+  }
+
+  // =========================================================================
+  // STATS DISPLAY
+  // =========================================================================
+
+  private createStatsDisplay(): void {
+    this.statsPanel = this.add.container(GAME_DIMENSIONS.CENTER_X, 230);
+
+    this.statsText = this.add.text(0, 0, "", {
+      fontFamily: "Orbitron, sans-serif",
+      fontSize: "16px",
+      color: "#4ade80",
+      align: "center",
+      stroke: "#000000",
+      strokeThickness: 3,
+    });
+    this.statsText.setOrigin(0.5);
+
+    this.statsText.postFX.addGlow(0x4ade80, 0.5, 0, false, 0.1, 10);
+
+    this.statsPanel.add(this.statsText);
+    this.statsPanel.setVisible(false);
+  }
+
+  private updateStatsDisplay(character: Character): void {
+    const stats = getCharacterCombatStats(character.id);
+    let archetype = "Balanced";
+    if (character.archetype === "tank") archetype = "Tank / Heavy Hitter";
+    if (character.archetype === "speed") archetype = "Glass Cannon / Fast";
+    if (character.archetype === "precision") archetype = "Aggressive Specialist";
+    if (character.archetype === "tech") archetype = "Tech Specialist";
+
+    const text = `${character.name.toUpperCase()}\nHP: ${stats.maxHp}  |  Energy: ${stats.maxEnergy}\n${archetype}`;
+    this.statsText.setText(text);
+
+    let color = "#4ade80";
+    if (character.archetype === "tank") color = "#f97316";
+    if (character.archetype === "precision") color = "#ef4444";
+    if (character.archetype === "speed") color = "#a855f7";
+    if (character.archetype === "tech") color = "#3b82f6";
+
+    this.statsText.setColor(color);
+    this.statsPanel.setVisible(true);
+  }
+
+  // =========================================================================
+  // INSTRUCTIONS
+  // =========================================================================
+
+  private createInstructions(): void {
+    this.instructionText = this.add.text(
+      GAME_DIMENSIONS.CENTER_X,
+      GAME_DIMENSIONS.HEIGHT - 30,
+      "Click a character to preview, then Lock In your choice",
+      {
+        fontFamily: "Orbitron, sans-serif",
+        fontSize: "14px",
+        color: "#888888",
+      }
+    );
+    this.instructionText.setOrigin(0.5);
+  }
+
+  // =========================================================================
+  // EVENT LISTENERS
+  // =========================================================================
+
+  private setupEventListeners(): void {
+    EventBus.on("opponent_character_selected", (data: unknown) => {
+      const payload = data as { characterId: string };
+      this.onOpponentSelected(payload.characterId);
+    });
+
+    EventBus.on("opponent_character_confirmed", (data: unknown) => {
+      const payload = data as { characterId: string };
+      this.onOpponentConfirmed(payload.characterId);
+    });
+
+    EventBus.on("match_starting", (data: unknown) => {
+      const payload = data as {
+        countdown: number;
+        player1CharacterId?: string;
+        player2CharacterId?: string;
+      };
+      this.onMatchStarting(payload);
+    });
+
+    EventBus.on("opponent_disconnected", () => {
+      this.opponentStatus.setDisconnected();
+    });
+
+    EventBus.on("game:banConfirmed", (data: unknown) => {
+      const payload = data as { characterId: string; player: string };
+      this.onOpponentBanConfirmed(payload.characterId, payload.player);
+    });
+  }
+
+  // =========================================================================
+  // INPUT HANDLERS
+  // =========================================================================
+
+  private onCharacterSelect(character: Character): void {
+    if (this.isConfirmed) return;
+    if (this.phase === "PICKING" && this.bannedCharacters.has(character.id)) {
+      this.sound.play("sfx_click", { volume: 0.2, detune: -500 });
+      return;
+    }
+
+    if (this.selectedCharacter) {
+      const prevCard = this.characterCards.find(
+        (c) => c.getCharacter()?.id === this.selectedCharacter?.id
+      );
+      prevCard?.deselect();
+    }
+
+    this.sound.play("sfx_click", { volume: 0.5 });
+
+    this.selectedCharacter = character;
+    const newCard = this.characterCards.find(
+      (c) => c.getCharacter()?.id === character.id
+    );
+    newCard?.select();
+
+    this.showConfirmButton();
+    this.updateStatsDisplay(character);
+
+    if (this.phase === "BANNING") {
+      EventBus.emit("game:sendBanSelected", { characterId: character.id });
+    } else {
+      EventBus.emit("character_selected", { characterId: character.id });
+    }
+  }
+
+  // =========================================================================
+  // CONFIRM SELECTION
+  // =========================================================================
+
+  private confirmSelection(): void {
+    if (this.isConfirmed || !this.selectedCharacter) return;
+    this.isConfirmed = true;
+
+    if (this.phase === "BANNING") {
+      this.myBan = this.selectedCharacter;
+      this.hasLockedBan = true;
+      this.bannedCharacters.add(this.selectedCharacter.id);
+
+      const card = this.characterCards.find(
+        (c) => c.getCharacter()?.id === this.selectedCharacter?.id
+      );
+
+      if (card) {
+        card.disable();
+
+        const bannedText = this.add
+          .text(this.CARD_WIDTH / 2, this.CARD_HEIGHT / 2, "BANNED", {
+            fontFamily: "Orbitron, sans-serif",
+            fontSize: "24px",
+            color: "#ff0000",
+            backgroundColor: "#000000cc",
+            padding: { x: 8, y: 4 },
+            fontStyle: "bold",
+          })
+          .setOrigin(0.5);
+        bannedText.setRotation(-0.2);
+        card.add(bannedText);
+      }
+
+      EventBus.emit("game:sendBanConfirmed", { characterId: this.selectedCharacter.id });
+
+      this.hideConfirmButton();
+      this.instructionText.setText("Waiting for opponent to ban...");
+
+      this.checkBanPhaseComplete();
+      return;
+    }
+
+    this.confirmedCharacter = this.selectedCharacter;
+
+    const card = this.characterCards.find(
+      (c) => c.getCharacter()?.id === this.selectedCharacter?.id
+    );
+    card?.lock();
+
+    this.characterCards.forEach((c) => {
+      if (c.getCharacter()?.id !== this.selectedCharacter?.id) c.disable();
+    });
+
+    this.hideConfirmButton();
+    this.selectionTimer.showLockedIn();
+    this.instructionText.setText("Waiting for opponent...");
+
+    EventBus.emit("selection_confirmed", {
+      characterId: this.confirmedCharacter.id,
+    });
+
+    this.checkBothReady();
+  }
+
+  private onOpponentSelected(_characterId: string): void {
+    this.opponentStatus.setSelecting();
+  }
+
+  // =========================================================================
+  // BAN & BLIND PICK LOGIC
+  // =========================================================================
+
+  private onOpponentBanConfirmed(characterId: string, playerRole?: string): void {
+    const myRole = this.config.isHost ? "player1" : "player2";
+    if (playerRole && playerRole === myRole) return;
+    if (this.opponentBan?.id === characterId) return;
+
+    const char = getCharacter(characterId);
+    if (char) {
+      this.opponentBan = char;
+      this.bannedCharacters.add(characterId);
+
+      const card = this.characterCards.find((c) => c.getCharacter()?.id === characterId);
+      if (card) {
+        const bannedText = this.add
+          .text(this.CARD_WIDTH / 2, this.CARD_HEIGHT / 2, "BANNED", {
+            fontFamily: "Orbitron, sans-serif",
+            fontSize: "24px",
+            color: "#ff0000",
+            backgroundColor: "#000000cc",
+            padding: { x: 8, y: 4 },
+            fontStyle: "bold",
+          })
+          .setOrigin(0.5);
+        bannedText.setRotation(-0.2);
+        card.add(bannedText);
+        card.setAlpha(0.5);
+      }
+    }
+    this.hasOpponentLockedBan = true;
+    this.checkBanPhaseComplete();
+  }
+
+  private checkBanPhaseComplete(): void {
+    if (this.phase !== "BANNING") return;
+
+    const oppReady = this.hasOpponentLockedBan || !!this.opponentCharacter;
+
+    if (this.hasLockedBan && oppReady) {
+      this.phase = "TRANSITION";
+      this.instructionText.setText("Ban Phase Complete. Prepare to Pick...");
+
+      const delay = Phaser.Math.Between(2000, 4000);
+      this.banToPickTransitionAt = Date.now() + delay;
+    }
+  }
+
+  private startPickPhase(): void {
+    this.phase = "PICKING";
+    this.isConfirmed = false;
+    this.selectedCharacter = null;
+
+    this.titleText.setText("CHOOSE YOUR FIGHTER");
+    this.titleText.setColor("#ffffff");
+    this.instructionText.setText("Bans Locked! Choose your fighter (Blind Pick)");
+
+    this.updateCardsForPickPhase();
+    this.hideConfirmButton();
+
+    this.selectionTimer.reset(this.config.selectionTimeLimit || 30);
+    this.selectionTimer.start();
+  }
+
+  private onOpponentConfirmed(characterId: string): void {
+    const character = getCharacter(characterId);
+    if (character) {
+      this.opponentCharacter = character;
+      this.opponentStatus.setLockedHidden();
+    }
+    this.checkBothReady();
+  }
+
+  private checkBothReady(): void {
+    if (this.confirmedCharacter && this.opponentCharacter) {
+      this.phase = "REVEAL";
+      this.revealOpponentSelection();
+    }
+  }
+
+  private revealOpponentSelection(): void {
+    if (!this.opponentCharacter) return;
+
+    this.opponentStatus.showCharacterPreview(
+      this.opponentCharacter.name,
+      this.opponentCharacter.theme
+    );
+
+    this.revealBothReadyAt = Date.now() + 1500;
+  }
+
+  // =========================================================================
+  // TIMER EXPIRATION
+  // =========================================================================
+
+  private onTimeUp(): void {
+    if (this.isConfirmed) return;
+
+    if (!this.selectedCharacter) {
+      const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
+      const unlockedCharacters = CHARACTER_ROSTER.filter(
+        (c) =>
+          STARTERS.includes(c.id) ||
+          this.config.ownedCharacterIds?.includes(c.id)
+      );
+
+      if (unlockedCharacters.length > 0) {
+        const randomIndex = Math.floor(Math.random() * unlockedCharacters.length);
+        this.selectedCharacter = unlockedCharacters[randomIndex];
+      } else {
+        this.selectedCharacter = getRandomCharacter();
+      }
+
+      const card = this.characterCards.find(
+        (c) => c.getCharacter()?.id === this.selectedCharacter?.id
+      );
+      card?.select();
+    }
+
+    this.confirmSelection();
+  }
+
+  // =========================================================================
+  // MATCH START & TRANSITION
+  // =========================================================================
+
+  private onMatchStarting(payload: {
+    countdown: number;
+    player1CharacterId?: string;
+    player2CharacterId?: string;
+  }): void {
+    const { countdown, player1CharacterId, player2CharacterId } = payload;
+
+    if (player1CharacterId && player2CharacterId) {
+      const opponentCharacterId = this.config.isHost
+        ? player2CharacterId
+        : player1CharacterId;
+      const playerCharacterId = this.config.isHost
+        ? player1CharacterId
+        : player2CharacterId;
+
+      if (!this.opponentCharacter) {
+        const opponent = getCharacter(opponentCharacterId);
+        if (opponent) {
+          this.opponentCharacter = opponent;
+          this.opponentStatus.showCharacterPreview(opponent.name, opponent.theme);
         }
-        this.hasOpponentLockedBan = true;
-        this.checkBanPhaseComplete();
+      }
+
+      if (!this.confirmedCharacter) {
+        const player = getCharacter(playerCharacterId);
+        if (player) this.confirmedCharacter = player;
+      }
     }
 
-    private checkBanPhaseComplete(): void {
-        if (this.phase !== "BANNING") return;
-        if (this.hasLockedBan && this.hasOpponentLockedBan) {
-            this.phase = "TRANSITION";
-            this.instructionText.setText("Ban Phase Complete. Prepare to Pick...");
-            this.banToPickTransitionAt = Date.now() + Phaser.Math.Between(2000, 3500);
+    this.instructionText.setText(`Match starting in ${countdown}...`);
+    this.instructionText.setColor("#22c55e");
+
+    this.matchStartTransitionAt = Date.now() + countdown * 1000;
+  }
+
+  private transitionToFight(): void {
+    EventBus.off("opponent_character_selected");
+    EventBus.off("opponent_character_confirmed");
+    EventBus.off("match_starting");
+    EventBus.off("opponent_disconnected");
+    EventBus.off("game:banConfirmed");
+
+    if (this.sound.get("bgm_select")) {
+      this.sound.stopByKey("bgm_select");
+    }
+
+    this.scene.start("FightScene", {
+      matchId: this.config.matchId,
+      player1Address: this.config.isHost
+        ? this.config.playerAddress
+        : this.config.opponentAddress,
+      player2Address: this.config.isHost
+        ? this.config.opponentAddress
+        : this.config.playerAddress,
+      player1Character: this.config.isHost
+        ? this.confirmedCharacter?.id
+        : this.opponentCharacter?.id,
+      player2Character: this.config.isHost
+        ? this.opponentCharacter?.id
+        : this.confirmedCharacter?.id,
+      playerRole: this.config.isHost ? "player1" : "player2",
+    });
+  }
+
+  // =========================================================================
+  // UI HELPERS
+  // =========================================================================
+
+  private showConfirmButton(): void {
+    this.confirmButton.setVisible(true);
+    this.tweens.add({
+      targets: this.confirmButton,
+      alpha: 1,
+      y: GAME_DIMENSIONS.HEIGHT - 80,
+      duration: 200,
+      ease: "Power2",
+    });
+  }
+
+  private hideConfirmButton(): void {
+    this.tweens.add({
+      targets: this.confirmButton,
+      alpha: 0,
+      duration: 200,
+      ease: "Power2",
+      onComplete: () => {
+        this.confirmButton.setVisible(false);
+      },
+    });
+  }
+
+  // =========================================================================
+  // UPDATE LOOP
+  // =========================================================================
+
+  update(_time: number, _delta: number): void {
+    const now = Date.now();
+
+    // SelectionTimer visual refresh
+    if (this.selectionTimer) {
+      this.selectionTimer.tickFromUpdate?.();
+    }
+
+    // Channel ready fallback deadline
+    if (this.channelReadyFallbackAt > 0 && now >= this.channelReadyFallbackAt) {
+      this.channelReadyFallbackAt = 0;
+      if (this.confirmedCharacter && !this.scene.isActive("FightScene")) {
+        if (this.channelReadyHandler) {
+          EventBus.off("channel_ready", this.channelReadyHandler);
+          this.channelReadyHandler = undefined;
         }
-    }
-
-    private startPickPhase(): void {
-        this.phase = "PICKING";
-        this.isConfirmed = false;
-        this.selectedCharacter = null;
-
-        this.titleText.setText("CHOOSE YOUR FIGHTER").setColor("#F0B71F");
-        this.instructionText.setText("Bans Locked! Choose your fighter (Blind Pick)").setColor("#888888");
-
-        this.confirmBtnText.setText("LOCK IN");
-
-        // Re-enable non-banned cards
-        this.cardContainers.forEach((c) => {
-            const ch = this.cardCharacterMap.get(c);
-            if (ch && !this.bannedCharacters.has(ch.id)) {
-                c.setInteractive({ useHandCursor: true });
-                c.setAlpha(1);
-            }
+        EventBus.emit("selection_confirmed", {
+          characterId: this.confirmedCharacter.id,
         });
-
-        this.hideConfirmButton();
-        this.startTimer(this.config.selectionTimeLimit ?? 20);
-
-        if (this.config.isBot) {
-            this.botPickAt = Date.now() + 3000 + Math.random() * 3000;
-        }
+      }
     }
 
-    // =========================================================================
-    // PICK FLOW
-    // =========================================================================
-
-    private onOpponentConfirmed(characterId: string): void {
-        const character = getCharacter(characterId);
-        if (character) {
-            this.opponentCharacter = character;
-            this.opponentStatusText.setText("LOCKED IN").setColor("#22c55e");
-        }
-        this.checkBothReady();
+    // Ban → Pick transition deadline
+    if (this.banToPickTransitionAt > 0 && now >= this.banToPickTransitionAt) {
+      this.banToPickTransitionAt = 0;
+      this.startPickPhase();
     }
 
-    private checkBothReady(): void {
-        if (this.confirmedCharacter && this.opponentCharacter) {
-            this.phase = "REVEAL";
-            this.revealOpponent();
-        }
+    // Reveal → both_ready deadline
+    if (this.revealBothReadyAt > 0 && now >= this.revealBothReadyAt) {
+      this.revealBothReadyAt = 0;
+      EventBus.emit("both_ready", {
+        player: this.confirmedCharacter!.id,
+        opponent: this.opponentCharacter!.id,
+      });
     }
 
-    private revealOpponent(): void {
-        if (!this.opponentCharacter) return;
-        this.opponentStatusText.setText(this.opponentCharacter.name.toUpperCase()).setColor("#E03609");
-        this.instructionText.setText("Opponent Revealed!").setColor("#22c55e");
-        this.revealBothReadyAt = Date.now() + 1500;
+    // Match starting → fight transition deadline
+    if (this.matchStartTransitionAt > 0 && now >= this.matchStartTransitionAt) {
+      this.matchStartTransitionAt = 0;
+      this.transitionToFight();
     }
+  }
 
-    // =========================================================================
-    // BOT LOGIC
-    // =========================================================================
+  // =========================================================================
+  // VISIBILITY HANDLER
+  // =========================================================================
 
-    private revealBotBan(): void {
-        if (this.hasOpponentLockedBan || this.phase !== "BANNING") return;
-        if (!this.botBanTarget) return;
-        const botRole = this.config.isHost ? "player2" : "player1";
-        this.onOpponentBanConfirmed(this.botBanTarget, botRole);
+  private setupVisibilityChangeHandler(): void {
+    this.visibilityHandler = () => {
+      if (document.visibilityState === "visible") {
+        this.update(0, 0);
+      }
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+  }
+
+  // =========================================================================
+  // SHUTDOWN
+  // =========================================================================
+
+  shutdown(): void {
+    EventBus.off("opponent_character_selected");
+    EventBus.off("opponent_character_confirmed");
+    EventBus.off("match_starting");
+    EventBus.off("opponent_disconnected");
+    EventBus.off("channel_ready");
+    EventBus.off("game:banConfirmed");
+
+    if (this.visibilityHandler) {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = undefined;
     }
-
-    private performBotPick(): void {
-        if (this.phase !== "PICKING" || this.opponentCharacter) return;
-        const available = CHARACTER_ROSTER.filter((c) => !this.bannedCharacters.has(c.id)).map((c) => c.id);
-        if (available.length === 0) return;
-        let pickId = this.botPickTarget;
-        if (!pickId || this.bannedCharacters.has(pickId)) {
-            pickId = available[Math.floor(Math.random() * available.length)];
-        }
-        this.onOpponentConfirmed(pickId);
-    }
-
-    // =========================================================================
-    // TIMER EXPIRATION
-    // =========================================================================
-
-    private onTimeUp(): void {
-        if (this.isConfirmed) return;
-
-        if (this.phase === "BANNING" && !this.myBan) {
-            // Auto-ban random
-            const available = CHARACTER_ROSTER.filter((c) => !this.bannedCharacters.has(c.id));
-            this.selectedCharacter = available[Math.floor(Math.random() * available.length)];
-        } else if (this.phase === "PICKING" && !this.confirmedCharacter) {
-            // Auto-pick random
-            const available = CHARACTER_ROSTER.filter((c) => !this.bannedCharacters.has(c.id));
-            this.selectedCharacter = available[Math.floor(Math.random() * available.length)];
-        }
-        this.confirmSelection();
-    }
-
-    // =========================================================================
-    // MATCH START & TRANSITION
-    // =========================================================================
-
-    private onMatchStarting(payload: { countdown: number; player1CharacterId?: string; player2CharacterId?: string }): void {
-        const { countdown, player1CharacterId, player2CharacterId } = payload;
-
-        if (player1CharacterId && player2CharacterId) {
-            const oppId = this.config.isHost ? player2CharacterId : player1CharacterId;
-            const myId = this.config.isHost ? player1CharacterId : player2CharacterId;
-
-            if (!this.opponentCharacter) {
-                const opp = getCharacter(oppId);
-                if (opp) {
-                    this.opponentCharacter = opp;
-                    this.opponentStatusText.setText(opp.name.toUpperCase()).setColor("#E03609");
-                }
-            }
-            if (!this.confirmedCharacter) {
-                const me = getCharacter(myId);
-                if (me) this.confirmedCharacter = me;
-            }
-        }
-
-        this.instructionText.setText(`Match starting in ${countdown}...`).setColor("#22c55e");
-        this.matchStartTransitionAt = Date.now() + countdown * 1000;
-    }
-
-    private transitionToFight(): void {
-        this.cleanupListeners();
-        this.scene.start("FightScene", {
-            matchId: this.config.matchId,
-            player1Address: this.config.isHost ? this.config.playerAddress : this.config.opponentAddress,
-            player2Address: this.config.isHost ? this.config.opponentAddress : this.config.playerAddress,
-            player1Character: this.config.isHost ? this.confirmedCharacter?.id : this.opponentCharacter?.id,
-            player2Character: this.config.isHost ? this.opponentCharacter?.id : this.confirmedCharacter?.id,
-            playerRole: this.config.isHost ? "player1" : "player2",
-        });
-    }
-
-    // =========================================================================
-    // RESTORE (RECONNECTION)
-    // =========================================================================
-
-    private restoreExistingSelections(): void {
-        // Restore bans
-        if (this.config.existingPlayerBan) {
-            const c = getCharacter(this.config.existingPlayerBan);
-            if (c) { this.myBan = c; this.hasLockedBan = true; this.bannedCharacters.add(c.id); this.markCardBanned(c.id); }
-        }
-        const oppBanId = this.config.existingOpponentBan || (this.config.isBot ? this.config.botBanId : null);
-        if (oppBanId) {
-            const c = getCharacter(oppBanId);
-            if (c) { this.opponentBan = c; this.hasOpponentLockedBan = true; this.bannedCharacters.add(c.id); this.markCardBanned(c.id); }
-        }
-
-        const bothBansDone = this.hasLockedBan && this.hasOpponentLockedBan;
-        if (bothBansDone && !this.config.existingPlayerCharacter) {
-            this.phase = "PICKING";
-            this.isConfirmed = false;
-            this.titleText.setText("CHOOSE YOUR FIGHTER").setColor("#F0B71F");
-            this.instructionText.setText("Bans Locked! Choose your fighter (Blind Pick)");
-            this.confirmBtnText.setText("LOCK IN");
-            this.cardContainers.forEach((c) => {
-                const ch = this.cardCharacterMap.get(c);
-                if (ch && !this.bannedCharacters.has(ch.id)) { c.setInteractive({ useHandCursor: true }); c.setAlpha(1); }
-            });
-        }
-
-        // Restore picks
-        if (this.config.existingPlayerCharacter) {
-            const c = getCharacter(this.config.existingPlayerCharacter);
-            if (c) {
-                this.phase = "PICKING";
-                this.selectedCharacter = c;
-                this.confirmedCharacter = c;
-                this.isConfirmed = true;
-                this.updateCardVisual(c.id, true);
-                this.cardContainers.forEach((ct) => {
-                    const ch = this.cardCharacterMap.get(ct);
-                    if (ch && ch.id !== c.id) { ct.disableInteractive(); ct.setAlpha(0.3); }
-                });
-                this.hideConfirmButton();
-                this.timerText.setText("✓").setColor("#22c55e");
-                this.instructionText.setText("Waiting for opponent...");
-            }
-        }
-        if (this.config.existingOpponentCharacter && !this.config.isBot) {
-            const c = getCharacter(this.config.existingOpponentCharacter);
-            if (c) {
-                this.opponentCharacter = c;
-                this.opponentStatusText.setText("LOCKED IN").setColor("#22c55e");
-            }
-        }
-
-        if (this.confirmedCharacter && this.opponentCharacter) {
-            this.instructionText.setText("Both players ready!").setColor("#22c55e");
-        }
-    }
-
-    // =========================================================================
-    // EVENT LISTENERS
-    // =========================================================================
-
-    private setupEventListeners(): void {
-        EventBus.on("opponent_character_confirmed", (data: unknown) => {
-            const { characterId } = data as { characterId: string };
-            this.onOpponentConfirmed(characterId);
-        });
-        EventBus.on("match_starting", (data: unknown) => {
-            this.onMatchStarting(data as { countdown: number; player1CharacterId?: string; player2CharacterId?: string });
-        });
-        EventBus.on("game:banConfirmed", (data: unknown) => {
-            const { characterId, player } = data as { characterId: string; player: string };
-            this.onOpponentBanConfirmed(characterId, player);
-        });
-    }
-
-    private cleanupListeners(): void {
-        EventBus.off("opponent_character_confirmed");
-        EventBus.off("match_starting");
-        EventBus.off("game:banConfirmed");
-        if (this.visibilityHandler) {
-            document.removeEventListener("visibilitychange", this.visibilityHandler);
-            this.visibilityHandler = undefined;
-        }
-    }
-
-    // =========================================================================
-    // VISIBILITY HANDLER
-    // =========================================================================
-
-    private setupVisibilityHandler(): void {
-        this.visibilityHandler = () => {
-            if (document.visibilityState === "visible") {
-                this.update(0, 0);
-            }
-        };
-        document.addEventListener("visibilitychange", this.visibilityHandler);
-    }
-
-    // =========================================================================
-    // UPDATE LOOP
-    // =========================================================================
-
-    update(_time: number, _delta: number): void {
-        const now = Date.now();
-
-        // Timer display
-        if (this.timerDeadlineAt > 0 && !this.isConfirmed) {
-            const remaining = Math.max(0, Math.ceil((this.timerDeadlineAt - now) / 1000));
-            this.timerText.setText(String(remaining));
-            if (remaining <= 5) this.timerText.setColor("#ef4444");
-            else if (remaining <= 10) this.timerText.setColor("#F0B71F");
-            else this.timerText.setColor("#ffffff");
-            if (remaining <= 0) { this.timerDeadlineAt = 0; this.onTimeUp(); }
-        }
-
-        // Bot ban reveal
-        if (this.botBanRevealAt > 0 && now >= this.botBanRevealAt) {
-            this.botBanRevealAt = 0;
-            this.revealBotBan();
-        }
-
-        // Ban → Pick transition
-        if (this.banToPickTransitionAt > 0 && now >= this.banToPickTransitionAt) {
-            this.banToPickTransitionAt = 0;
-            this.startPickPhase();
-        }
-
-        // Bot pick
-        if (this.botPickAt > 0 && now >= this.botPickAt) {
-            this.botPickAt = 0;
-            this.performBotPick();
-        }
-
-        // Reveal → both_ready
-        if (this.revealBothReadyAt > 0 && now >= this.revealBothReadyAt) {
-            this.revealBothReadyAt = 0;
-            EventBus.emit("both_ready", {
-                player: this.confirmedCharacter!.id,
-                opponent: this.opponentCharacter!.id,
-            });
-        }
-
-        // Match start transition
-        if (this.matchStartTransitionAt > 0 && now >= this.matchStartTransitionAt) {
-            this.matchStartTransitionAt = 0;
-            this.transitionToFight();
-        }
-    }
-
-    // =========================================================================
-    // SHUTDOWN
-    // =========================================================================
-
-    shutdown(): void {
-        this.cleanupListeners();
-    }
+  }
 }

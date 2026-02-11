@@ -7,6 +7,8 @@ import HomePage from './pages/HomePage';
 import PlayPage from './pages/PlayPage';
 import PracticePage from './pages/PracticePage';
 import QueuePage from './pages/QueuePage';
+import LeaderboardPage from './pages/LeaderboardPage';
+import PlayerProfilePage from './pages/PlayerProfilePage';
 
 // Lazy load the CharacterSelectClient for code splitting
 const CharacterSelectClient = lazy(() =>
@@ -54,6 +56,12 @@ function extractMatchId(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Extract address from /player/:address */
+function extractPlayerAddress(path: string): string | null {
+  const m = path.match(/^\/player\/([A-Z0-9]+)$/);
+  return m ? m[1] : null;
+}
+
 export default function App() {
   const path = useSimpleRouter();
 
@@ -75,6 +83,17 @@ export default function App() {
   // Matchmaking queue (immersive HUD)
   if (path === '/queue') {
     return <QueuePage />;
+  }
+
+  // Leaderboard
+  if (path === '/leaderboard') {
+    return <LeaderboardPage />;
+  }
+
+  // Player profile — /player/:address
+  const playerAddress = extractPlayerAddress(path);
+  if (playerAddress) {
+    return <PlayerProfilePage address={playerAddress} />;
   }
 
   // Match route — /match/:matchId → CharacterSelectScene → FightScene

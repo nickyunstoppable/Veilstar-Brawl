@@ -46,9 +46,15 @@ export function GameHeader() {
             </div>
 
             {/* Address */}
-            <div className="font-mono text-white text-sm tracking-wide mr-3 font-medium opacity-90 hover:text-cyber-gold transition-colors cursor-pointer">
+            <button
+              onClick={() => {
+                window.history.pushState({}, '', `/player/${address}`);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }}
+              className="font-mono text-white text-sm tracking-wide mr-3 font-medium opacity-90 hover:text-cyber-gold transition-colors cursor-pointer bg-transparent border-none p-0"
+            >
               {truncatedAddress}
-            </div>
+            </button>
 
             {/* Disconnect Icon */}
             <button

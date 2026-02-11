@@ -60,20 +60,19 @@ export async function addToQueue(address: string, rating: number): Promise<void>
         throw new Error("Failed to register player");
     }
 
-    // Clean any existing queue entry first
-    await supabase
-        .from("matchmaking_queue")
-        .delete()
-        .eq("address", address);
-
-    // Insert into queue
+    // Upsert into queue (handles re-joining atomically)
     const { error } = await supabase
         .from("matchmaking_queue")
-        .insert({
-            address,
-            rating,
-            status: "searching",
-        });
+        .upsert(
+            {
+                address,
+                rating,
+                status: "searching",
+                joined_at: new Date().toISOString(),
+                matched_with: null,
+            },
+            { onConflict: "address" }
+        );
 
     if (error) {
         console.error("[Matchmaker] Failed to join queue:", error);
@@ -184,6 +183,42 @@ async function findOpponent(
 export async function attemptMatch(address: string): Promise<MatchFoundResult | null> {
     const supabase = getSupabase();
 
+    // CRITICAL: First check if player already has an active match
+    // This prevents duplicate matches from racing attemptMatch calls
+    const { data: existingMatch } = await supabase
+        .from("matches")
+        .select("id, player1_address, player2_address, selection_deadline_at, created_at, status")
+        .or(`player1_address.eq.${address},player2_address.eq.${address}`)
+        .in("status", ["character_select", "in_progress"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (existingMatch && existingMatch.player2_address) {
+        const matchAge = Date.now() - new Date(existingMatch.created_at).getTime();
+
+        // Don't cancel matches that were just created (within 5 seconds)
+        if (matchAge < 5000) {
+            return {
+                matchId: existingMatch.id,
+                player1Address: existingMatch.player1_address,
+                player2Address: existingMatch.player2_address,
+                selectionDeadlineAt: existingMatch.selection_deadline_at ?? "",
+            };
+        }
+
+        // If match is older than 5 seconds and player is back in the queue,
+        // they have abandoned the previous game — cancel it
+        console.log(`[Matchmaker] ${address.slice(0, 8)}... abandoning stale match ${existingMatch.id.slice(0, 8)} (age: ${Math.round(matchAge / 1000)}s)`);
+        await supabase
+            .from("matches")
+            .update({
+                status: "cancelled",
+                completed_at: new Date().toISOString(),
+            })
+            .eq("id", existingMatch.id);
+    }
+
     // Get player's queue entry
     const { data: queueEntry, error: queueError } = await supabase
         .from("matchmaking_queue")
@@ -277,6 +312,33 @@ export async function attemptMatch(address: string): Promise<MatchFoundResult | 
     return result;
 }
 
+/**
+ * Find an active match for a player (even if they are no longer in queue).
+ */
+export async function getActiveMatchForPlayer(
+    address: string
+): Promise<MatchFoundResult | null> {
+    const supabase = getSupabase();
+
+    const { data: activeMatch } = await supabase
+        .from("matches")
+        .select("id, player1_address, player2_address, selection_deadline_at")
+        .or(`player1_address.eq.${address},player2_address.eq.${address}`)
+        .in("status", ["waiting", "character_select"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (!activeMatch) return null;
+
+    return {
+        matchId: activeMatch.id,
+        player1Address: activeMatch.player1_address,
+        player2Address: activeMatch.player2_address,
+        selectionDeadlineAt: activeMatch.selection_deadline_at || "",
+    };
+}
+
 // =============================================================================
 // MATCH CREATION
 // =============================================================================
@@ -295,15 +357,34 @@ async function createMatch(
     // Check for existing active match between these players
     const { data: existing } = await supabase
         .from("matches")
-        .select("id")
+        .select("id, selection_deadline_at, created_at, status")
         .or(`player1_address.eq.${player1Address},player1_address.eq.${player2Address}`)
         .or(`player2_address.eq.${player1Address},player2_address.eq.${player2Address}`)
         .in("status", ["waiting", "character_select", "in_progress"])
         .limit(1);
 
     if (existing && existing.length > 0) {
-        console.log("[Matchmaker] Active match already exists, skipping creation");
-        return null;
+        const match = existing[0];
+        const matchAge = Date.now() - new Date(match.created_at).getTime();
+
+        // Don't cancel matches that were just created (within 5 seconds)
+        if (matchAge < 5000) {
+            console.log("[Matchmaker] Recent active match exists, reusing it");
+            return {
+                id: match.id,
+                selectionDeadlineAt: match.selection_deadline_at ?? selectionDeadline,
+            };
+        }
+
+        // Cancel the stale match
+        console.log(`[Matchmaker] Cancelling stale match ${match.id.slice(0, 8)} (age: ${Math.round(matchAge / 1000)}s)`);
+        await supabase
+            .from("matches")
+            .update({
+                status: "cancelled",
+                completed_at: new Date().toISOString(),
+            })
+            .eq("id", match.id);
     }
 
     const { data, error } = await supabase
@@ -345,29 +426,43 @@ async function createMatch(
 // =============================================================================
 
 /** Broadcast match found to both players via Supabase Realtime */
-async function broadcastMatchFound(match: MatchFoundResult): Promise<void> {
+async function _broadcastMatchFoundImpl(
+    player1Address: string,
+    player2Address: string,
+    matchId: string,
+    selectionDeadlineAt: string
+): Promise<void> {
     const supabase = getSupabase();
 
     try {
-        const channel = supabase.channel(`matchmaking:${match.player1Address}`);
+        const channel = supabase.channel(`matchmaking:${player1Address}`);
         await channel.send({
             type: "broadcast",
             event: "match_found",
-            payload: match,
+            payload: { matchId, player1Address, player2Address, selectionDeadlineAt },
         });
         await supabase.removeChannel(channel);
 
-        const channel2 = supabase.channel(`matchmaking:${match.player2Address}`);
+        const channel2 = supabase.channel(`matchmaking:${player2Address}`);
         await channel2.send({
             type: "broadcast",
             event: "match_found",
-            payload: match,
+            payload: { matchId, player1Address, player2Address, selectionDeadlineAt },
         });
         await supabase.removeChannel(channel2);
 
-        console.log(`[Matchmaker] Broadcast match_found for ${match.matchId}`);
+        console.log(`[Matchmaker] Broadcast match_found for ${matchId}`);
     } catch (err) {
         console.error("[Matchmaker] Failed to broadcast:", err);
+    }
+}
+
+/** Broadcast match found — accepts a MatchFoundResult or individual params */
+export async function broadcastMatchFound(matchOrP1: MatchFoundResult | string, p2?: string, id?: string, deadline?: string): Promise<void> {
+    if (typeof matchOrP1 === "object") {
+        await _broadcastMatchFoundImpl(matchOrP1.player1Address, matchOrP1.player2Address, matchOrP1.matchId, matchOrP1.selectionDeadlineAt);
+    } else {
+        await _broadcastMatchFoundImpl(matchOrP1, p2!, id!, deadline!);
     }
 }
 

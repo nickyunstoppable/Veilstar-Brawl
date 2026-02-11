@@ -2,15 +2,12 @@
  * QueuePage — Fullscreen matchmaking queue
  * Auto-joins queue on mount, shows immersive HUD while searching,
  * navigates to /match/:matchId when match found.
- * Falls back to bot match after 30 seconds.
  */
 
 import React, { useEffect, useState, useCallback } from "react";
 import MatchmakingHUD from "@/components/matchmaking/MatchmakingHUD";
 import { useMatchmakingQueue } from "@/hooks/useMatchmakingQueue";
 import { useWallet } from "@/hooks/useWallet";
-
-const BOT_MATCH_TIMEOUT_SECONDS = 30;
 
 function navigateTo(path: string) {
     window.history.pushState({}, "", path);
@@ -32,15 +29,14 @@ export default function QueuePage() {
     } = useMatchmakingQueue();
 
     const [hasStarted, setHasStarted] = useState(false);
-    const [isCreatingBotMatch, setIsCreatingBotMatch] = useState(false);
 
     // Auto-join queue on mount if wallet connected
     useEffect(() => {
-        if (isConnected && !isInQueue && !hasStarted && !isJoining) {
+        if (isConnected && publicKey && !isInQueue && !hasStarted && !isJoining) {
             setHasStarted(true);
             joinQueue();
         }
-    }, [isConnected, isInQueue, hasStarted, isJoining, joinQueue]);
+    }, [isConnected, publicKey, isInQueue, hasStarted, isJoining, joinQueue]);
 
     // Navigate to match when matched with real player
     useEffect(() => {
@@ -48,60 +44,6 @@ export default function QueuePage() {
             navigateTo(`/match/${matchResult.matchId}`);
         }
     }, [matchResult]);
-
-    // After 30s in queue, create bot match as fallback
-    useEffect(() => {
-        if (
-            isInQueue &&
-            waitTimeSeconds >= BOT_MATCH_TIMEOUT_SECONDS &&
-            !isCreatingBotMatch
-        ) {
-            setIsCreatingBotMatch(true);
-
-            const apiBase =
-                import.meta.env.VITE_API_BASE_URL || "";
-
-            const createBotMatch = async () => {
-                try {
-                    const botAddress = "GBOT" + publicKey!.slice(4);
-                    const response = await fetch(
-                        `${apiBase}/api/matchmaking/create-bot-match`,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                            body: JSON.stringify({
-                                player1Address: publicKey,
-                                player2Address: botAddress,
-                                player2Name: "Arena Bot",
-                            }),
-                        }
-                    );
-
-                    if (response.ok) {
-                        const { matchId } = await response.json();
-                        await leaveQueue();
-                        navigateTo(`/match/${matchId}`);
-                    } else {
-                        console.error("Failed to create bot match");
-                        setIsCreatingBotMatch(false);
-                    }
-                } catch (err) {
-                    console.error("Error creating bot match:", err);
-                    setIsCreatingBotMatch(false);
-                }
-            };
-
-            createBotMatch();
-        }
-    }, [
-        isInQueue,
-        waitTimeSeconds,
-        isCreatingBotMatch,
-        publicKey,
-        leaveQueue,
-    ]);
 
     // Wallet not connected
     if (!isConnected) {

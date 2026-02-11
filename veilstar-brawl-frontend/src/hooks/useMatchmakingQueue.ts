@@ -94,25 +94,29 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
     // Derived state
     const isInQueue = useMatchmakingStore(selectIsInQueue);
     const playerCount = useMatchmakingStore(selectPlayerCount);
+    const queuedAt = useMatchmakingStore((state) => state.queuedAt);
 
     // Keep ref in sync with queue state
     useEffect(() => {
         isInQueueRef.current = isInQueue;
     }, [isInQueue]);
 
-    // Timer for wait time
+    // Timer for wait time (updates every 1s)
     useEffect(() => {
-        if (!isInQueue || !store.queuedAt) {
+        if (!isInQueue || !queuedAt) {
             setWaitTimeSeconds(0);
             return;
         }
 
-        const interval = setInterval(() => {
-            setWaitTimeSeconds(selectQueueWaitTime(store));
-        }, 1000);
+        const updateElapsed = () => {
+            setWaitTimeSeconds(Math.floor((Date.now() - queuedAt) / 1000));
+        };
+
+        updateElapsed();
+        const interval = setInterval(updateElapsed, 1000);
 
         return () => clearInterval(interval);
-    }, [isInQueue, store.queuedAt, store]);
+    }, [isInQueue, queuedAt]);
 
     /**
      * Handle match found — navigate to match.
@@ -287,12 +291,8 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
             const result = await response.json();
 
             // Check if immediately matched
-            if (result.matched && result.match) {
-                handleMatchFound({
-                    matchId: result.match.id,
-                    player1Address: result.match.player1Address,
-                    player2Address: result.match.player2Address,
-                });
+            if (result.matchFound) {
+                await handleMatchFound(result.matchFound as MatchFoundEvent);
                 return;
             }
 

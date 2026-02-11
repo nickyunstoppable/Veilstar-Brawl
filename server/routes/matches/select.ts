@@ -6,7 +6,7 @@
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
-import { registerMatchOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { isContractConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 
 interface SelectCharacterBody {
     address: string;
@@ -77,6 +77,7 @@ export async function handleCharacterSelect(
         await broadcastGameEvent(matchId, "character_selected", {
             player: isPlayer1 ? "player1" : "player2",
             characterId: body.characterId,
+            locked: true,
         });
 
         // Re-fetch to check if both selected
@@ -127,23 +128,8 @@ export async function handleCharacterSelect(
                 })
                 .eq("match_id", matchId);
 
-            // Register match on-chain (non-blocking: don't delay game start)
-            let onChainResult: { success: boolean; txHash?: string; sessionId?: number; error?: string } | null = null;
-            if (isStellarConfigured()) {
-                registerMatchOnChain(matchId, match.player1_address, match.player2_address)
-                    .then((result) => {
-                        onChainResult = result;
-                        console.log(`[Select] On-chain registration: ${result.success ? 'OK' : 'FAILED'}`, result.txHash || result.error || '');
-                        // Store on-chain session ID in match metadata
-                        if (result.sessionId) {
-                            supabase.from('matches').update({
-                                onchain_session_id: result.sessionId,
-                                onchain_tx_hash: result.txHash || null,
-                            }).eq('id', matchId).then(() => {});
-                        }
-                    })
-                    .catch((err) => console.error('[Select] On-chain registration error:', err));
-            }
+            // On-chain registration: the frontend handles signing via Freighter.
+            const requiresOnChainRegistration = isContractConfigured();
 
             // Broadcast match start
             await broadcastGameEvent(matchId, "match_starting", {
@@ -156,6 +142,18 @@ export async function handleCharacterSelect(
                 moveDeadlineAt: moveDeadline,
                 onChainSessionId: matchIdToSessionId(matchId),
                 contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
+                requiresOnChainRegistration,
+            });
+
+            // Broadcast first round starting
+            const countdownEndsAt = Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000;
+            await broadcastGameEvent(matchId, "round_starting", {
+                roundNumber: 1,
+                turnNumber: 1,
+                player1Health: GAME_CONSTANTS.MAX_HEALTH,
+                player2Health: GAME_CONSTANTS.MAX_HEALTH,
+                moveDeadlineAt: new Date(moveDeadline).getTime(),
+                countdownEndsAt,
             });
 
             return Response.json({
