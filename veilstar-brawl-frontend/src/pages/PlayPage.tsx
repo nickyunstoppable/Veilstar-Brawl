@@ -10,10 +10,11 @@ export default function PlayPage() {
 
   const handleQuickMatch = () => {
     setIsTransitioning(true);
-    // TODO: Navigate to queue when backend is wired
+    // Navigate to queue page after wormhole animation
     setTimeout(() => {
-      setIsTransitioning(false);
-    }, 2000);
+      window.history.pushState({}, '', '/queue');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }, 1500);
   };
 
   // Create / Join sub-views

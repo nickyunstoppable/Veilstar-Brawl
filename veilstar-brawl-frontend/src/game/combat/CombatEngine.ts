@@ -127,6 +127,22 @@ export class CombatEngine {
     }
 
     /**
+     * Set health for a player.
+     * Used by FightScene for server-authoritative state sync.
+     */
+    setPlayerHealth(player: "player1" | "player2", hp: number): void {
+        this.state[player].hp = Math.max(0, Math.min(this.state[player].maxHp, hp));
+    }
+
+    /**
+     * Set energy for a player.
+     * Used by FightScene for server-authoritative state sync.
+     */
+    setPlayerEnergy(player: "player1" | "player2", energy: number): void {
+        this.state[player].energy = Math.max(0, Math.min(this.state[player].maxEnergy, energy));
+    }
+
+    /**
      * Get specific player state.
      */
     getPlayerState(player: "player1" | "player2"): Readonly<PlayerCombatState> {

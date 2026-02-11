@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { config } from './config';
 import { Layout } from './components/Layout';
 import { useWallet } from './hooks/useWallet';
@@ -6,6 +6,14 @@ import { VeilstarBrawlGame } from './games/veilstar-brawl/VeilstarBrawlGame';
 import HomePage from './pages/HomePage';
 import PlayPage from './pages/PlayPage';
 import PracticePage from './pages/PracticePage';
+import QueuePage from './pages/QueuePage';
+
+// Lazy load the CharacterSelectClient for code splitting
+const CharacterSelectClient = lazy(() =>
+  import('./components/fight/CharacterSelectClient').then((mod) => ({
+    default: mod.CharacterSelectClient,
+  }))
+);
 
 const GAME_ID = 'veilstar-brawl';
 const GAME_TITLE = import.meta.env.VITE_GAME_TITLE || 'Veilstar Brawl';
@@ -40,6 +48,12 @@ function useSimpleRouter() {
   return path;
 }
 
+/** Extract matchId from /match/:matchId */
+function extractMatchId(path: string): string | null {
+  const m = path.match(/^\/match\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
 export default function App() {
   const path = useSimpleRouter();
 
@@ -48,7 +62,7 @@ export default function App() {
     return <HomePage />;
   }
 
-  // Play / matchmaking page
+  // Play / arena lobby
   if (path === '/play') {
     return <PlayPage />;
   }
@@ -56,6 +70,35 @@ export default function App() {
   // Practice mode
   if (path === '/practice') {
     return <PracticePage />;
+  }
+
+  // Matchmaking queue (immersive HUD)
+  if (path === '/queue') {
+    return <QueuePage />;
+  }
+
+  // Match route — /match/:matchId → CharacterSelectScene → FightScene
+  const matchId = extractMatchId(path);
+  if (matchId) {
+    return (
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 bg-black flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-cyber-gold border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-cyber-gold font-orbitron tracking-widest text-sm">LOADING...</p>
+            </div>
+          </div>
+        }
+      >
+        <CharacterSelectClient matchId={matchId} />
+      </Suspense>
+    );
+  }
+
+  // Legacy /match route (no matchId) — redirect to queue
+  if (path === '/match') {
+    return <QueuePage />;
   }
 
   // Game page
@@ -100,8 +143,8 @@ function GameView() {
           userAddress={userAddress}
           currentEpoch={1}
           availablePoints={1000000000n}
-          onStandingsRefresh={() => {}}
-          onGameComplete={() => {}}
+          onStandingsRefresh={() => { }}
+          onGameComplete={() => { }}
         />
       )}
     </Layout>

@@ -40,6 +40,7 @@ frontend-template/*.tsbuildinfo
 .DS_Store
 Thumbs.db
 
-KaspaClash
-noir
-stellar-docs
+# External repositories
+KaspaClash/
+noir/
+stellar-docs/

@@ -1,22 +1,32 @@
-import { useState } from 'react';
 import { LogOut } from 'lucide-react';
+import { useWalletStandalone } from '../../hooks/useWalletStandalone';
+import { useXlmBalance } from '../../hooks/useXlmBalance';
 
 export function GameHeader() {
-  const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
+  const {
+    publicKey,
+    isConnected,
+    isConnecting,
+    connect,
+    disconnect,
+  } = useWalletStandalone();
 
-  // Placeholder wallet state — will be wired to real backend later
-  const isConnected = false;
-  const isConnecting = false;
-  const truncatedAddress = '';
-  const balance = '0';
+  const address = typeof publicKey === 'string' ? publicKey : '';
+  const truncatedAddress = address ? `${address.slice(0, 6)}...${address.slice(-4)}` : '';
+  
+  const { balance: rawBalance } = useXlmBalance(address);
+  const balance = rawBalance ? parseFloat(rawBalance).toFixed(2) : '0';
 
-  const handleConnect = () => {
-    // TODO: integrate wallet connection
-    setIsWalletModalOpen(false);
+  const handleConnect = async () => {
+    try {
+      await connect();
+    } catch (err) {
+      console.error('Failed to connect wallet:', err);
+    }
   };
 
   const handleDisconnect = () => {
-    // TODO: integrate wallet disconnection
+    disconnect();
   };
 
   return (
@@ -52,12 +62,12 @@ export function GameHeader() {
         </div>
       ) : (
         <button
-          onClick={() => setIsWalletModalOpen(true)}
+          onClick={handleConnect}
           disabled={isConnecting}
-          className="bg-gradient-cyber text-white border-0 font-bold font-orbitron shadow-[0_0_20px_rgba(240,183,31,0.2)] hover:shadow-[0_0_30px_rgba(240,183,31,0.4)] transition-all duration-300 px-6 py-2 rounded-xl text-sm"
+          className="bg-gradient-cyber text-white border-0 font-bold font-orbitron shadow-[0_0_20px_rgba(240,183,31,0.2)] hover:shadow-[0_0_30px_rgba(240,183,31,0.4)] transition-all duration-300 px-6 py-2 rounded-xl text-sm disabled:opacity-50 disabled:cursor-wait min-w-[160px]"
         >
           {isConnecting ? (
-            <span className="flex items-center gap-2">
+            <span className="flex items-center justify-center gap-2">
               <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               Connecting...
             </span>

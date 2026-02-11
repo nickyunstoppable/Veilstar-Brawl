@@ -17,6 +17,8 @@ import { EventBus } from "./EventBus";
 import type { GameEvents } from "./EventBus";
 import { BASE_GAME_CONFIG } from "./config";
 import { PracticeScene } from "./scenes/PracticeScene";
+import { FightScene } from "./scenes/FightScene";
+import { CharacterSelectScene } from "./scenes/CharacterSelectScene";
 
 /**
  * Props for the PhaserGame component.
@@ -106,6 +108,8 @@ export const PhaserGame = forwardRef<PhaserGameRef, PhaserGameProps>(
 
           // Add scenes manually (they won't auto-start)
           gameRef.current.scene.add("PracticeScene", PracticeScene, false);
+          gameRef.current.scene.add("FightScene", FightScene, false);
+          gameRef.current.scene.add("CharacterSelectScene", CharacterSelectScene, false);
 
           // Start the initial scene with data when game is ready
           gameRef.current.events.once("ready", () => {

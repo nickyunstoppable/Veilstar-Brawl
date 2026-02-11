@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import { StellarWalletsKit } from '@creit-tech/stellar-wallets-kit/sdk';
 import { defaultModules } from '@creit-tech/stellar-wallets-kit/modules/utils';
-import { KitEventType, Networks } from '@creit-tech/stellar-wallets-kit/types';
+import { KitEventType, Networks, type SwkAppTheme } from '@creit-tech/stellar-wallets-kit/types';
 import { useWalletStore } from '../store/walletSlice';
 import { NETWORK, NETWORK_PASSPHRASE } from '../utils/constants';
 import type { ContractSigner } from '../types/signer';
@@ -9,6 +9,27 @@ import type { WalletError } from '@stellar/stellar-sdk/contract';
 
 const WALLET_ID = 'stellar-wallets-kit';
 let kitInitialized = false;
+let kitWarmed = false;
+
+const SWK_THEME: SwkAppTheme = {
+  background: 'var(--color-bg)',
+  'background-secondary': 'var(--color-surface)',
+  'foreground-strong': 'var(--color-ink)',
+  foreground: 'var(--color-ink)',
+  'foreground-secondary': 'var(--color-ink-muted)',
+  primary: 'var(--color-accent)',
+  'primary-foreground': 'var(--color-bg)',
+  transparent: 'rgba(0, 0, 0, 0)',
+  lighter: '#1a1a1a',
+  light: '#141414',
+  'light-gray': 'rgba(240, 183, 31, 0.2)',
+  gray: '#666666',
+  danger: 'var(--color-error)',
+  border: 'var(--color-border)',
+  shadow: 'var(--shadow-soft)',
+  'border-radius': '0.75rem',
+  'font-family': 'var(--font-body)',
+};
 
 function toWalletError(error?: { message: string; code: number }): WalletError | undefined {
   if (!error) return undefined;
@@ -23,6 +44,14 @@ function resolveNetwork(passphrase?: string): Networks {
   return NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 }
 
+function warmKit() {
+  if (kitWarmed || typeof window === 'undefined') return;
+  kitWarmed = true;
+  setTimeout(() => {
+    StellarWalletsKit.refreshSupportedWallets().catch(() => undefined);
+  }, 0);
+}
+
 function ensureKitInitialized(passphrase?: string) {
   if (typeof window === 'undefined') return;
 
@@ -30,14 +59,19 @@ function ensureKitInitialized(passphrase?: string) {
     StellarWalletsKit.init({
       modules: defaultModules(),
       network: resolveNetwork(passphrase),
+      theme: SWK_THEME,
+      authModal: { showInstallLabel: false, hideUnsupportedWallets: true },
     });
     kitInitialized = true;
+    warmKit();
     return;
   }
 
   if (passphrase) {
     StellarWalletsKit.setNetwork(resolveNetwork(passphrase));
   }
+
+  warmKit();
 }
 
 export function useWalletStandalone() {
@@ -68,6 +102,9 @@ export function useWalletStandalone() {
     try {
       setConnecting(true);
       setError(null);
+
+      // Allow React to render the loading state before blocking with modal
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       ensureKitInitialized(NETWORK_PASSPHRASE);
       const { address } = await StellarWalletsKit.authModal();
