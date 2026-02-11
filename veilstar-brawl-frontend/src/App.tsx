@@ -5,6 +5,7 @@ import { useWallet } from './hooks/useWallet';
 import { VeilstarBrawlGame } from './games/veilstar-brawl/VeilstarBrawlGame';
 import HomePage from './pages/HomePage';
 import PlayPage from './pages/PlayPage';
+import PracticePage from './pages/PracticePage';
 
 const GAME_ID = 'veilstar-brawl';
 const GAME_TITLE = import.meta.env.VITE_GAME_TITLE || 'Veilstar Brawl';
@@ -50,6 +51,11 @@ export default function App() {
   // Play / matchmaking page
   if (path === '/play') {
     return <PlayPage />;
+  }
+
+  // Practice mode
+  if (path === '/practice') {
+    return <PracticePage />;
   }
 
   // Game page
