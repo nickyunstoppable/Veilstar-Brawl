@@ -924,18 +924,6 @@ export class PracticeScene extends Phaser.Scene {
   /* getMoveInfoText removed */
 
   private selectMove(move: MoveType): void {
-    // Tutorial Check
-    if (this.tutorialStep !== "none" && this.tutorialStep !== "fight") {
-      if (this.tutorialStep === "punch" && move !== "punch") return;
-      if (this.tutorialStep === "block" && move !== "block") return;
-
-      // Advance tutorial if correct move selected
-      if ((this.tutorialStep === "punch" && move === "punch") ||
-        (this.tutorialStep === "block" && move === "block")) {
-        this.advanceTutorial();
-      }
-    }
-
     // Check if player is stunned - cannot select moves when stunned
     const state = this.combatEngine.getState();
     if (state.player1.isStunned) {
@@ -1121,117 +1109,6 @@ export class PracticeScene extends Phaser.Scene {
       }
     });
   }
-
-
-  // ===========================================================================
-  // TUTORIAL LOGIC
-  // ===========================================================================
-
-  private tutorialStep: "none" | "intro" | "punch" | "block" | "fight" = "none";
-  private tutorialOverlay: Phaser.GameObjects.Container | null = null;
-
-  private startTutorial(): void {
-    console.log("[PracticeScene] Starting Tutorial Mode");
-    this.tutorialStep = "intro";
-
-    // Create tutorial overlay container
-    this.tutorialOverlay = this.add.container(GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y);
-    this.tutorialOverlay.setDepth(2000); // Top layer
-
-    // Dim background
-    const dimmer = this.add.graphics();
-    dimmer.fillStyle(0x000000, 0.7);
-    dimmer.fillRect(-GAME_DIMENSIONS.CENTER_X, -GAME_DIMENSIONS.CENTER_Y, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT);
-    this.tutorialOverlay.add(dimmer);
-
-    // Welcome Text
-    const text = this.add.text(0, -50, "WELCOME TO THE DOJO", {
-      fontFamily: "orbitron",
-      fontSize: "48px",
-      color: "#f97316",
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 6
-    }).setOrigin(0.5);
-
-    const subText = this.add.text(0, 20, "Let's learn the basics of combat.\n\nClick to continue...", {
-      fontFamily: "montserrat",
-      fontSize: "24px",
-      color: "#ffffff",
-      align: "center"
-    }).setOrigin(0.5);
-
-    this.tutorialOverlay.add([text, subText]);
-
-    // Click to advance
-    dimmer.setInteractive(new Phaser.Geom.Rectangle(-GAME_DIMENSIONS.CENTER_X, -GAME_DIMENSIONS.CENTER_Y, GAME_DIMENSIONS.WIDTH, GAME_DIMENSIONS.HEIGHT), Phaser.Geom.Rectangle.Contains);
-    dimmer.on('pointerdown', () => {
-      this.advanceTutorial();
-    });
-  }
-
-  private advanceTutorial(): void {
-    if (!this.tutorialOverlay) return;
-
-    if (this.tutorialStep === "intro") {
-      this.tutorialStep = "punch";
-      this.tutorialOverlay.setVisible(false);
-      this.showTutorialInstruction("STEP 1: ATTACK\nClick the red PUNCH card to deal damage!", "punch");
-    } else if (this.tutorialStep === "punch") {
-      this.tutorialStep = "block";
-      this.showTutorialInstruction("STEP 2: DEFENSE\nClick the green BLOCK card to reduce damage!", "block");
-    } else if (this.tutorialStep === "block") {
-      this.tutorialStep = "fight";
-      this.showTutorialInstruction("TRAINING COMPLETE!\nDefeat the AI to finish the tutorial!", "all");
-
-      // Auto-hide the "Training Complete" message after a few seconds
-      this.time.delayedCall(3000, () => {
-        if (this.narrativeText) {
-          this.narrativeText.setAlpha(0);
-        }
-      });
-    }
-  }
-
-  private showTutorialInstruction(message: string, highlightMove: MoveType | "all"): void {
-    // Show message in narrative text area
-    if (this.narrativeText) {
-      this.narrativeText.setText(message);
-      this.narrativeText.setAlpha(1);
-      this.narrativeText.setColor("#f97316"); // Orange
-      this.narrativeText.setFontSize(24);
-      this.narrativeText.setStroke("#000000", 4);
-    }
-
-    // Highlight specific buttons
-    this.moveButtons.forEach((btn, move) => {
-      if (highlightMove === "all") {
-        btn.setAlpha(1);
-        btn.setInteractive();
-        btn.list.forEach((child: any) => {
-          if (child.clearTint) child.clearTint();
-        });
-      } else if (move === highlightMove) {
-        btn.setAlpha(1);
-        btn.setInteractive();
-        btn.list.forEach((child: any) => {
-          if (child.clearTint) child.clearTint();
-        });
-        // Add a ping pong scale effect to draw attention
-        this.tweens.add({
-          targets: btn,
-          scale: 1.1,
-          duration: 500,
-          yoyo: true,
-          repeat: 2
-        });
-      } else {
-        btn.setAlpha(0.2);
-        btn.disableInteractive();
-      }
-    });
-  }
-
 
   // ===========================================================================
   // TURN INDICATOR (Updated)

@@ -59,10 +59,17 @@ export interface GameEvents {
   "game:roundResolved": any;
   "game:matchEnded": any;
   "game:matchCancelled": any;
+  "game:moveRejected": any;
+  "game:playerDisconnected": any;
+  "game:playerReconnected": any;
+  "game:timerExpired": any;
+  "game:claimTimeoutVictory": any;
   "game:characterSelected": any;
   "game:matchStarting": any;
   "game:rejectionWaiting": { message: string };
   "game:opponentRejected": { rejectedAt: number };
+  "fight:requestRoundState": { matchId: string };
+  "channel_ready": { matchId: string };
   "navigate": { path: string };
 
   // Game Control Events

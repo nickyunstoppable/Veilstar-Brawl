@@ -127,7 +127,7 @@ export async function handleQueueStatus(req: Request): Promise<Response> {
             .from("matches")
             .select("id, player1_address, player2_address, status, selection_deadline_at, created_at")
             .or(`player1_address.eq.${address},player2_address.eq.${address}`)
-            .in("status", ["waiting", "character_select"])
+            .in("status", ["waiting", "character_select", "in_progress"])
             .order("created_at", { ascending: false })
             .limit(1)
             .maybeSingle();
@@ -197,7 +197,7 @@ export async function handleQueueStatus(req: Request): Promise<Response> {
                     .from("matches")
                     .select("id, player1_address, player2_address, selection_deadline_at")
                     .or(`player1_address.eq.${address},player2_address.eq.${address}`)
-                    .in("status", ["character_select"])
+                    .in("status", ["waiting", "character_select", "in_progress"])
                     .order("created_at", { ascending: false })
                     .limit(1)
                     .maybeSingle();

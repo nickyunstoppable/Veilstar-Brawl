@@ -1,3 +1,36 @@
+## ZK Finalization (Option B UX)
+
+To finalize matches with a single end-of-match proof submission:
+
+ - Endpoint: `POST /api/matches/:matchId/zk/finalize`
+ - Required body fields: `winnerAddress`, `proof`
+ - Optional: `publicInputs`, `transcriptHash`
+
+Server-side Noir verification bridge is controlled by env vars:
+
+ - `ZK_VERIFY_ENABLED` (default: `true`)
+ - `ZK_VK_PATH` (required when verification enabled)
+ - `ZK_VERIFY_CMD` (optional command template)
+
+Default verifier command template:
+
+```bash
+bb verify -k {VK_PATH} -p {PROOF_PATH} -i {PUBLIC_INPUTS_PATH}
+```
+
+Supported placeholders in `ZK_VERIFY_CMD`:
+
+ - `{VK_PATH}`
+ - `{PROOF_PATH}`
+ - `{PUBLIC_INPUTS_PATH}`
+ - `{MATCH_ID}`
+ - `{WINNER_ADDRESS}`
+ - `{TRANSCRIPT_HASH}`
+
+To avoid per-action wallet popups during gameplay, keep:
+
+ - Server: `ZK_OFFCHAIN_ACTIONS=true` (default)
+ - Frontend: `VITE_ZK_OFFCHAIN_ACTIONS=true` (default)
 # Stellar Game Studio
 
 Development Tools For Web3 Game Builders On Stellar.

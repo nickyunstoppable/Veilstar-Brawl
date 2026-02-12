@@ -22,6 +22,10 @@ import {
     xdr as xdrLib,
 } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
+import type { PowerSurgeCardId } from "./power-surge";
+import { ensureEnvLoaded } from "./env";
+
+ensureEnvLoaded();
 
 // =============================================================================
 // CONFIG
@@ -43,6 +47,24 @@ const MOVE_TYPE_MAP: Record<string, number> = {
     kick: 1,
     block: 2,
     special: 3,
+};
+
+const POWER_SURGE_CARD_CODE_MAP: Record<PowerSurgeCardId, number> = {
+    "dag-overclock": 0,
+    "block-fortress": 1,
+    "tx-storm": 2,
+    "mempool-congest": 3,
+    "blue-set-heal": 4,
+    "orphan-smasher": 5,
+    "10bps-barrage": 6,
+    "pruned-rage": 7,
+    "sompi-shield": 8,
+    "hash-hurricane": 9,
+    "ghost-dag": 10,
+    "finality-fist": 11,
+    "bps-blitz": 12,
+    "vaultbreaker": 13,
+    "chainbreaker": 14,
 };
 
 // =============================================================================
@@ -149,23 +171,61 @@ async function getValidUntilLedger(ttlMinutes: number = 5): Promise<number> {
     return latest.sequence + Math.ceil(ttlMinutes * 12);
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientSubmissionError(err: any): boolean {
+    const message = String(err?.message || "");
+    const responseText = String(err?.response?.data || "");
+    const combined = `${message}\n${responseText}`;
+
+    return (
+        /TRY_AGAIN_LATER/i.test(combined) ||
+        /temporar/i.test(combined) ||
+        /timeout/i.test(combined) ||
+        /rate\s*limit|too\s*many\s*requests|\b429\b/i.test(combined) ||
+        /service\s*unavailable|\b503\b/i.test(combined)
+    );
+}
+
 /**
  * Sign + send an assembled transaction, handling the "NoSignatureNeeded" edge case.
  */
 async function signAndSendTx(tx: any): Promise<{ sentTx: any; txHash?: string }> {
+    const maxAttempts = 4;
     let sentTx: any;
-    try {
-        sentTx = await tx.signAndSend();
-    } catch (err: any) {
-        if (err?.message?.includes("NoSignatureNeeded") || err?.message?.includes("read call")) {
-            sentTx = await tx.signAndSend({ force: true });
-        } else {
-            throw err;
+    let lastErr: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            try {
+                sentTx = await tx.signAndSend();
+            } catch (err: any) {
+                if (err?.message?.includes("NoSignatureNeeded") || err?.message?.includes("read call")) {
+                    sentTx = await tx.signAndSend({ force: true });
+                } else {
+                    throw err;
+                }
+            }
+
+            const txResponse = sentTx.getTransactionResponse;
+            const txHash = txResponse && "hash" in txResponse ? (txResponse as any).hash : undefined;
+            return { sentTx, txHash };
+        } catch (err: any) {
+            lastErr = err;
+            const shouldRetry = attempt < maxAttempts && isTransientSubmissionError(err);
+            if (!shouldRetry) {
+                break;
+            }
+
+            const backoffMs = 250 * attempt;
+            console.warn(`[Stellar] Transient send failure (attempt ${attempt}/${maxAttempts}) — retrying in ${backoffMs}ms`);
+            await sleep(backoffMs);
         }
     }
-    const txResponse = sentTx.getTransactionResponse;
-    const txHash = txResponse && "hash" in txResponse ? (txResponse as any).hash : undefined;
-    return { sentTx, txHash };
+
+    throw lastErr;
 }
 
 // =============================================================================
@@ -177,6 +237,12 @@ export interface OnChainResult {
     txHash?: string;
     error?: string;
     sessionId?: number;
+}
+
+export interface PreparedPlayerAction {
+    sessionId: number;
+    transactionXdr: string;
+    authEntryXdr: string;
 }
 
 /**
@@ -199,6 +265,14 @@ export function isContractConfigured(): boolean {
  * This flow requires a funded fee-payer account to sign and submit the tx envelope.
  */
 export function isOnChainRegistrationConfigured(): boolean {
+    return !!(CONTRACT_ID && ADMIN_SECRET);
+}
+
+/**
+ * Check if the server can run client-signed action submissions (move / power-surge).
+ * Requires a configured contract and funded admin fee payer.
+ */
+export function isClientSignedActionConfigured(): boolean {
     return !!(CONTRACT_ID && ADMIN_SECRET);
 }
 
@@ -284,6 +358,39 @@ function countInvokeHostFunctionAuthEntries(transactionXdr: string): number {
         count += op.body().invokeHostFunctionOp().auth().length;
     }
     return count;
+}
+
+function getPlayerAuthEntryXdr(
+    authEntries: xdrLib.SorobanAuthorizationEntry[] | undefined,
+    playerAddress: string,
+): string {
+    if (!authEntries || authEntries.length === 0) {
+        throw new Error("Simulation returned no auth entries");
+    }
+
+    const playerAddressKey = addressKey(playerAddress);
+    for (const entry of authEntries) {
+        try {
+            if (entry.credentials().switch().name !== "sorobanCredentialsAddress") continue;
+            const entryKey = entry.credentials().address().address().toXDR("base64");
+            if (entryKey === playerAddressKey) {
+                return entry.toXDR("base64");
+            }
+        } catch {
+            // skip non-address entries
+        }
+    }
+
+    throw new Error(`No auth entry found for player ${playerAddress}`);
+}
+
+async function createAdminContractClient(): Promise<contract.Client> {
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        throw new Error("Admin keypair not available");
+    }
+
+    return createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
 }
 
 /**
@@ -596,6 +703,190 @@ export async function submitMoveOnChain(
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[Stellar] Failed to submit move on-chain:`, message);
         return { success: false, error: message, sessionId };
+    }
+}
+
+/**
+ * Record a power surge card pick on-chain.
+ */
+export async function submitPowerSurgeOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    cardId: PowerSurgeCardId,
+): Promise<OnChainResult> {
+    if (!isStellarConfigured()) {
+        return { success: false, error: "Stellar contract not configured" };
+    }
+
+    const keypair = getKeypairForAddress(playerAddress);
+    if (!keypair) {
+        return { success: false, error: `No keypair for ${playerAddress}` };
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+    const cardCode = POWER_SURGE_CARD_CODE_MAP[cardId];
+    if (cardCode === undefined) {
+        return { success: false, error: `Unknown power surge card: ${cardId}` };
+    }
+
+    try {
+        const client = await createContractClient(keypair.publicKey(), createSigner(keypair));
+        const tx = await (client as any).submit_power_surge({
+            session_id: sessionId,
+            player: playerAddress,
+            round: roundNumber,
+            card_code: cardCode,
+        });
+        const { txHash } = await signAndSendTx(tx);
+
+        console.log(
+            `[Stellar] Power surge recorded: ${cardId} by ${playerAddress.slice(0, 8)}… round=${roundNumber}, TX: ${txHash || "n/a"}`,
+        );
+        return { success: true, txHash, sessionId };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[Stellar] Failed to submit power surge on-chain:`, message);
+        return { success: false, error: message, sessionId };
+    }
+}
+
+/**
+ * Prepare a move transaction where the player must sign a Soroban auth entry.
+ * Server uses admin as fee payer and submits only after client returns signed auth entry.
+ */
+export async function prepareMoveOnChain(
+    matchId: string,
+    playerAddress: string,
+    moveType: string,
+    turn: number,
+): Promise<PreparedPlayerAction> {
+    if (!isClientSignedActionConfigured()) {
+        throw new Error("Client-signed action flow is not configured");
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+    const moveVal = MOVE_TYPE_MAP[moveType];
+    if (moveVal === undefined) {
+        throw new Error(`Unknown move type: ${moveType}`);
+    }
+
+    const adminClient = await createAdminContractClient();
+    const tx = await (adminClient as any).submit_move({
+        session_id: sessionId,
+        player: playerAddress,
+        move_type: moveVal,
+        turn,
+    });
+
+    const authEntryXdr = getPlayerAuthEntryXdr(tx.simulationData?.result?.auth, playerAddress);
+    const transactionXdr = tx.toXDR();
+
+    return { sessionId, transactionXdr, authEntryXdr };
+}
+
+/**
+ * Submit a previously prepared move transaction with the player's signed auth entry.
+ */
+export async function submitSignedMoveOnChain(
+    matchId: string,
+    playerAddress: string,
+    signedAuthEntryXdr: string,
+    transactionXdr: string,
+): Promise<OnChainResult> {
+    if (!isClientSignedActionConfigured()) {
+        return { success: false, error: "Client-signed action flow is not configured" };
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+
+    try {
+        const adminClient = await createAdminContractClient();
+        const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, {
+            [addressKey(playerAddress)]: signedAuthEntryXdr,
+        });
+
+        if (replacedCount === 0) {
+            return { success: false, error: "Signed auth entry did not match transaction auth entries", sessionId };
+        }
+
+        const tx = adminClient.txFromXDR(updatedXdr);
+        await tx.simulate();
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err: any) {
+        const baseMessage = err instanceof Error ? err.message : String(err);
+        return { success: false, error: withDecodedResult(err, baseMessage), sessionId };
+    }
+}
+
+/**
+ * Prepare a power-surge submission transaction where the player must sign auth.
+ */
+export async function preparePowerSurgeOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    cardId: PowerSurgeCardId,
+): Promise<PreparedPlayerAction> {
+    if (!isClientSignedActionConfigured()) {
+        throw new Error("Client-signed action flow is not configured");
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+    const cardCode = POWER_SURGE_CARD_CODE_MAP[cardId];
+    if (cardCode === undefined) {
+        throw new Error(`Unknown power surge card: ${cardId}`);
+    }
+
+    const adminClient = await createAdminContractClient();
+    const tx = await (adminClient as any).submit_power_surge({
+        session_id: sessionId,
+        player: playerAddress,
+        round: roundNumber,
+        card_code: cardCode,
+    });
+
+    const authEntryXdr = getPlayerAuthEntryXdr(tx.simulationData?.result?.auth, playerAddress);
+    const transactionXdr = tx.toXDR();
+
+    return { sessionId, transactionXdr, authEntryXdr };
+}
+
+/**
+ * Submit a previously prepared power-surge transaction with signed auth entry.
+ */
+export async function submitSignedPowerSurgeOnChain(
+    matchId: string,
+    playerAddress: string,
+    signedAuthEntryXdr: string,
+    transactionXdr: string,
+): Promise<OnChainResult> {
+    if (!isClientSignedActionConfigured()) {
+        return { success: false, error: "Client-signed action flow is not configured" };
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+
+    try {
+        const adminClient = await createAdminContractClient();
+        const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, {
+            [addressKey(playerAddress)]: signedAuthEntryXdr,
+        });
+
+        if (replacedCount === 0) {
+            return { success: false, error: "Signed auth entry did not match transaction auth entries", sessionId };
+        }
+
+        const tx = adminClient.txFromXDR(updatedXdr);
+        await tx.simulate();
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err: any) {
+        const baseMessage = err instanceof Error ? err.message : String(err);
+        return { success: false, error: withDecodedResult(err, baseMessage), sessionId };
     }
 }
 

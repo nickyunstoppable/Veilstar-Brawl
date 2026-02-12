@@ -4,6 +4,9 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { ensureEnvLoaded } from "./env";
+
+ensureEnvLoaded();
 
 let supabaseInstance: SupabaseClient | null = null;
 

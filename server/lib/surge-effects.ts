@@ -2,170 +2,195 @@
  * Surge Effects (server)
  *
  * Server-authoritative implementation of Veilstar Brawl Power Surge modifiers.
- * Mirrors the frontend logic in veilstar-brawl-frontend/src/game/combat/SurgeEffects.ts.
+ * Mirrors KaspaClash surge logic and card parameters.
  */
 
 import crypto from "crypto";
+import type { MoveType } from "./game-types";
 import type { PowerSurgeCardId } from "./power-surge";
 
 export type PowerSurgeEffectType =
-  | "damage_boost"
+  | "damage_multiplier"
   | "damage_reduction"
-  | "energy_regen"
+  | "hp_regen"
+  | "damage_reflect"
+  | "priority_boost"
   | "energy_burn"
-  | "lifesteal"
-  | "stun"
-  | "special_boost"
-  | "counter_boost"
-  | "energy_steal"
-  | "random_win"
-  | "block_disable"
-  | "block_reflect"
+  | "conditional_heal"
+  | "counter_multiplier"
+  | "double_hit"
+  | "fury_boost"
   | "damage_immunity"
-  | "full_heal"
-  | "invisible_move";
+  | "random_win"
+  | "invisible_move"
+  | "critical_special"
+  | "energy_regen"
+  | "energy_regen_with_cost"
+  | "energy_steal"
+  | "opponent_stun"
+  | "lifesteal"
+  | "energy_drain"
+  | "guard_break";
 
-export interface PowerSurgeEffect {
-  type: PowerSurgeEffectType;
-  value: number;
+export interface PowerSurgeEffectParams {
+  damageMultiplier?: number;
+  incomingDamageReduction?: number;
+  hpRestore?: number;
+  hpRegen?: number;
+  hpCost?: number;
+  reflectPercent?: number;
+  priorityBoost?: number;
+  energyBurn?: number;
+  affectedMoves?: string[];
+  counterMultiplier?: number;
+  furyBoost?: number;
+  energySteal?: number;
+  energyRegenBonus?: number;
+  randomWinChance?: number;
+  blockDisabled?: boolean;
+  opponentBlockDisabled?: boolean;
+  lifestealPercent?: number;
+  energyDrain?: number;
+  energyCostBonus?: number;
 }
 
-export interface SurgeCardDefinition {
+interface SurgeCardDefinition {
   id: PowerSurgeCardId;
-  effects: PowerSurgeEffect[];
+  effectType: PowerSurgeEffectType;
+  effectParams: PowerSurgeEffectParams;
 }
 
-// Keep in sync with veilstar-brawl-frontend/src/types/power-surge.ts
 const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   "dag-overclock": {
     id: "dag-overclock",
-    effects: [{ type: "damage_boost", value: 0.3 }],
-  },
-  "sompi-shield": {
-    id: "sompi-shield",
-    effects: [{ type: "damage_reduction", value: 0.4 }],
-  },
-  "mempool-burn": {
-    id: "mempool-burn",
-    effects: [{ type: "energy_burn", value: 0.3 }],
-  },
-  "bps-syphon": {
-    id: "bps-syphon",
-    effects: [{ type: "lifesteal", value: 0.4 }],
-  },
-  "mempool-congest": {
-    id: "mempool-congest",
-    effects: [{ type: "stun", value: 1 }],
-  },
-  "finality-fist": {
-    id: "finality-fist",
-    effects: [
-      { type: "special_boost", value: 0.8 },
-      // Used as extra special energy cost (see applySurgeCard)
-      { type: "energy_burn", value: 20 },
-    ],
-  },
-  "10bps-barrage": {
-    id: "10bps-barrage",
-    effects: [{ type: "damage_boost", value: 0.5 }],
-  },
-  ghostdag: {
-    id: "ghostdag",
-    effects: [{ type: "invisible_move", value: 1 }],
-  },
-  "hash-hurricane": {
-    id: "hash-hurricane",
-    effects: [{ type: "random_win", value: 0.3 }],
-  },
-  "pruned-rage": {
-    id: "pruned-rage",
-    effects: [{ type: "block_disable", value: 1 }],
+    effectType: "damage_multiplier",
+    effectParams: { damageMultiplier: 1.4, incomingDamageReduction: 0.0 },
   },
   "block-fortress": {
     id: "block-fortress",
-    effects: [{ type: "block_reflect", value: 0.5 }],
-  },
-  "blue-set-heal": {
-    id: "blue-set-heal",
-    // Frontend maps energy_regen to hpRegenPerTurn for this card
-    effects: [{ type: "energy_regen", value: 15 }],
+    effectType: "damage_reflect",
+    effectParams: { reflectPercent: 1.2 },
   },
   "tx-storm": {
     id: "tx-storm",
-    effects: [
-      { type: "damage_boost", value: 0.2 },
-      { type: "energy_regen", value: 10 },
-    ],
+    effectType: "energy_regen_with_cost",
+    effectParams: { energyRegenBonus: 25, hpCost: 4 },
+  },
+  "mempool-congest": {
+    id: "mempool-congest",
+    effectType: "opponent_stun",
+    effectParams: { hpCost: 6 },
+  },
+  "blue-set-heal": {
+    id: "blue-set-heal",
+    effectType: "hp_regen",
+    effectParams: { hpRegen: 10 },
   },
   "orphan-smasher": {
     id: "orphan-smasher",
-    effects: [{ type: "counter_boost", value: 0.6 }],
+    effectType: "counter_multiplier",
+    effectParams: { counterMultiplier: 1.75 },
   },
-  chainbreaker: {
-    id: "chainbreaker",
-    // Frontend maps block_disable to bypassBlockOnHit for this card
-    effects: [{ type: "block_disable", value: 0.5 }],
+  "10bps-barrage": {
+    id: "10bps-barrage",
+    effectType: "energy_regen",
+    effectParams: { energyRegenBonus: 20 },
   },
-  vaultbreaker: {
+  "pruned-rage": {
+    id: "pruned-rage",
+    effectType: "fury_boost",
+    effectParams: { damageMultiplier: 1.3, opponentBlockDisabled: true },
+  },
+  "sompi-shield": {
+    id: "sompi-shield",
+    effectType: "damage_reduction",
+    effectParams: { incomingDamageReduction: 0.45 },
+  },
+  "hash-hurricane": {
+    id: "hash-hurricane",
+    effectType: "random_win",
+    effectParams: { randomWinChance: 0.35 },
+  },
+  "ghost-dag": {
+    id: "ghost-dag",
+    effectType: "energy_drain",
+    effectParams: { energyDrain: 30 },
+  },
+  "finality-fist": {
+    id: "finality-fist",
+    effectType: "critical_special",
+    effectParams: { damageMultiplier: 1.7, energyCostBonus: 24 },
+  },
+  "bps-blitz": {
+    id: "bps-blitz",
+    effectType: "lifesteal",
+    effectParams: { lifestealPercent: 0.35 },
+  },
+  "vaultbreaker": {
     id: "vaultbreaker",
-    effects: [{ type: "energy_steal", value: 0.25 }],
+    effectType: "energy_steal",
+    effectParams: { energySteal: 50 },
+  },
+  "chainbreaker": {
+    id: "chainbreaker",
+    effectType: "guard_break",
+    effectParams: { damageMultiplier: 1.15 },
   },
 };
 
 export interface SurgeModifiers {
-  // Damage
   damageMultiplier: number;
-  damageReduction: number;
-  damageImmunity: boolean;
-  specialDamageMultiplier: number;
-  counterDamageMultiplier: number;
-  punchKickDamageMultiplier: number;
-
-  // Energy
-  energyBurnPercent: number;
-  energyStealPercent: number;
-  energyRegenBonus: number;
-  specialEnergyCost: number;
-
-  // Health
-  lifestealPercent: number;
-  hpRegenPerTurn: number;
+  incomingDamageReduction: number;
+  priorityBoost: number;
+  energyBurn: number;
+  energySteal: number;
+  energyDrain: number;
+  hpRegen: number;
+  hpCost: number;
   fullHeal: boolean;
-
-  // Status
-  stunOpponent: boolean;
+  damageImmunity: boolean;
   invisibleMove: boolean;
-
-  // Block
-  blockDisabled: boolean;
-  blockReflectPercent: number;
+  randomWinChance: number;
+  doubleHit: boolean;
+  counterMultiplier: number;
+  reflectPercent: number;
+  opponentStun: boolean;
   bypassBlockOnHit: boolean;
-
-  // Random
-  dodgeChance: number;
+  criticalHit: boolean;
+  energyRegenBonus: number;
+  doubleHitMoves: MoveType[];
+  blockDisabled: boolean;
+  opponentBlockDisabled: boolean;
+  lifestealPercent: number;
+  specialEnergyCost: number;
 }
 
 function createDefaultModifiers(): SurgeModifiers {
   return {
     damageMultiplier: 1.0,
-    damageReduction: 0,
-    damageImmunity: false,
-    specialDamageMultiplier: 1.0,
-    counterDamageMultiplier: 1.0,
-    punchKickDamageMultiplier: 1.0,
-    energyBurnPercent: 0,
-    energyStealPercent: 0,
-    energyRegenBonus: 0,
-    specialEnergyCost: 0,
-    lifestealPercent: 0,
-    hpRegenPerTurn: 0,
+    incomingDamageReduction: 0,
+    priorityBoost: 0,
+    energyBurn: 0,
+    energySteal: 0,
+    energyDrain: 0,
+    hpRegen: 0,
+    hpCost: 0,
     fullHeal: false,
-    stunOpponent: false,
+    damageImmunity: false,
     invisibleMove: false,
-    blockDisabled: false,
-    blockReflectPercent: 0,
+    randomWinChance: 0,
+    doubleHit: false,
+    counterMultiplier: 1.0,
+    reflectPercent: 0,
+    opponentStun: false,
     bypassBlockOnHit: false,
-    dodgeChance: 0,
+    criticalHit: false,
+    energyRegenBonus: 0,
+    doubleHitMoves: [],
+    blockDisabled: false,
+    opponentBlockDisabled: false,
+    lifestealPercent: 0,
+    specialEnergyCost: 0,
   };
 }
 
@@ -177,81 +202,108 @@ export function calculateSurgeEffects(
   player1CardId: PowerSurgeCardId | null,
   player2CardId: PowerSurgeCardId | null
 ): { player1Modifiers: SurgeModifiers; player2Modifiers: SurgeModifiers } {
-  const p1Mods = createDefaultModifiers();
-  const p2Mods = createDefaultModifiers();
-
-  if (player1CardId) applySurgeCard(p1Mods, p2Mods, player1CardId);
-  if (player2CardId) applySurgeCard(p2Mods, p1Mods, player2CardId);
-
-  return { player1Modifiers: p1Mods, player2Modifiers: p2Mods };
+  return {
+    player1Modifiers: player1CardId
+      ? calculateCardModifiers(getSurgeCard(player1CardId) ?? null)
+      : createDefaultModifiers(),
+    player2Modifiers: player2CardId
+      ? calculateCardModifiers(getSurgeCard(player2CardId) ?? null)
+      : createDefaultModifiers(),
+  };
 }
 
-function applySurgeCard(selfMods: SurgeModifiers, opponentMods: SurgeModifiers, cardId: PowerSurgeCardId): void {
-  const card = getSurgeCard(cardId);
-  if (!card) return;
+function calculateCardModifiers(card: SurgeCardDefinition | null): SurgeModifiers {
+  const mods = createDefaultModifiers();
+  if (!card) return mods;
 
-  for (const effect of card.effects) {
-    switch (effect.type) {
-      case "damage_boost":
-        if (cardId === "10bps-barrage") selfMods.punchKickDamageMultiplier += effect.value;
-        else selfMods.damageMultiplier += effect.value;
-        break;
-      case "damage_reduction":
-        selfMods.damageReduction += effect.value;
-        break;
-      case "energy_burn":
-        if (cardId === "finality-fist") selfMods.specialEnergyCost += effect.value;
-        else opponentMods.energyBurnPercent += effect.value;
-        break;
-      case "energy_regen":
-        if (cardId === "blue-set-heal") selfMods.hpRegenPerTurn += effect.value;
-        else selfMods.energyRegenBonus += effect.value;
-        break;
-      case "lifesteal":
-        selfMods.lifestealPercent += effect.value;
-        break;
-      case "stun":
-        selfMods.stunOpponent = true;
-        break;
-      case "special_boost":
-        selfMods.specialDamageMultiplier += effect.value;
-        break;
-      case "counter_boost":
-        selfMods.counterDamageMultiplier += effect.value;
-        break;
-      case "invisible_move":
-        selfMods.invisibleMove = true;
-        break;
-      case "random_win":
-        selfMods.dodgeChance += effect.value;
-        break;
-      case "block_disable":
-        if (cardId === "chainbreaker") selfMods.bypassBlockOnHit = true;
-        else opponentMods.blockDisabled = true;
-        break;
-      case "block_reflect":
-        selfMods.blockReflectPercent += effect.value;
-        break;
-      case "energy_steal":
-        selfMods.energyStealPercent += effect.value;
-        break;
-      case "damage_immunity":
-        selfMods.damageImmunity = true;
-        break;
-      case "full_heal":
-        selfMods.fullHeal = true;
-        break;
-    }
+  const params = card.effectParams;
+
+  switch (card.effectType) {
+    case "damage_multiplier":
+      mods.damageMultiplier = params.damageMultiplier ?? 1.0;
+      if (params.incomingDamageReduction !== undefined) {
+        mods.incomingDamageReduction = params.incomingDamageReduction;
+      }
+      break;
+    case "damage_reduction":
+      mods.incomingDamageReduction = params.incomingDamageReduction ?? 0;
+      break;
+    case "hp_regen":
+      mods.hpRegen = params.hpRegen ?? 0;
+      break;
+    case "damage_reflect":
+      mods.hpRegen = params.hpRegen ?? 0;
+      mods.reflectPercent = params.reflectPercent ?? 0;
+      break;
+    case "priority_boost":
+      mods.priorityBoost = params.priorityBoost ?? 0;
+      break;
+    case "energy_burn":
+      mods.energyBurn = params.energyBurn ?? 0;
+      break;
+    case "energy_drain":
+      mods.energyDrain = params.energyDrain ?? 0;
+      break;
+    case "conditional_heal":
+      mods.fullHeal = true;
+      break;
+    case "counter_multiplier":
+      mods.counterMultiplier = params.counterMultiplier ?? 1.0;
+      break;
+    case "double_hit":
+      mods.doubleHit = true;
+      mods.doubleHitMoves = (params.affectedMoves ?? ["punch", "kick"]) as MoveType[];
+      break;
+    case "fury_boost":
+      mods.damageMultiplier = params.damageMultiplier ?? 1.3;
+      mods.opponentBlockDisabled = params.opponentBlockDisabled ?? false;
+      break;
+    case "damage_immunity":
+      mods.damageImmunity = true;
+      break;
+    case "random_win":
+      mods.randomWinChance = params.randomWinChance ?? 1.0;
+      break;
+    case "invisible_move":
+      mods.invisibleMove = true;
+      break;
+    case "critical_special":
+      mods.criticalHit = true;
+      mods.damageMultiplier = params.damageMultiplier ?? 1.7;
+      mods.specialEnergyCost = params.energyCostBonus ?? 12;
+      break;
+    case "energy_regen":
+      mods.energyRegenBonus = params.energyRegenBonus ?? 18;
+      break;
+    case "energy_regen_with_cost":
+      mods.energyRegenBonus = params.energyRegenBonus ?? 25;
+      mods.hpCost = params.hpCost ?? 4;
+      break;
+    case "energy_steal":
+      mods.energySteal = params.energySteal ?? 18;
+      break;
+    case "opponent_stun":
+      mods.opponentStun = true;
+      mods.hpCost = params.hpCost ?? 6;
+      break;
+    case "lifesteal":
+      mods.lifestealPercent = params.lifestealPercent ?? 0.35;
+      break;
+    case "guard_break":
+      mods.bypassBlockOnHit = true;
+      mods.damageMultiplier = params.damageMultiplier ?? 1.15;
+      break;
   }
+
+  return mods;
 }
 
-export function applyDamageModifiers(baseDamage: number, surgeMods: SurgeModifiers, moveType: string, isCounterHit: boolean): number {
+export function applyDamageModifiers(baseDamage: number, surgeMods: SurgeModifiers, moveType: MoveType, isCounterHit: boolean): number {
   let damage = baseDamage;
   damage *= surgeMods.damageMultiplier;
 
-  if (moveType === "punch" || moveType === "kick") damage *= surgeMods.punchKickDamageMultiplier;
-  if (moveType === "special") damage *= surgeMods.specialDamageMultiplier;
-  if (isCounterHit) damage *= surgeMods.counterDamageMultiplier;
+  if (isCounterHit) damage *= surgeMods.counterMultiplier;
+  if (surgeMods.doubleHit && surgeMods.doubleHitMoves.includes(moveType)) damage *= 2;
 
   return Math.floor(damage);
 }
@@ -261,18 +313,18 @@ export function applyDefensiveModifiers(
   surgeMods: SurgeModifiers,
   isBlocking: boolean
 ): { actualDamage: number; reflectedDamage: number } {
-  // Immunity means no damage and no reflection
   if (surgeMods.damageImmunity) return { actualDamage: 0, reflectedDamage: 0 };
 
   let actualDamage = incomingDamage;
   let reflectedDamage = 0;
 
-  if (surgeMods.damageReduction > 0) {
-    actualDamage = Math.floor(actualDamage * (1 - surgeMods.damageReduction));
+  if (surgeMods.incomingDamageReduction !== 0) {
+    const multiplier = 1 - surgeMods.incomingDamageReduction;
+    actualDamage = Math.floor(actualDamage * multiplier);
   }
 
-  if (isBlocking && surgeMods.blockReflectPercent > 0) {
-    reflectedDamage = Math.floor(incomingDamage * surgeMods.blockReflectPercent);
+  if (isBlocking && surgeMods.reflectPercent > 0) {
+    reflectedDamage = Math.floor(incomingDamage * surgeMods.reflectPercent);
   }
 
   return { actualDamage, reflectedDamage };
@@ -285,36 +337,42 @@ export function applyEnergyEffects(
 ): { energyBurned: number; energyStolen: number; energyRegenBonus: number } {
   let energyBurned = 0;
   let energyStolen = 0;
-  const energyRegenBonus = surgeMods.energyRegenBonus;
 
-  if (surgeMods.energyBurnPercent > 0) {
-    energyBurned = Math.floor(opponentEnergy * surgeMods.energyBurnPercent);
+  if (didHit) {
+    energyBurned += Math.min(surgeMods.energyBurn, opponentEnergy);
+    energyStolen += Math.min(surgeMods.energySteal, opponentEnergy);
   }
 
-  if (surgeMods.energyStealPercent > 0 && didHit) {
-    energyStolen = Math.floor(opponentEnergy * surgeMods.energyStealPercent);
+  if (surgeMods.energyDrain > 0) {
+    const remainingEnergy = Math.max(0, opponentEnergy - energyBurned);
+    energyBurned += Math.min(surgeMods.energyDrain, remainingEnergy);
   }
 
-  return { energyBurned, energyStolen, energyRegenBonus };
+  return { energyBurned, energyStolen, energyRegenBonus: surgeMods.energyRegenBonus };
 }
 
-export function applyHpEffects(surgeMods: SurgeModifiers, currentHp: number, maxHp: number): { hpAfter: number; hpRegen: number } {
+export function applyHpEffects(surgeMods: SurgeModifiers, currentHp: number, maxHp: number): number {
+  if (currentHp <= 0) return currentHp;
+
   let hp = currentHp;
 
   if (surgeMods.fullHeal) {
-    hp = maxHp;
+    return maxHp;
   }
 
-  const beforeRegen = hp;
-  if (surgeMods.hpRegenPerTurn > 0) {
-    hp = Math.min(maxHp, hp + surgeMods.hpRegenPerTurn);
+  if (surgeMods.hpRegen > 0) {
+    hp = Math.min(maxHp, hp + surgeMods.hpRegen);
   }
 
-  return { hpAfter: hp, hpRegen: Math.max(0, hp - beforeRegen) };
+  if (surgeMods.hpCost > 0) {
+    hp = Math.max(1, hp - surgeMods.hpCost);
+  }
+
+  return hp;
 }
 
 export function shouldStunOpponent(surgeMods: SurgeModifiers): boolean {
-  return surgeMods.stunOpponent;
+  return surgeMods.opponentStun;
 }
 
 export function isInvisibleMove(surgeMods: SurgeModifiers): boolean {
@@ -326,7 +384,9 @@ export function shouldBypassBlock(surgeMods: SurgeModifiers): boolean {
 }
 
 export function isBlockDisabled(selfMods: SurgeModifiers, opponentMods: SurgeModifiers): boolean {
-  return selfMods.blockDisabled || opponentMods.blockDisabled;
+  if (selfMods.blockDisabled) return true;
+  if (opponentMods.opponentBlockDisabled) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,4 +405,9 @@ export function deterministicChance(seed: string, probability: number): boolean 
   const x = hash32(seed);
   const r = x / 0xffffffff;
   return r < probability;
+}
+
+export function checkRandomWin(modifiers: SurgeModifiers): boolean {
+  if (modifiers.randomWinChance <= 0) return false;
+  return Math.random() < modifiers.randomWinChance;
 }

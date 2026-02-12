@@ -469,13 +469,9 @@ async function _broadcastMatchFoundImpl(
     const supabase = getSupabase();
 
     try {
-        const channel = supabase.channel(`matchmaking:${player1Address}`);
+        const channel = supabase.channel("matchmaking:queue");
         await sendBroadcast(channel as any, "match_found", { matchId, player1Address, player2Address, selectionDeadlineAt });
         await supabase.removeChannel(channel);
-
-        const channel2 = supabase.channel(`matchmaking:${player2Address}`);
-        await sendBroadcast(channel2 as any, "match_found", { matchId, player1Address, player2Address, selectionDeadlineAt });
-        await supabase.removeChannel(channel2);
 
         console.log(`[Matchmaker] Broadcast match_found for ${matchId}`);
     } catch (err) {

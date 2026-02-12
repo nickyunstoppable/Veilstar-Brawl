@@ -7,13 +7,27 @@
 
 import { handleJoinQueue, handleQueueStatus, handleLeaveQueue } from "./routes/matchmaking/queue";
 import { handleGetMatch } from "./routes/matches/match";
-import { handleSubmitMove } from "./routes/matches/move";
+import { handlePrepareMoveOnChain, handleSubmitMove } from "./routes/matches/move";
 import { handleCharacterSelect } from "./routes/matches/select";
+import { handleSubmitBan } from "./routes/matches/ban";
 import { handleForfeit } from "./routes/matches/forfeit";
 import { handlePrepareRegistration, handleSubmitAuth } from "./routes/matches/register";
-import { handleGetPowerSurgeCards, handleSelectPowerSurge } from "./routes/matches/power-surge";
+import {
+    handleGetPowerSurgeCards,
+    handlePreparePowerSurge,
+    handleSelectPowerSurge,
+} from "./routes/matches/power-surge";
+import { handleRejectMove } from "./routes/matches/reject";
+import { handleMoveTimeoutRoute } from "./routes/matches/move-timeout";
+import { handleTimeoutVictory } from "./routes/matches/timeout";
+import { handleDisconnect } from "./routes/matches/disconnect";
+import { handleFinalizeWithZkProof } from "./routes/matches/zk-finalize";
+import { handleProveAndFinalize } from "./routes/matches/zk-prove-finalize";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
+import { ensureEnvLoaded } from "./lib/env";
+
+ensureEnvLoaded();
 
 const PORT = parseInt(process.env.SERVER_PORT || "3001", 10);
 
@@ -21,16 +35,25 @@ const PORT = parseInt(process.env.SERVER_PORT || "3001", 10);
 // CORS
 // =============================================================================
 
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Max-Age": "86400",
-};
+function getCorsHeaders(req?: Request): Record<string, string> {
+    const requestOrigin = req?.headers.get("origin") || "";
+    const configuredOrigin = process.env.CORS_ORIGIN || "";
+    const allowOrigin = configuredOrigin || requestOrigin || "*";
 
-function corsResponse(response: Response): Response {
+    return {
+        "Access-Control-Allow-Origin": allowOrigin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Max-Age": "86400",
+        "Vary": "Origin",
+    };
+}
+
+function corsResponse(response: Response, req?: Request): Response {
+    const corsHeaders = getCorsHeaders(req);
     const headers = new Headers(response.headers);
-    Object.entries(CORS_HEADERS).forEach(([k, v]) => headers.set(k, v));
+    Object.entries(corsHeaders).forEach(([k, v]) => headers.set(k, v));
     return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
@@ -38,8 +61,8 @@ function corsResponse(response: Response): Response {
     });
 }
 
-function corsOptions(): Response {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
+function corsOptions(req?: Request): Response {
+    return new Response(null, { status: 204, headers: getCorsHeaders(req) });
 }
 
 // =============================================================================
@@ -58,7 +81,7 @@ async function handleRequest(req: Request): Promise<Response> {
     const method = req.method;
 
     // CORS preflight
-    if (method === "OPTIONS") return corsOptions();
+    if (method === "OPTIONS") return corsOptions(req);
 
     // -----------------------------------------------
     // Health check
@@ -69,23 +92,23 @@ async function handleRequest(req: Request): Promise<Response> {
             server: "veilstar-brawl",
             timestamp: new Date().toISOString(),
             uptime: process.uptime(),
-        }));
+        }), req);
     }
 
     // -----------------------------------------------
     // Matchmaking Queue
     // -----------------------------------------------
     if (pathname === "/api/matchmaking/queue") {
-        if (method === "POST") return corsResponse(await handleJoinQueue(req));
-        if (method === "GET") return corsResponse(await handleQueueStatus(req));
-        if (method === "DELETE") return corsResponse(await handleLeaveQueue(req));
+        if (method === "POST") return corsResponse(await handleJoinQueue(req), req);
+        if (method === "GET") return corsResponse(await handleQueueStatus(req), req);
+        if (method === "DELETE") return corsResponse(await handleLeaveQueue(req), req);
     }
 
     // -----------------------------------------------
     // Leaderboard
     // -----------------------------------------------
     if (pathname === "/api/leaderboard" && method === "GET") {
-        return corsResponse(await handleGetLeaderboard(req));
+        return corsResponse(await handleGetLeaderboard(req), req);
     }
 
     // -----------------------------------------------
@@ -97,10 +120,10 @@ async function handleRequest(req: Request): Promise<Response> {
         const isMatches = !!playerMatch[2];
 
         if (isMatches && method === "GET") {
-            return corsResponse(await handleGetPlayerMatches(playerAddress, req));
+            return corsResponse(await handleGetPlayerMatches(playerAddress, req), req);
         }
         if (!isMatches && method === "GET") {
-            return corsResponse(await handleGetPlayer(playerAddress));
+            return corsResponse(await handleGetPlayer(playerAddress), req);
         }
     }
 
@@ -111,47 +134,97 @@ async function handleRequest(req: Request): Promise<Response> {
     if (matchId) {
         // GET /api/matches/:matchId
         if (pathname === `/api/matches/${matchId}` && method === "GET") {
-            return corsResponse(await handleGetMatch(matchId));
+            return corsResponse(await handleGetMatch(matchId), req);
         }
 
         // GET /api/matches/:matchId/verify
         if (pathname === `/api/matches/${matchId}/verify` && method === "GET") {
-            return corsResponse(await handleGetMatch(matchId));
+            return corsResponse(await handleGetMatch(matchId), req);
         }
 
         // POST /api/matches/:matchId/move
         if (pathname === `/api/matches/${matchId}/move` && method === "POST") {
-            return corsResponse(await handleSubmitMove(matchId, req));
+            return corsResponse(await handleSubmitMove(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/move/prepare
+        if (pathname === `/api/matches/${matchId}/move/prepare` && method === "POST") {
+            return corsResponse(await handlePrepareMoveOnChain(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/select
         if (pathname === `/api/matches/${matchId}/select` && method === "POST") {
-            return corsResponse(await handleCharacterSelect(matchId, req));
+            return corsResponse(await handleCharacterSelect(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/ban
+        if (pathname === `/api/matches/${matchId}/ban` && method === "POST") {
+            return corsResponse(await handleSubmitBan(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/register/prepare
         if (pathname === `/api/matches/${matchId}/register/prepare` && method === "POST") {
-            return corsResponse(await handlePrepareRegistration(matchId, req));
+            return corsResponse(await handlePrepareRegistration(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/register/auth
         if (pathname === `/api/matches/${matchId}/register/auth` && method === "POST") {
-            return corsResponse(await handleSubmitAuth(matchId, req));
+            return corsResponse(await handleSubmitAuth(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/forfeit
         if (pathname === `/api/matches/${matchId}/forfeit` && method === "POST") {
-            return corsResponse(await handleForfeit(matchId, req));
+            return corsResponse(await handleForfeit(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/reject
+        if (pathname === `/api/matches/${matchId}/reject` && method === "POST") {
+            return corsResponse(await handleRejectMove(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/move-timeout
+        if (pathname === `/api/matches/${matchId}/move-timeout` && method === "POST") {
+            return corsResponse(await handleMoveTimeoutRoute(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/timeout
+        if (pathname === `/api/matches/${matchId}/timeout` && method === "POST") {
+            return corsResponse(await handleTimeoutVictory(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/disconnect
+        if (pathname === `/api/matches/${matchId}/disconnect` && method === "POST") {
+            return corsResponse(await handleDisconnect(matchId, req), req);
+        }
+
+        // GET /api/matches/:matchId/power-surge (legacy)
+        if (pathname === `/api/matches/${matchId}/power-surge` && method === "GET") {
+            return corsResponse(await handleGetPowerSurgeCards(matchId, req), req);
         }
 
         // GET /api/matches/:matchId/power-surge/cards
         if (pathname === `/api/matches/${matchId}/power-surge/cards` && method === "GET") {
-            return corsResponse(await handleGetPowerSurgeCards(matchId, req));
+            return corsResponse(await handleGetPowerSurgeCards(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/power-surge/select
         if (pathname === `/api/matches/${matchId}/power-surge/select` && method === "POST") {
-            return corsResponse(await handleSelectPowerSurge(matchId, req));
+            return corsResponse(await handleSelectPowerSurge(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/power-surge/prepare
+        if (pathname === `/api/matches/${matchId}/power-surge/prepare` && method === "POST") {
+            return corsResponse(await handlePreparePowerSurge(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/zk/finalize
+        if (pathname === `/api/matches/${matchId}/zk/finalize` && method === "POST") {
+            return corsResponse(await handleFinalizeWithZkProof(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/zk/prove-finalize
+        if (pathname === `/api/matches/${matchId}/zk/prove-finalize` && method === "POST") {
+            return corsResponse(await handleProveAndFinalize(matchId, req), req);
         }
     }
 
@@ -161,7 +234,7 @@ async function handleRequest(req: Request): Promise<Response> {
     return corsResponse(Response.json(
         { error: "Not found", path: pathname },
         { status: 404 }
-    ));
+    ), req);
 }
 
 // =============================================================================

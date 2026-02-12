@@ -145,6 +145,19 @@ fn test_submit_move_increments_counters() {
 }
 
 #[test]
+fn test_submit_power_surge_collects_fee() {
+    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+
+    client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
+
+    client.submit_power_surge(&1u32, &p1, &1u32, &7u32);
+    client.submit_power_surge(&1u32, &p2, &1u32, &3u32);
+
+    let m = client.get_match(&1u32);
+    assert_eq!(m.total_xlm_collected, 2_000); // 2 * 1_000 stroops
+}
+
+#[test]
 fn test_end_match_sets_winner() {
     let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
 

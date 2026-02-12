@@ -124,7 +124,6 @@ export default function PracticeMenu({ onStart }: PracticeMenuProps) {
                     <Button
                         onClick={() => onStart(selectedChar, difficulty)}
                         className="w-full h-14 text-lg bg-gradient-cyber text-white font-orbitron font-bold shadow-[0_0_20px_rgba(240,183,31,0.3)] hover:shadow-[0_0_30px_rgba(240,183,31,0.5)] transition-all"
-                        data-tutorial="start-training"
                     >
                         START TRAINING
                     </Button>

@@ -1,266 +1,388 @@
 /**
- * Power Surge Card Types & Data
+ * Power Surge Types
+ * Definitions for the Power Surge round boost feature
+ * 
+ * Power Surge cards appear at the start of each round in FightScene.
+ * Players can choose one card by clicking and confirming via Kaspa transaction.
+ * Effects last for ONE round only.
  */
 
 // =============================================================================
-// TYPES
+// CARD DEFINITIONS
 // =============================================================================
 
-export type PowerSurgeEffectType =
-  | "damage_boost"
-  | "damage_reduction"
-  | "energy_regen"
-  | "energy_burn"
-  | "lifesteal"
-  | "stun"
-  | "special_boost"
-  | "counter_boost"
-  | "energy_steal"
-  | "random_win"
-  | "block_disable"
-  | "block_reflect"
-  | "damage_immunity"
-  | "full_heal"
-  | "invisible_move";
-
+/**
+ * Unique identifier for each Power Surge card.
+ */
 export type PowerSurgeCardId =
   | "dag-overclock"
-  | "sompi-shield"
-  | "mempool-burn"
-  | "bps-syphon"
-  | "mempool-congest"
-  | "finality-fist"
-  | "10bps-barrage"
-  | "ghostdag"
-  | "hash-hurricane"
-  | "pruned-rage"
   | "block-fortress"
-  | "blue-set-heal"
   | "tx-storm"
+  | "mempool-congest"
+  | "blue-set-heal"
   | "orphan-smasher"
-  | "chainbreaker"
-  | "vaultbreaker";
+  | "10bps-barrage"
+  | "pruned-rage"
+  | "sompi-shield"
+  | "hash-hurricane"
+  | "ghost-dag"
+  | "finality-fist"
+  | "bps-blitz"
+  | "vaultbreaker"
+  | "chainbreaker";
 
-export interface PowerSurgeEffect {
-  type: PowerSurgeEffectType;
-  value: number;
+/**
+ * Rarity tier for visual styling.
+ */
+export type PowerSurgeRarity = "common" | "rare" | "epic" | "legendary";
+
+/**
+ * Power Surge card definition with all display and effect data.
+ */
+export interface PowerSurgeCard {
+  /** Unique identifier */
+  id: PowerSurgeCardId;
+  /** Display name */
+  name: string;
+  /** Short description of effect */
   description: string;
+  /** Neon border color (hex) */
+  glowColor: number;
+  /** Icon key for Phaser (e.g., "surge_dag_overclock") */
+  iconKey: string;
+  /** Effect type for combat engine */
+  effectType: PowerSurgeEffectType;
+  /** Effect parameters */
+  effectParams: PowerSurgeEffectParams;
 }
 
-export interface PowerSurgeCard {
-  id: PowerSurgeCardId;
-  name: string;
-  description: string;
-  effects: PowerSurgeEffect[];
-  iconKey: string;
-  glowColor: number;
-  rarity: "common" | "rare" | "epic" | "legendary";
+// =============================================================================
+// EFFECT TYPES
+// =============================================================================
+
+/**
+ * Categories of power surge effects.
+ */
+export type PowerSurgeEffectType =
+  | "damage_multiplier"    // Multiply damage dealt
+  | "damage_reduction"     // Reduce incoming damage
+  | "hp_regen"            // Restore HP
+  | "damage_reflect"      // Reflect damage when blocking
+  | "priority_boost"      // Move goes first
+  | "energy_burn"         // Burn opponent energy on hit
+  | "conditional_heal"    // Heal on condition
+  | "counter_multiplier"  // Multiplied counter damage
+  | "double_hit"          // Attacks hit twice
+  | "fury_boost"          // Boost fury/damage meter (+ damage, can't block)
+  | "damage_immunity"     // Immune to all damage
+  | "random_win"          // Random move auto-wins / dodge chance
+  | "invisible_move"      // Move cannot be countered
+  | "critical_special"    // Guaranteed crit on special
+  | "energy_regen"        // Bonus energy regen
+  | "energy_regen_with_cost" // Energy regen with HP cost
+  | "energy_steal"        // Steal opponent energy
+  | "opponent_stun"       // Stun opponent next move
+  | "lifesteal"           // Heal for % of damage dealt
+  | "energy_drain"        // Passive energy drain from opponent
+  | "guard_break";        // Break guard on any hit
+
+/**
+ * Parameters for power surge effects.
+ */
+export interface PowerSurgeEffectParams {
+  /** Damage multiplier (e.g., 1.5 for +50%) */
+  damageMultiplier?: number;
+  /** Incoming damage reduction (0.6 = take 60% less damage) */
+  incomingDamageReduction?: number;
+  /** HP amount to restore */
+  hpRestore?: number;
+  /** HP regen per turn */
+  hpRegen?: number;
+  /** HP cost to pay */
+  hpCost?: number;
+  /** Damage reflect percentage (0-1) */
+  reflectPercent?: number;
+  /** Priority boost amount */
+  priorityBoost?: number;
+  /** Energy to burn on hit */
+  energyBurn?: number;
+  /** Moves affected (e.g., ["punch", "kick"]) */
+  affectedMoves?: string[];
+  /** Counter damage multiplier */
+  counterMultiplier?: number;
+  /** Fury meter boost */
+  furyBoost?: number;
+  /** Energy to steal */
+  energySteal?: number;
+  /** Energy regen bonus per turn */
+  energyRegenBonus?: number;
+  /** Random win chance (0-1) */
+  randomWinChance?: number;
+  /** Disable block for this player */
+  blockDisabled?: boolean;
+  /** Disable block for opponent */
+  opponentBlockDisabled?: boolean;
+  /** Percentage of damage converted to HP */
+  lifestealPercent?: number;
+  /** Energy drained from opponent */
+  energyDrain?: number;
+  /** Extra energy cost for move */
+  energyCostBonus?: number;
 }
 
 // =============================================================================
 // CARD CATALOG
 // =============================================================================
 
-export const POWER_SURGE_CARDS: PowerSurgeCard[] = [
+/**
+ * Complete catalog of all 15 Power Surge cards.
+ */
+export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "dag-overclock",
     name: "DAG Overclock",
-    description: "+30% damage this round",
-    effects: [{ type: "damage_boost", value: 0.3, description: "+30% damage" }],
-    iconKey: "surge_dag-overclock",
-    glowColor: 0xff6600,
-    rarity: "rare",
-  },
-  {
-    id: "sompi-shield",
-    name: "Sompi Shield",
-    description: "-40% incoming damage this round",
-    effects: [{ type: "damage_reduction", value: 0.4, description: "-40% incoming damage" }],
-    iconKey: "surge_sompi-shield",
-    glowColor: 0x00ccff,
-    rarity: "rare",
-  },
-  {
-    id: "mempool-burn",
-    name: "Mempool Burn",
-    description: "Burn 30% of opponent's energy",
-    effects: [{ type: "energy_burn", value: 0.3, description: "Burn 30% opponent energy" }],
-    iconKey: "surge_mempool-burn",
-    glowColor: 0xff3300,
-    rarity: "epic",
-  },
-  {
-    id: "bps-syphon",
-    name: "BPS Syphon",
-    description: "Lifesteal: heal 40% of damage dealt",
-    effects: [{ type: "lifesteal", value: 0.4, description: "40% lifesteal" }],
-    iconKey: "surge_bps-blitz",
-    glowColor: 0x9933ff,
-    rarity: "epic",
-  },
-  {
-    id: "mempool-congest",
-    name: "Mempool Congest",
-    description: "Stun opponent for 1 turn",
-    effects: [{ type: "stun", value: 1, description: "Stun 1 turn" }],
-    iconKey: "surge_tx-storm",
-    glowColor: 0xffcc00,
-    rarity: "legendary",
-  },
-  {
-    id: "finality-fist",
-    name: "Finality Fist",
-    description: "+80% special damage, costs 20 extra energy",
-    effects: [
-      { type: "special_boost", value: 0.8, description: "+80% special damage" },
-      { type: "energy_burn", value: 20, description: "Costs 20 extra energy" },
-    ],
-    iconKey: "surge_finality-fist",
-    glowColor: 0xff0066,
-    rarity: "legendary",
-  },
-  {
-    id: "10bps-barrage",
-    name: "10 BPS Barrage",
-    description: "+50% kick & punch damage",
-    effects: [
-      { type: "damage_boost", value: 0.5, description: "+50% punch/kick damage" },
-    ],
-    iconKey: "surge_10bps-barrage",
+    description: "+40% damage dealt",
     glowColor: 0x00ff88,
-    rarity: "rare",
-  },
-  {
-    id: "ghostdag",
-    name: "GhostDAG",
-    description: "Your moves can't be countered this round",
-    effects: [{ type: "invisible_move", value: 1, description: "Cannot be countered" }],
-    iconKey: "surge_ghost-dag",
-    glowColor: 0x6666ff,
-    rarity: "epic",
-  },
-  {
-    id: "hash-hurricane",
-    name: "Hash Hurricane",
-    description: "30% chance to dodge opponent's attack",
-    effects: [{ type: "random_win", value: 0.3, description: "30% dodge chance" }],
-    iconKey: "surge_hash-hurricane",
-    glowColor: 0x00ffcc,
-    rarity: "epic",
-  },
-  {
-    id: "pruned-rage",
-    name: "Pruned Rage",
-    description: "Disable opponent's block this round",
-    effects: [{ type: "block_disable", value: 1, description: "Disable opponent block" }],
-    iconKey: "surge_pruned-rage",
-    glowColor: 0xff0000,
-    rarity: "legendary",
+    iconKey: "surge_dag-overclock",
+    effectType: "damage_multiplier",
+    effectParams: { damageMultiplier: 1.4, incomingDamageReduction: 0.0 },
   },
   {
     id: "block-fortress",
     name: "Block Fortress",
-    description: "Reflect 50% damage when blocking",
-    effects: [{ type: "block_reflect", value: 0.5, description: "50% block reflect" }],
+    description: "Blocks reflect 120% damage",
+    glowColor: 0x00ffff,
     iconKey: "surge_block-fortress",
-    glowColor: 0x3399ff,
-    rarity: "rare",
+    effectType: "damage_reflect",
+    effectParams: { reflectPercent: 1.2 },
+  },
+  {
+    id: "tx-storm",
+    name: "Tx Storm",
+    description: "+25 energy, lose 4 HP",
+    glowColor: 0xffff00,
+    iconKey: "surge_tx-storm",
+    effectType: "energy_regen_with_cost",
+    effectParams: { energyRegenBonus: 25, hpCost: 4 },
+  },
+  {
+    id: "mempool-congest",
+    name: "Mempool Congest",
+    description: "Stun opponent (Costs 6 HP)",
+    glowColor: 0xff4400,
+    iconKey: "surge_mempool-burn",
+    effectType: "opponent_stun",
+    effectParams: { hpCost: 6 },
   },
   {
     id: "blue-set-heal",
     name: "Blue Set Heal",
-    description: "Regenerate 15 HP per turn this round",
-    effects: [{ type: "energy_regen", value: 15, description: "+15 HP per turn" }],
+    description: "Restore 10 HP over time",
+    glowColor: 0x0088ff,
     iconKey: "surge_blue-set-heal",
-    glowColor: 0x00ff00,
-    rarity: "rare",
-  },
-  {
-    id: "tx-storm",
-    name: "TX Storm",
-    description: "+20% damage and +10 energy regen per turn",
-    effects: [
-      { type: "damage_boost", value: 0.2, description: "+20% damage" },
-      { type: "energy_regen", value: 10, description: "+10 energy regen" },
-    ],
-    iconKey: "surge_tx-storm",
-    glowColor: 0xffaa00,
-    rarity: "epic",
+    effectType: "hp_regen",
+    effectParams: { hpRegen: 10 },
   },
   {
     id: "orphan-smasher",
     name: "Orphan Smasher",
-    description: "+60% damage on counter-hits",
-    effects: [{ type: "counter_boost", value: 0.6, description: "+60% counter damage" }],
+    description: "Counter deals +75% damage",
+    glowColor: 0xff0044,
     iconKey: "surge_orphan-smasher",
-    glowColor: 0xff6633,
-    rarity: "rare",
+    effectType: "counter_multiplier",
+    effectParams: { counterMultiplier: 1.75 },
   },
   {
-    id: "chainbreaker",
-    name: "Chainbreaker",
-    description: "Bypass opponent's block damage reduction",
-    effects: [{ type: "block_disable", value: 0.5, description: "Bypass block reduction" }],
-    iconKey: "surge_chainbreaker",
-    glowColor: 0xcc00ff,
-    rarity: "epic",
+    id: "10bps-barrage",
+    name: "10BPS Barrage",
+    description: "+20 energy regen on kick or punch",
+    glowColor: 0x00ff44,
+    iconKey: "surge_10bps-barrage",
+    effectType: "energy_regen",
+    effectParams: { energyRegenBonus: 20 },
+  },
+  {
+    id: "pruned-rage",
+    name: "Pruned Rage",
+    description: "+30% damage, opponent can't block",
+    glowColor: 0xff4444,
+    iconKey: "surge_pruned-rage",
+    effectType: "fury_boost",
+    effectParams: { damageMultiplier: 1.3, opponentBlockDisabled: true },
+  },
+  {
+    id: "sompi-shield",
+    name: "Sompi Shield",
+    description: "Take 45% less damage",
+    glowColor: 0xffd700,
+    iconKey: "surge_sompi-shield",
+    effectType: "damage_reduction",
+    effectParams: { incomingDamageReduction: 0.45 },
+  },
+  {
+    id: "hash-hurricane",
+    name: "Hash Hurricane",
+    description: "35% chance to dodge attack",
+    glowColor: 0x8800ff,
+    iconKey: "surge_hash-hurricane",
+    effectType: "random_win",
+    effectParams: { randomWinChance: 0.35 },
+  },
+  {
+    id: "ghost-dag",
+    name: "GhostDAG",
+    description: "Opponent loses 30 Energy every turn",
+    glowColor: 0x666699,
+    iconKey: "surge_ghost-dag",
+    effectType: "energy_drain",
+    effectParams: { energyDrain: 30 },
+  },
+  {
+    id: "finality-fist",
+    name: "Finality Fist",
+    description: "Special +70% dmg, costs +24 energy",
+    glowColor: 0xff00ff,
+    iconKey: "surge_finality-fist",
+    effectType: "critical_special",
+    effectParams: { damageMultiplier: 1.7, energyCostBonus: 24 },
+  },
+  {
+    id: "bps-blitz",
+    name: "BPS Syphon",
+    description: "Heal for 35% of damage dealt",
+    glowColor: 0x44ff88,
+    iconKey: "surge_bps-blitz",
+    effectType: "lifesteal",
+    effectParams: { lifestealPercent: 0.35 },
   },
   {
     id: "vaultbreaker",
     name: "Vaultbreaker",
-    description: "Steal 25% of opponent's energy on hit",
-    effects: [{ type: "energy_steal", value: 0.25, description: "25% energy steal on hit" }],
+    description: "Steal 50 energy on hit",
+    glowColor: 0xffaa00,
     iconKey: "surge_vaultbreaker",
-    glowColor: 0xff9900,
-    rarity: "legendary",
+    effectType: "energy_steal",
+    effectParams: { energySteal: 50 },
   },
-];
+  {
+    id: "chainbreaker",
+    name: "Chainbreaker",
+    description: "Bypass block, +15% damage",
+    glowColor: 0xff0000,
+    iconKey: "surge_chainbreaker",
+    effectType: "guard_break",
+    effectParams: { damageMultiplier: 1.15 },
+  },
+] as const;
 
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
-
-const CARDS_MAP = new Map<PowerSurgeCardId, PowerSurgeCard>(
-  POWER_SURGE_CARDS.map((card) => [card.id, card])
-);
-
+/**
+ * Get a card by its ID.
+ */
 export function getPowerSurgeCard(id: PowerSurgeCardId): PowerSurgeCard | undefined {
-  return CARDS_MAP.get(id);
+  return POWER_SURGE_CARDS.find((card) => card.id === id);
 }
 
-export function getRandomPowerSurgeCards(
-  count: number,
-  exclude: PowerSurgeCardId[] = []
-): PowerSurgeCard[] {
-  const available = POWER_SURGE_CARDS.filter((c) => !exclude.includes(c.id));
+/**
+ * Get random cards for a round.
+ * @param count Number of cards to select (default 3)
+ * @param excludeIds Card IDs to exclude (e.g., cards used in previous rounds)
+ */
+export function getRandomPowerSurgeCards(count: number = 3, excludeIds: PowerSurgeCardId[] = []): PowerSurgeCard[] {
+  const available = POWER_SURGE_CARDS.filter((card) => !excludeIds.includes(card.id));
   const shuffled = [...available].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count);
+  return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
 // =============================================================================
-// MATCH SURGE STATE TYPES
+// MATCH STATE TYPES
 // =============================================================================
 
-export interface MatchSurgeState {
+/**
+ * Power surge state for a single round.
+ */
+export interface RoundSurgeState {
+  /** Round number (1-5) */
   roundNumber: number;
-  playerCards: PowerSurgeCardId[];
-  opponentCards: PowerSurgeCardId[];
-  playerSelection: PowerSurgeCardId | null;
-  opponentSelection: PowerSurgeCardId | null;
+  /** Cards offered this round */
+  offeredCards: PowerSurgeCardId[];
+  /** Player 1's selection (null if not chosen) */
+  player1Selection: PowerSurgeCardId | null;
+  /** Player 1's transaction ID (null if not confirmed) */
+  player1TxId: string | null;
+  /** Player 2's selection (null if not chosen) */
+  player2Selection: PowerSurgeCardId | null;
+  /** Player 2's transaction ID (null if not confirmed) */
+  player2TxId: string | null;
+  /** Timestamp when cards were shown */
+  shownAt: number;
+  /** Deadline for selection (shownAt + 15000ms) */
   selectionDeadline: number;
-  isSelecting: boolean;
-  isRevealed: boolean;
 }
 
-export function createInitialSurgeState(): MatchSurgeState {
+/**
+ * Complete power surge state for a match.
+ */
+export interface MatchSurgeState {
+  /** Surge state per round */
+  rounds: RoundSurgeState[];
+  /** Cards used in previous rounds (to avoid repeats if desired) */
+  usedCards: PowerSurgeCardId[];
+}
+
+/**
+ * Payload for power surge selection event.
+ */
+export interface PowerSurgeSelectedPayload {
+  /** Match ID */
+  matchId: string;
+  /** Round number */
+  roundNumber: number;
+  /** Player who selected */
+  player: "player1" | "player2";
+  /** Selected card ID */
+  cardId: PowerSurgeCardId;
+  /** Transaction ID */
+  txId: string;
+  /** Timestamp */
+  timestamp: number;
+}
+
+/**
+ * Payload for power surge cards shown event.
+ */
+export interface PowerSurgeCardsPayload {
+  /** Match ID */
+  matchId: string;
+  /** Round number */
+  roundNumber: number;
+  /** Offered card IDs */
+  cardIds: PowerSurgeCardId[];
+  /** Selection deadline timestamp */
+  deadline: number;
+}
+
+// =============================================================================
+// TRANSACTION PAYLOAD
+// =============================================================================
+
+/**
+ * Encode power surge selection as transaction payload.
+ * Format: "surge:cardId|matchId|roundNumber"
+ */
+export function encodeSurgePayload(cardId: PowerSurgeCardId, matchId: string, roundNumber: number): string {
+  return `surge:${cardId}|${matchId.substring(0, 8)}|${roundNumber}`;
+}
+
+/**
+ * Decode power surge transaction payload.
+ */
+export function decodeSurgePayload(payload: string): { cardId: string; matchIdPrefix: string; roundNumber: number } | null {
+  if (!payload.startsWith("surge:")) return null;
+  const parts = payload.substring(6).split("|");
+  if (parts.length !== 3) return null;
   return {
-    roundNumber: 0,
-    playerCards: [],
-    opponentCards: [],
-    playerSelection: null,
-    opponentSelection: null,
-    selectionDeadline: 0,
-    isSelecting: false,
-    isRevealed: false,
+    cardId: parts[0],
+    matchIdPrefix: parts[1],
+    roundNumber: parseInt(parts[2], 10),
   };
 }

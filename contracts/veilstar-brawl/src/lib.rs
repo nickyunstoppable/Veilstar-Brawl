@@ -12,6 +12,7 @@
 //!
 //! **XLM Flow:**
 //! - Each `submit_move` transfers 0.0001 XLM from the player to this contract.
+//! - Each `submit_power_surge` also transfers 0.0001 XLM from the player.
 //! - Admin can call `sweep_treasury` to forward accumulated XLM to a treasury
 //!   wallet, keeping a 10 XLM reserve for transaction fees.
 
@@ -261,6 +262,60 @@ impl VeilstarBrawlContract {
         env.events().publish(
             (symbol_short!("move"), session_id, turn),
             (player, move_type),
+        );
+
+        Ok(())
+    }
+
+    /// Record a power surge pick on-chain and collect 0.0001 XLM from the player.
+    pub fn submit_power_surge(
+        env: Env,
+        session_id: u32,
+        player: Address,
+        round: u32,
+        card_code: u32,
+    ) -> Result<(), Error> {
+        player.require_auth();
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        // Verify caller is a participant
+        let is_p1 = player == m.player1;
+        let is_p2 = player == m.player2;
+        if !is_p1 && !is_p2 {
+            return Err(Error::NotPlayer);
+        }
+
+        // Transfer 0.0001 XLM from player → this contract via SAC
+        let xlm_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::XlmToken)
+            .expect("XLM token not set");
+        let xlm = token::Client::new(&env, &xlm_addr);
+        xlm.transfer(&player, &env.current_contract_address(), &MOVE_COST_STROOPS);
+
+        // Track payment collected by contract
+        m.total_xlm_collected += MOVE_COST_STROOPS;
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        // Emit event for indexers / explorers
+        env.events().publish(
+            (symbol_short!("surge"), session_id, round),
+            (player, card_code),
         );
 
         Ok(())

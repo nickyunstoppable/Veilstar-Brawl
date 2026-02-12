@@ -41,6 +41,16 @@ interface QueueStatusResponse {
     matchFound?: MatchFoundEvent;
 }
 
+async function parseJsonSafe<T>(response: Response): Promise<T | null> {
+    const raw = await response.text();
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw) as T;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Hook return type.
  */
@@ -67,7 +77,7 @@ export interface UseMatchmakingQueueReturn {
 // CONSTANTS
 // =============================================================================
 
-// Channel is per-player: matchmaking:${address} — matches server broadcast pattern
+const QUEUE_CHANNEL = "matchmaking:queue";
 const POLL_INTERVAL = 1000;
 
 /**
@@ -150,12 +160,6 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
             matchHandledRef.current = matchId;
             navigationPendingRef.current = true;
 
-            // Stop polling immediately
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-            }
-
             // Verify match exists before navigation
             try {
                 const verifyResponse = await fetch(
@@ -174,6 +178,12 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
                 matchHandledRef.current = null;
                 navigationPendingRef.current = false;
                 return;
+            }
+
+            // Stop polling only after successful verification
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
             }
 
             // Update store state
@@ -205,7 +215,11 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
             );
 
             if (response.ok) {
-                const data: QueueStatusResponse = await response.json();
+                const data = await parseJsonSafe<QueueStatusResponse>(response);
+                if (!data) {
+                    console.warn("Queue poll returned empty/non-JSON response");
+                    return;
+                }
 
                 if (!navigationPendingRef.current) {
                     store.setPlayersInQueue(
@@ -226,6 +240,12 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
 
                 if (data.matchFound) {
                     await handleMatchFound(data.matchFound);
+                    return;
+                }
+
+                if (data.inQueue === false) {
+                    store.leaveQueue();
+                    store.setQueueError("Queue state expired. Please join again.");
                 }
             }
         } catch (error) {
@@ -242,9 +262,8 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
         try {
             const supabase = getSupabaseClient();
 
-            const playerChannel = `matchmaking:${address}`;
             const channel = supabase
-                .channel(playerChannel)
+                .channel(QUEUE_CHANNEL)
                 .on("broadcast", { event: "match_found" }, (payload) => {
                     console.log("Realtime match_found event:", payload);
                     if (payload.payload) {
@@ -275,6 +294,10 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
         }
 
         try {
+            // Reset stale guards from previous matchmaking attempts
+            matchHandledRef.current = null;
+            navigationPendingRef.current = false;
+
             store.joinQueue();
 
             const response = await fetch(`${API_BASE}/api/matchmaking/queue`, {
@@ -284,14 +307,28 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
             });
 
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error?.message || "Failed to join queue");
+                const error = await parseJsonSafe<{ error?: { message?: string } | string }>(response);
+                const message = typeof error?.error === "string"
+                    ? error.error
+                    : error?.error?.message;
+                throw new Error(message || `Failed to join queue (${response.status})`);
             }
 
-            const result = await response.json();
+            const result = await parseJsonSafe<{ matchFound?: MatchFoundEvent }>(response);
+            if (!result) {
+                throw new Error("Queue API returned empty/non-JSON response");
+            }
 
             // Check if immediately matched
             if (result.matchFound) {
+                // Start fallback listeners first so we can recover if early verification fails
+                store.setQueued(Date.now());
+                setupRealtime();
+                if (!pollIntervalRef.current) {
+                    pollIntervalRef.current = setInterval(pollQueueStatus, POLL_INTERVAL);
+                }
+                pollQueueStatus();
+
                 await handleMatchFound(result.matchFound as MatchFoundEvent);
                 return;
             }

@@ -15,7 +15,7 @@ import { useCallback, useState, useRef } from "react";
 import { useWalletStore } from "../store/walletSlice";
 import { signAuthEntry as freighterSignAuthEntry } from "@stellar/freighter-api";
 import { NETWORK_PASSPHRASE } from "../utils/constants";
-import { authorizeEntry, Address, xdr, hash } from "@stellar/stellar-sdk";
+import { authorizeEntry, Address, xdr, hash, rpc } from "@stellar/stellar-sdk";
 import { RPC_URL } from "../utils/constants";
 import { Buffer } from "buffer";
 
@@ -23,6 +23,16 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 function registrationCacheKey(matchId: string): string {
     return `vbb:onchain_registration:${matchId}`;
+}
+
+async function parseJsonSafe<T>(response: Response): Promise<T | null> {
+    const raw = await response.text();
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw) as T;
+    } catch {
+        return null;
+    }
 }
 
 export type RegistrationStatus =
@@ -66,18 +76,22 @@ export function useOnChainRegistration() {
                 );
 
                 if (!prepRes.ok) {
-                    const body = await prepRes.json().catch(() => ({}));
-                    throw new Error(body.error || `Prepare failed (${prepRes.status})`);
+                    const body = await parseJsonSafe<{ error?: string }>(prepRes);
+                    throw new Error(body?.error || `Prepare failed (${prepRes.status})`);
                 }
 
-                const preparedJson = (await prepRes.json()) as {
+                const preparedJson = await parseJsonSafe<{
                     sessionId: number;
                     authEntries: Record<string, string>;
                     requiredAuthAddresses?: string[];
                     transactionXdr?: string;
                     submitted?: boolean;
                     txHash?: string;
-                };
+                }>(prepRes);
+
+                if (!preparedJson) {
+                    throw new Error("Registration prepare returned empty/non-JSON response");
+                }
 
                 const {
                     authEntries,
@@ -122,7 +136,7 @@ export function useOnChainRegistration() {
                 setStatus("signing");
 
                 // Calculate a valid expiration ledger (~5 min from now)
-                const server = new (await import("@stellar/stellar-sdk")).rpc.Server(RPC_URL);
+                const server = new rpc.Server(RPC_URL);
                 const latestLedger = await server.getLatestLedger();
                 const validUntilLedger = latestLedger.sequence + 60; // ~5 min
 
@@ -196,11 +210,14 @@ export function useOnChainRegistration() {
                 );
 
                 if (!authRes.ok) {
-                    const body = await authRes.json().catch(() => ({}));
-                    throw new Error(body.error || `Auth submission failed (${authRes.status})`);
+                    const body = await parseJsonSafe<{ error?: string }>(authRes);
+                    throw new Error(body?.error || `Auth submission failed (${authRes.status})`);
                 }
 
-                const authResult = await authRes.json();
+                const authResult = await parseJsonSafe<{ bothSigned?: boolean; txHash?: string }>(authRes);
+                if (!authResult) {
+                    throw new Error("Registration auth returned empty/non-JSON response");
+                }
 
                 if (authResult.bothSigned) {
                     // Server assembled and submitted the tx

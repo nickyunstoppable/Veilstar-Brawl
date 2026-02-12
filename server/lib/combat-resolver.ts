@@ -22,6 +22,7 @@ import {
     isValidMove,
 } from "./round-resolver";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "./stellar-contract";
+import { shouldAutoProveFinalize, triggerAutoProveFinalize } from "./zk-finalizer-client";
 import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, type PowerSurgeCardId } from "./power-surge";
 
 // =============================================================================
@@ -295,7 +296,7 @@ export async function resolveTurn(
 
             // Report result on-chain (non-blocking)
             let onChainTxHash: string | undefined;
-            if (isStellarConfigured()) {
+            if (!shouldAutoProveFinalize() && isStellarConfigured()) {
                 try {
                     const onChainResult = await reportMatchResultOnChain(
                         matchId,
@@ -315,6 +316,10 @@ export async function resolveTurn(
                 } catch (err) {
                     console.error('[CombatResolver] On-chain report error:', err);
                 }
+            }
+
+            if (shouldAutoProveFinalize()) {
+                triggerAutoProveFinalize(matchId, winnerAddr, "combat-resolver");
             }
 
             await broadcastGameEvent(matchId, "match_ended", {

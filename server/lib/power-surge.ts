@@ -1,7 +1,7 @@
 /**
  * Power Surge (server)
  *
- * Provides deterministic per-round card decks and selection persistence in matches.power_surge_deck.
+ * Provides deterministic per-round shared card decks and selection persistence in matches.power_surge_deck.
  *
  * NOTE: This is intentionally minimal vs the full client SurgeEffects system.
  * For now, the server only derives stun flags from the selected cards (mempool-congest).
@@ -11,19 +11,18 @@ import crypto from "crypto";
 
 export const POWER_SURGE_CARD_IDS = [
   "dag-overclock",
-  "sompi-shield",
-  "mempool-burn",
-  "bps-syphon",
-  "mempool-congest",
-  "finality-fist",
-  "10bps-barrage",
-  "ghostdag",
-  "hash-hurricane",
-  "pruned-rage",
   "block-fortress",
-  "blue-set-heal",
   "tx-storm",
+  "mempool-congest",
+  "blue-set-heal",
   "orphan-smasher",
+  "10bps-barrage",
+  "pruned-rage",
+  "sompi-shield",
+  "hash-hurricane",
+  "ghost-dag",
+  "finality-fist",
+  "bps-blitz",
   "chainbreaker",
   "vaultbreaker",
 ] as const;
@@ -94,19 +93,35 @@ export function getOrCreateRoundDeck(params: {
 
   const existing = deck.rounds[key];
   if (existing && Array.isArray(existing.player1Cards) && Array.isArray(existing.player2Cards)) {
+    const sharedCards = existing.player1Cards.length > 0
+      ? [...existing.player1Cards]
+      : [...existing.player2Cards];
+
+    if (sharedCards.length > 0) {
+      const p1Same = existing.player1Cards.length === sharedCards.length
+        && existing.player1Cards.every((card, index) => card === sharedCards[index]);
+      const p2Same = existing.player2Cards.length === sharedCards.length
+        && existing.player2Cards.every((card, index) => card === sharedCards[index]);
+
+      if (!p1Same || !p2Same) {
+        existing.player1Cards = [...sharedCards];
+        existing.player2Cards = [...sharedCards];
+      }
+    }
+
     return { deck, round: existing };
   }
 
   const deadlineAt = now + SURGE_SELECTION_SECONDS * 1000;
 
-  const p1Seed = `${params.matchId}|round:${params.roundNumber}|p1:${params.player1Address}`;
-  const p2Seed = `${params.matchId}|round:${params.roundNumber}|p2:${params.player2Address}`;
+  const sharedSeed = `${params.matchId}|round:${params.roundNumber}|shared`;
+  const sharedCards = pickCards(sharedSeed, 3);
 
   const round: StoredSurgeRound = {
     roundNumber: params.roundNumber,
     deadlineAt,
-    player1Cards: pickCards(p1Seed, 3),
-    player2Cards: pickCards(p2Seed, 3),
+    player1Cards: [...sharedCards],
+    player2Cards: [...sharedCards],
     player1Selection: null,
     player2Selection: null,
   };

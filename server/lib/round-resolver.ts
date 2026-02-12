@@ -287,8 +287,8 @@ export function resolveRound(
 
     // Deterministic dodge chance (Hash Hurricane)
     if (surges && ctx) {
-        const p1Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player1|dodge`, p1Mods!.dodgeChance);
-        const p2Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player2|dodge`, p2Mods!.dodgeChance);
+        const p1Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player1|dodge`, p1Mods!.randomWinChance);
+        const p2Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player2|dodge`, p2Mods!.randomWinChance);
         if (p1Dodged) p1DamageTaken = 0;
         if (p2Dodged) p2DamageTaken = 0;
     }
@@ -305,13 +305,13 @@ export function resolveRound(
     let p1HpRegen = 0;
     let p2HpRegen = 0;
     if (surges) {
-        const p1Hp = applyHpEffects(p1Mods!, p1HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
-        p1HealthAfter = p1Hp.hpAfter;
-        p1HpRegen = p1Hp.hpRegen;
+        const p1Before = p1HealthAfter;
+        p1HealthAfter = applyHpEffects(p1Mods!, p1HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
+        p1HpRegen = Math.max(0, p1HealthAfter - p1Before);
 
-        const p2Hp = applyHpEffects(p2Mods!, p2HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
-        p2HealthAfter = p2Hp.hpAfter;
-        p2HpRegen = p2Hp.hpRegen;
+        const p2Before = p2HealthAfter;
+        p2HealthAfter = applyHpEffects(p2Mods!, p2HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
+        p2HpRegen = Math.max(0, p2HealthAfter - p2Before);
     }
 
     // Lifesteal (heal % of damage dealt)

@@ -7,6 +7,7 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { calculateEloChange } from "../../lib/game-types";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { shouldAutoProveFinalize, triggerAutoProveFinalize } from "../../lib/zk-finalizer-client";
 
 interface ForfeitBody {
     address: string;
@@ -137,7 +138,7 @@ export async function handleForfeit(
 
         // Report result on-chain
         let onChainTxHash: string | undefined;
-        if (isStellarConfigured()) {
+        if (!shouldAutoProveFinalize() && isStellarConfigured()) {
             try {
                 const onChainResult = await reportMatchResultOnChain(
                     matchId,
@@ -154,6 +155,10 @@ export async function handleForfeit(
             } catch (err) {
                 console.error('[Forfeit] On-chain report error:', err);
             }
+        }
+
+        if (shouldAutoProveFinalize()) {
+            triggerAutoProveFinalize(matchId, winnerAddress, "forfeit");
         }
 
         // Broadcast

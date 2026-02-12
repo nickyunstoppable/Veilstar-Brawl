@@ -5,7 +5,13 @@ import { useWallet } from '@/hooks/useWallet';
 import { VEILSTAR_BRAWL_CONTRACT } from '@/utils/constants';
 import { getFundedSimulationSourceAddress } from '@/utils/simulationUtils';
 import { devWalletService, DevWalletService } from '@/services/devWalletService';
-import type { Game } from './bindings';
+import type { Match } from './bindings';
+
+type Game = Match & {
+  player1_guess?: number | null;
+  player2_guess?: number | null;
+  winning_number?: number | null;
+};
 
 const createRandomSessionId = (): number => {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {

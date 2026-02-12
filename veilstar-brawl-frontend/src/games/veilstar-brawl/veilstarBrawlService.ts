@@ -1,4 +1,4 @@
-import { Client as VeilstarBrawlClient, type Game } from './bindings';
+import { Client as VeilstarBrawlClient, type Match } from './bindings';
 import { NETWORK_PASSPHRASE, RPC_URL, DEFAULT_METHOD_OPTIONS, DEFAULT_AUTH_TTL_MINUTES, MULTI_SIG_AUTH_TTL_MINUTES } from '@/utils/constants';
 import { contract, TransactionBuilder, StrKey, xdr, Address, authorizeEntry } from '@stellar/stellar-sdk';
 import { Buffer } from 'buffer';
@@ -7,6 +7,12 @@ import { calculateValidUntilLedger } from '@/utils/ledgerUtils';
 import { injectSignedAuthEntry } from '@/utils/authEntryUtils';
 
 type ClientOptions = contract.ClientOptions;
+
+type Game = Match & {
+  player1_guess?: number | null;
+  player2_guess?: number | null;
+  winning_number?: number | null;
+};
 
 /**
  * Service for interacting with the VeilstarBrawl game contract
@@ -48,7 +54,7 @@ export class VeilstarBrawlService {
    */
   async getGame(sessionId: number): Promise<Game | null> {
     try {
-      const tx = await this.baseClient.get_game({ session_id: sessionId });
+      const tx = await this.baseClient.get_match({ session_id: sessionId });
       const result = await tx.simulate();
 
       // Check if result is Ok before unwrapping
@@ -590,7 +596,14 @@ export class VeilstarBrawlService {
     }
 
     const client = this.createSigningClient(playerAddress, signer);
-    const tx = await client.make_guess({
+    const legacyClient = client as unknown as {
+      make_guess?: (params: { session_id: number; player: string; guess: number }, options: unknown) => Promise<any>
+    };
+    if (!legacyClient.make_guess) {
+      throw new Error('Current Veilstar contract does not expose make_guess');
+    }
+
+    const tx = await legacyClient.make_guess({
       session_id: sessionId,
       player: playerAddress,
       guess,
@@ -628,7 +641,14 @@ export class VeilstarBrawlService {
     authTtlMinutes?: number
   ) {
     const client = this.createSigningClient(callerAddress, signer);
-    const tx = await client.reveal_winner({ session_id: sessionId }, DEFAULT_METHOD_OPTIONS);
+    const legacyClient = client as unknown as {
+      reveal_winner?: (params: { session_id: number }, options: unknown) => Promise<any>
+    };
+    if (!legacyClient.reveal_winner) {
+      throw new Error('Current Veilstar contract does not expose reveal_winner');
+    }
+
+    const tx = await legacyClient.reveal_winner({ session_id: sessionId }, DEFAULT_METHOD_OPTIONS);
     // NOTE: Contract methods automatically simulate - footprint already includes all required storage keys
     // (reveal_winner calls the Game Hub end_game() hook)
 

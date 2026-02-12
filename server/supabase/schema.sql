@@ -58,6 +58,8 @@ CREATE TABLE public.matches (
   power_surge_deck jsonb,
   is_bot_match boolean NOT NULL DEFAULT false,
   bot_character_id text,
+  player1_ban_id text,
+  player2_ban_id text,
   CONSTRAINT matches_pkey PRIMARY KEY (id),
   CONSTRAINT matches_player1_fkey FOREIGN KEY (player1_address) REFERENCES public.players(address),
   CONSTRAINT matches_winner_fkey FOREIGN KEY (winner_address) REFERENCES public.players(address)
@@ -92,6 +94,17 @@ CREATE TABLE public.players (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT players_pkey PRIMARY KEY (address)
+);
+CREATE TABLE public.power_surges (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL,
+  round_number integer NOT NULL,
+  player1_card_id text,
+  player2_card_id text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT power_surges_pkey PRIMARY KEY (id),
+  CONSTRAINT power_surges_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id)
 );
 CREATE TABLE public.rounds (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
