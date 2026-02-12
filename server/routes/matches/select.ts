@@ -7,6 +7,7 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
 import { isOnChainRegistrationConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { SURGE_SELECTION_SECONDS } from "../../lib/power-surge";
 
 interface SelectCharacterBody {
     address: string;
@@ -90,7 +91,10 @@ export async function handleCharacterSelect(
         if (updated?.player1_character_id && updated?.player2_character_id) {
             // Both selected — start the match
             const moveDeadline = new Date(
-                Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000 + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000
+                Date.now()
+                + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000
+                + SURGE_SELECTION_SECONDS * 1000
+                + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000
             ).toISOString();
 
             await supabase
@@ -152,6 +156,12 @@ export async function handleCharacterSelect(
                 turnNumber: 1,
                 player1Health: GAME_CONSTANTS.MAX_HEALTH,
                 player2Health: GAME_CONSTANTS.MAX_HEALTH,
+                player1Energy: GAME_CONSTANTS.MAX_ENERGY,
+                player2Energy: GAME_CONSTANTS.MAX_ENERGY,
+                player1GuardMeter: 0,
+                player2GuardMeter: 0,
+                player1IsStunned: false,
+                player2IsStunned: false,
                 moveDeadlineAt: new Date(moveDeadline).getTime(),
                 countdownEndsAt,
             });

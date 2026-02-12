@@ -16,6 +16,9 @@ export interface PlayerMoveResult {
     damageDealt: number;
     damageTaken: number;
     moveSuccess: boolean;
+    hpRegen?: number;
+    lifesteal?: number;
+    energyDrained?: number;
 }
 
 export interface RoundResolutionResult {

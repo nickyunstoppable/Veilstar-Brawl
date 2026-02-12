@@ -22,6 +22,7 @@ import {
     isValidMove,
 } from "./round-resolver";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "./stellar-contract";
+import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, type PowerSurgeCardId } from "./power-surge";
 
 // =============================================================================
 // TYPES
@@ -95,11 +96,29 @@ export async function resolveTurn(
             return createErrorResult("Match not found");
         }
 
-        // Replay previous turns to get current state
-        const state = await replayToCurrentState(matchId, roundId);
+        // Replay previous turns to get current state (includes surge effects)
+        const state = await replayToCurrentState(match, roundId);
 
-        const p1Move = currentRound.player1_move as MoveType;
-        const p2Move = currentRound.player2_move as MoveType;
+        // Fetch stun flags from fight_state_snapshots (set by Power Surge selections)
+        const { data: snap } = await supabase
+            .from("fight_state_snapshots")
+            .select("player1_is_stunned, player2_is_stunned")
+            .eq("match_id", matchId)
+            .maybeSingle();
+
+        let p1Move = currentRound.player1_move as MoveType;
+        let p2Move = currentRound.player2_move as MoveType;
+
+        // If stunned, force move to 'stunned' (server-authoritative)
+        if (snap?.player1_is_stunned) p1Move = "stunned";
+        if (snap?.player2_is_stunned) p2Move = "stunned";
+
+        // Pull current round surge selections from the match deck
+        const deck = normalizeStoredDeck(match.power_surge_deck);
+        const roundKey = String(currentRound.round_number);
+        const roundDeck = deck.rounds[roundKey];
+        const p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
+        const p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
 
         // Resolve the turn
         const input: RoundResolutionInput = {
@@ -113,7 +132,13 @@ export async function resolveTurn(
             player2Guard: state.player2Guard,
         };
 
-        const resolution = resolveRound(input);
+        const resolution = resolveRound(input, {
+            matchId,
+            roundNumber: currentRound.round_number,
+            turnNumber: currentRound.turn_number || 1,
+            player1Surge: p1Surge,
+            player2Surge: p2Surge,
+        });
 
         // Determine round winner
         let p1RoundsWon = match.player1_rounds_won || 0;
@@ -201,6 +226,9 @@ export async function resolveTurn(
                 player2_guard_meter: resolution.player2GuardAfter,
                 player2_rounds_won: p2RoundsWon,
                 player2_has_submitted_move: false,
+                // Stun only lasts for one turn
+                player1_is_stunned: false,
+                player2_is_stunned: false,
                 last_resolved_player1_move: p1Move,
                 last_resolved_player2_move: p2Move,
                 last_narrative: resolution.narrative,
@@ -240,12 +268,22 @@ export async function resolveTurn(
                 damageDealt: resolution.player1.damageDealt,
                 healthAfter: resolution.player1HealthAfter,
                 energyAfter: resolution.player1EnergyAfter,
+                guardMeterAfter: resolution.player1GuardAfter,
+                isStunned: false,
+                hpRegen: resolution.player1.hpRegen ?? 0,
+                lifesteal: resolution.player1.lifesteal ?? 0,
+                energyDrained: resolution.player1.energyDrained ?? 0,
             },
             player2: {
                 move: p2Move,
                 damageDealt: resolution.player2.damageDealt,
                 healthAfter: resolution.player2HealthAfter,
                 energyAfter: resolution.player2EnergyAfter,
+                guardMeterAfter: resolution.player2GuardAfter,
+                isStunned: false,
+                hpRegen: resolution.player2.hpRegen ?? 0,
+                lifesteal: resolution.player2.lifesteal ?? 0,
+                energyDrained: resolution.player2.energyDrained ?? 0,
             },
         });
 
@@ -303,7 +341,7 @@ export async function resolveTurn(
             // Broadcast next round starting after a short delay
             const nextRoundNumber = currentRound.round_number + 1;
             const countdownEndsAt = Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000 + 3000; // 3s UI delay + countdown
-            const moveDeadline = countdownEndsAt + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000;
+            const moveDeadline = countdownEndsAt + SURGE_SELECTION_SECONDS * 1000 + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000;
 
             setTimeout(async () => {
                 try {
@@ -312,6 +350,12 @@ export async function resolveTurn(
                         turnNumber: 1,
                         player1Health: GAME_CONSTANTS.MAX_HEALTH,
                         player2Health: GAME_CONSTANTS.MAX_HEALTH,
+                        player1Energy: GAME_CONSTANTS.MAX_ENERGY,
+                        player2Energy: GAME_CONSTANTS.MAX_ENERGY,
+                        player1GuardMeter: 0,
+                        player2GuardMeter: 0,
+                        player1IsStunned: false,
+                        player2IsStunned: false,
                         moveDeadlineAt: moveDeadline,
                         countdownEndsAt,
                     });
@@ -333,6 +377,12 @@ export async function resolveTurn(
                         turnNumber: nextTurn,
                         player1Health: resolution.player1HealthAfter,
                         player2Health: resolution.player2HealthAfter,
+                        player1Energy: resolution.player1EnergyAfter,
+                        player2Energy: resolution.player2EnergyAfter,
+                        player1GuardMeter: resolution.player1GuardAfter,
+                        player2GuardMeter: resolution.player2GuardAfter,
+                        player1IsStunned: false,
+                        player2IsStunned: false,
                         moveDeadlineAt: moveDeadlineNext,
                         countdownEndsAt: Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000,
                     });
@@ -369,10 +419,13 @@ interface ReplayedState {
  * This ensures server state is always consistent.
  */
 async function replayToCurrentState(
-    matchId: string,
+    match: any,
     currentRoundId: string
 ): Promise<ReplayedState> {
     const supabase = getSupabase();
+
+    const matchId = match.id as string;
+    const deck = normalizeStoredDeck(match.power_surge_deck);
 
     // Fetch all resolved rounds before this one
     const { data: previousRounds } = await supabase
@@ -402,6 +455,11 @@ async function replayToCurrentState(
     for (const round of previousRounds) {
         if (!round.player1_move || !round.player2_move) continue;
 
+        const roundKey = String(round.round_number);
+        const roundDeck = deck.rounds[roundKey];
+        const p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
+        const p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
+
         const input: RoundResolutionInput = {
             player1Move: round.player1_move as MoveType,
             player2Move: round.player2_move as MoveType,
@@ -413,7 +471,13 @@ async function replayToCurrentState(
             player2Guard: state.player2Guard,
         };
 
-        const result = resolveRound(input);
+        const result = resolveRound(input, {
+            matchId,
+            roundNumber: round.round_number,
+            turnNumber: round.turn_number || 1,
+            player1Surge: p1Surge,
+            player2Surge: p2Surge,
+        });
         state.player1Health = result.player1HealthAfter;
         state.player2Health = result.player2HealthAfter;
         state.player1Energy = result.player1EnergyAfter;

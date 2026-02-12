@@ -58,6 +58,9 @@ export interface RoundResolvedPayload {
         energyAfter: number;
         guardMeterAfter: number;
         isStunned: boolean;
+        hpRegen?: number;
+        lifesteal?: number;
+        energyDrained?: number;
     };
     player2: {
         move: MoveType;
@@ -66,6 +69,9 @@ export interface RoundResolvedPayload {
         energyAfter: number;
         guardMeterAfter: number;
         isStunned: boolean;
+        hpRegen?: number;
+        lifesteal?: number;
+        energyDrained?: number;
     };
     narrative: string;
     roundWinner: "player1" | "player2" | "draw";

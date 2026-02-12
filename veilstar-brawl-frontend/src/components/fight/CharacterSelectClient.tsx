@@ -118,6 +118,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
         try {
             const supabase = getSupabaseClient();
+
+            if (channelRef.current) {
+                supabase.removeChannel(channelRef.current);
+                channelRef.current = null;
+            }
+
             channel = supabase
                 .channel(`game:${matchId}`)
                 .on("broadcast", { event: "character_selected" }, (payload) => {
@@ -202,6 +208,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 .on("broadcast", { event: "fight_state_update" }, (payload) => {
                     EventBus.emit("game:fightStateUpdate", payload.payload);
                 })
+                .on("broadcast", { event: "power_surge_selected" }, (payload) => {
+                    EventBus.emit("game:powerSurgeSelected", payload.payload);
+                })
+                .on("broadcast", { event: "power_surge_cards" }, (payload) => {
+                    EventBus.emit("game:powerSurgeCards", payload.payload);
+                })
                 .on("broadcast", { event: "chat_message" }, (payload) => {
                     EventBus.emit("game:chatMessage", payload.payload);
                 })
@@ -222,6 +234,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         return () => {
             if (channel) {
                 channel.unsubscribe();
+                getSupabaseClient().removeChannel(channel);
             }
             if (channelRef.current === channel) {
                 channelRef.current = null;
@@ -362,11 +375,40 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             }
         };
 
+        const handleSelectPowerSurge = async (data: unknown) => {
+            const payload = data as {
+                matchId: string;
+                roundNumber: number;
+                playerRole: string;
+                playerAddress: string;
+                cardId: string;
+            };
+
+            try {
+                const res = await fetch(`${API_BASE}/api/matches/${payload.matchId}/power-surge/select`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        address: payload.playerAddress,
+                        roundNumber: payload.roundNumber,
+                        cardId: payload.cardId,
+                    }),
+                });
+
+                if (!res.ok) {
+                    console.error("[CharacterSelectClient] Power surge selection failed:", await res.text());
+                }
+            } catch (err) {
+                console.error("[CharacterSelectClient] Failed to submit power surge selection:", err);
+            }
+        };
+
         EventBus.on("selection_confirmed", handleSelectionConfirmed);
         EventBus.on("game:sendBanConfirmed", handleBanConfirmed);
         EventBus.on("fight:matchResult", handleMatchResult);
         EventBus.on("fight:submitMove", handleSubmitMove);
         EventBus.on("fight:forfeit", handleForfeit);
+        EventBus.on("fight:selectPowerSurge", handleSelectPowerSurge);
         EventBus.on("character_select_ready", handleSceneReady);
 
         return () => {
@@ -375,6 +417,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             EventBus.off("fight:matchResult", handleMatchResult);
             EventBus.off("fight:submitMove", handleSubmitMove);
             EventBus.off("fight:forfeit", handleForfeit);
+            EventBus.off("fight:selectPowerSurge", handleSelectPowerSurge);
             EventBus.off("character_select_ready", handleSceneReady);
         };
     }, [sceneConfig, matchId, publicKey]);

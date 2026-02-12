@@ -11,6 +11,7 @@ import { handleSubmitMove } from "./routes/matches/move";
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleForfeit } from "./routes/matches/forfeit";
 import { handlePrepareRegistration, handleSubmitAuth } from "./routes/matches/register";
+import { handleGetPowerSurgeCards, handleSelectPowerSurge } from "./routes/matches/power-surge";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 
@@ -141,6 +142,16 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/forfeit
         if (pathname === `/api/matches/${matchId}/forfeit` && method === "POST") {
             return corsResponse(await handleForfeit(matchId, req));
+        }
+
+        // GET /api/matches/:matchId/power-surge/cards
+        if (pathname === `/api/matches/${matchId}/power-surge/cards` && method === "GET") {
+            return corsResponse(await handleGetPowerSurgeCards(matchId, req));
+        }
+
+        // POST /api/matches/:matchId/power-surge/select
+        if (pathname === `/api/matches/${matchId}/power-surge/select` && method === "POST") {
+            return corsResponse(await handleSelectPowerSurge(matchId, req));
         }
     }
 

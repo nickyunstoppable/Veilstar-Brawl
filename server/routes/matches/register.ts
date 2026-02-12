@@ -85,6 +85,7 @@ export async function handlePrepareRegistration(
                 sessionId: existing.prepared.sessionId,
                 authEntries: existing.prepared.authEntries,
                 requiredAuthAddresses: existing.requiredAuthAddresses,
+                transactionXdr: existing.prepared.transactionXdr,
             });
         }
 
@@ -143,6 +144,7 @@ export async function handlePrepareRegistration(
                 sessionId: prepared.sessionId,
                 authEntries: prepared.authEntries,
                 requiredAuthAddresses: prepared.requiredAuthAddresses,
+                transactionXdr: prepared.transactionXdr,
                 submitted: true,
                 txHash: result.txHash,
             });
@@ -152,6 +154,7 @@ export async function handlePrepareRegistration(
             sessionId: prepared.sessionId,
             authEntries: prepared.authEntries,
             requiredAuthAddresses: prepared.requiredAuthAddresses,
+            transactionXdr: prepared.transactionXdr,
         });
     } catch (err) {
         console.error("[Register/prepare] Error:", err);
@@ -169,6 +172,8 @@ export async function handlePrepareRegistration(
 interface SubmitAuthBody {
     address: string;
     signedAuthEntryXdr: string;
+    transactionXdr?: string;
+    requiredAuthAddresses?: string[];
 }
 
 export async function handleSubmitAuth(
@@ -185,12 +190,62 @@ export async function handleSubmitAuth(
             );
         }
 
-        const pending = pendingRegistrations.get(matchId);
+        let pending = pendingRegistrations.get(matchId);
         if (!pending) {
-            return Response.json(
-                { error: "No pending registration found. Call /register/prepare first." },
-                { status: 404 },
-            );
+            // Server may have restarted / hot-reloaded between prepare and auth.
+            // If the client includes the prepared tx XDR, reconstruct a pending record.
+            if (!body.transactionXdr) {
+                return Response.json(
+                    { error: "No pending registration found. Call /register/prepare first." },
+                    { status: 404 },
+                );
+            }
+
+            const supabase = getSupabase();
+            const { data: match, error } = await supabase
+                .from("matches")
+                .select("player1_address, player2_address, status, is_bot_match")
+                .eq("id", matchId)
+                .single();
+
+            if (error || !match) {
+                return Response.json({ error: "Match not found" }, { status: 404 });
+            }
+
+            if (match.is_bot_match) {
+                return Response.json(
+                    { error: "Bot matches do not require on-chain registration" },
+                    { status: 400 },
+                );
+            }
+
+            if (!["character_select", "in_progress"].includes(match.status)) {
+                return Response.json(
+                    { error: `Match is in wrong phase: ${match.status}` },
+                    { status: 400 },
+                );
+            }
+
+            const reconstructedRequired =
+                body.requiredAuthAddresses && body.requiredAuthAddresses.length > 0
+                    ? body.requiredAuthAddresses
+                    : [match.player1_address, match.player2_address];
+
+            pending = {
+                prepared: {
+                    sessionId: matchIdToSessionId(matchId),
+                    authEntries: {},
+                    requiredAuthAddresses: reconstructedRequired,
+                    transactionXdr: body.transactionXdr,
+                },
+                player1Address: match.player1_address,
+                player2Address: match.player2_address,
+                signedAuthEntries: {},
+                requiredAuthAddresses: reconstructedRequired,
+                submitted: false,
+            };
+
+            pendingRegistrations.set(matchId, pending);
         }
 
         if (pending.submitted) {

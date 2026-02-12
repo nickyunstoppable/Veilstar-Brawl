@@ -143,6 +143,22 @@ export class CombatEngine {
     }
 
     /**
+     * Set guard meter for a player.
+     * Used by FightScene for server-authoritative state sync.
+     */
+    setPlayerGuardMeter(player: "player1" | "player2", guardMeter: number): void {
+        this.state[player].guardMeter = Math.max(0, Math.min(100, guardMeter));
+    }
+
+    /**
+     * Set rounds won for a player.
+     * Used by FightScene for server-authoritative state sync.
+     */
+    setPlayerRoundsWon(player: "player1" | "player2", roundsWon: number): void {
+        this.state[player].roundsWon = Math.max(0, roundsWon);
+    }
+
+    /**
      * Get specific player state.
      */
     getPlayerState(player: "player1" | "player2"): Readonly<PlayerCombatState> {

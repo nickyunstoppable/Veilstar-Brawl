@@ -21,6 +21,10 @@ import { Buffer } from "buffer";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
+function registrationCacheKey(matchId: string): string {
+    return `vbb:onchain_registration:${matchId}`;
+}
+
 export type RegistrationStatus =
     | "idle"
     | "preparing"
@@ -66,13 +70,36 @@ export function useOnChainRegistration() {
                     throw new Error(body.error || `Prepare failed (${prepRes.status})`);
                 }
 
-                const { authEntries, requiredAuthAddresses, submitted, txHash: preparedTxHash } = (await prepRes.json()) as {
+                const preparedJson = (await prepRes.json()) as {
                     sessionId: number;
                     authEntries: Record<string, string>;
                     requiredAuthAddresses?: string[];
+                    transactionXdr?: string;
                     submitted?: boolean;
                     txHash?: string;
                 };
+
+                const {
+                    authEntries,
+                    requiredAuthAddresses,
+                    submitted,
+                    txHash: preparedTxHash,
+                    transactionXdr,
+                } = preparedJson;
+
+                if (transactionXdr) {
+                    try {
+                        localStorage.setItem(
+                            registrationCacheKey(matchId),
+                            JSON.stringify({
+                                transactionXdr,
+                                requiredAuthAddresses: requiredAuthAddresses ?? null,
+                            }),
+                        );
+                    } catch {
+                        // ignore
+                    }
+                }
 
                 if (submitted) {
                     setStatus("complete");
@@ -135,6 +162,22 @@ export function useOnChainRegistration() {
 
                 const signedAuthEntryXdr = signedEntry.toXDR("base64");
 
+                // Persist signed entry so the user can refresh and still re-submit if needed.
+                try {
+                    const existing = localStorage.getItem(registrationCacheKey(matchId));
+                    const parsed = existing ? JSON.parse(existing) : {};
+                    localStorage.setItem(
+                        registrationCacheKey(matchId),
+                        JSON.stringify({
+                            ...parsed,
+                            signedAuthEntryXdr,
+                            address: publicKey,
+                        }),
+                    );
+                } catch {
+                    // ignore
+                }
+
                 // Step 3: Send the signed auth entry to the server
                 setStatus("waiting_for_opponent");
 
@@ -146,6 +189,8 @@ export function useOnChainRegistration() {
                         body: JSON.stringify({
                             address: publicKey,
                             signedAuthEntryXdr,
+                            transactionXdr,
+                            requiredAuthAddresses,
                         }),
                     },
                 );
