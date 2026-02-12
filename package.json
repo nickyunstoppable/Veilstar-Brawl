@@ -12,7 +12,8 @@
     "dev": "bun run dev:game veilstar-brawl",
     "dev:catalog": "bun --cwd=sgs_frontend run dev",
     "dev:game": "bun run scripts/dev-game.ts",
-    "dev:server": "bun --watch run server/index.ts"
+    "dev:server": "bun --watch run server/index.ts",
+    "server": "bun --watch server/index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

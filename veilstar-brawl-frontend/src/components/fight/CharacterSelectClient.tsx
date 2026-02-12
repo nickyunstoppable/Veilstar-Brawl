@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { PhaserGame } from "@/game/PhaserGame";
 import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
-import { useOnChainRegistration, type RegistrationStatus } from "@/hooks/useOnChainRegistration";
+
 import { getSupabaseClient } from "@/lib/supabase/client";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { CharacterSelectSceneConfig } from "@/game/scenes/CharacterSelectScene";
@@ -27,11 +27,12 @@ interface CharacterSelectClientProps {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
-/** Broadcast a game event via Supabase Realtime */
+/** Broadcast a game event via Supabase Realtime (fallback when channel is not ready) */
 async function broadcastGameEvent(matchId: string, event: string, payload: Record<string, unknown>) {
     try {
         const supabase = getSupabaseClient();
         const channel = supabase.channel(`game:${matchId}`);
+        await channel.subscribe();
         await channel.send({ type: "broadcast", event, payload });
         await supabase.removeChannel(channel);
     } catch (err) {
@@ -49,15 +50,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const [sceneConfig, setSceneConfig] = useState<CharacterSelectSceneConfig | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const channelRef = useRef<RealtimeChannel | null>(null);
 
-    // On-chain registration (client-signed via Freighter)
-    const {
-        status: regStatus,
-        error: regError,
-        registerOnChain,
-        markComplete,
-        markSkipped,
-    } = useOnChainRegistration();
+    // Scene-ready handshake
+    const sceneReadyRef = useRef(false);
+    const startedTimerRef = useRef(false);
+    const readyRolesRef = useRef<Set<string>>(new Set());
+
+
 
     const onMatchEndRef = useRef(onMatchEnd);
     const onExitRef = useRef(onExit);
@@ -89,7 +89,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     opponentAddress: isHost ? match.player2_address : match.player1_address,
                     isHost,
                     selectionTimeLimit: 25,
-                    selectionDeadlineAt: match.selection_deadline_at || undefined,
+                    // Timer is started by a client handshake once BOTH players are in-scene.
+                    // Avoid using server deadlines here to prevent starting at 0 after pre-scene signing.
+                    selectionDeadlineAt: undefined,
                     existingPlayerCharacter: isHost ? match.player1_character_id : match.player2_character_id,
                     existingOpponentCharacter: isHost ? match.player2_character_id : match.player1_character_id,
                     existingPlayerBan: null,
@@ -143,24 +145,28 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         requiresOnChainRegistration?: boolean;
                     };
 
-                    // Trigger on-chain registration signing if required
-                    if (data.requiresOnChainRegistration) {
-                        registerOnChain(matchId).catch((err) =>
-                            console.error("[CharacterSelectClient] Registration signing failed:", err),
-                        );
-                    } else {
-                        markSkipped();
-                    }
-
                     EventBus.emit("match_starting", {
                         countdown: data.countdownSeconds,
                         player1CharacterId: data.player1CharacterId,
                         player2CharacterId: data.player2CharacterId,
+                        requiresOnChainRegistration: data.requiresOnChainRegistration ?? false,
                     });
                 })
                 .on("broadcast", { event: "registration_complete" }, (payload) => {
-                    const data = payload.payload as { sessionId?: number; txHash?: string };
-                    markComplete(data.txHash);
+                    EventBus.emit("registration_complete", payload.payload);
+                })
+                .on("broadcast", { event: "scene_ready" }, (payload) => {
+                    const data = payload.payload as { role?: string };
+                    const role = data?.role;
+                    if (!role) return;
+
+                    readyRolesRef.current.add(role);
+
+                    // Once both roles are ready, start the timer inside Phaser.
+                    if (!startedTimerRef.current && readyRolesRef.current.has("player1") && readyRolesRef.current.has("player2")) {
+                        startedTimerRef.current = true;
+                        EventBus.emit("selection_timer:start", { matchId });
+                    }
                 })
                 .on("broadcast", { event: "match_cancelled" }, () => {
                     console.log("[CharacterSelectClient] Match cancelled");
@@ -207,6 +213,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         EventBus.emit("channel_ready", { matchId });
                     }
                 });
+
+            channelRef.current = channel;
         } catch (err) {
             console.warn("[CharacterSelectClient] Failed to set up Realtime:", err);
         }
@@ -215,12 +223,54 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             if (channel) {
                 channel.unsubscribe();
             }
+            if (channelRef.current === channel) {
+                channelRef.current = null;
+            }
         };
     }, [sceneConfig, matchId, publicKey]);
 
     // Listen for EventBus events to send selections to server
     useEffect(() => {
         if (!sceneConfig) return;
+
+        const myRole = sceneConfig.isHost ? "player1" : "player2";
+
+        // When the Phaser scene is ready, broadcast a scene_ready handshake.
+        // Re-send a few times to handle timing (opponent subscribing late).
+        const handleSceneReady = async () => {
+            if (sceneReadyRef.current) return;
+            sceneReadyRef.current = true;
+
+            readyRolesRef.current.add(myRole);
+
+            const sendReady = async () => {
+                try {
+                    if (channelRef.current) {
+                        await channelRef.current.send({
+                            type: "broadcast",
+                            event: "scene_ready",
+                            payload: { role: myRole },
+                        });
+                    } else {
+                        await broadcastGameEvent(matchId, "scene_ready", { role: myRole });
+                    }
+                } catch (err) {
+                    console.warn("[CharacterSelectClient] Failed to broadcast scene_ready:", err);
+                }
+            };
+
+            // Send immediately, then retry for ~5s to improve reliability
+            sendReady();
+            let tries = 0;
+            const interval = setInterval(() => {
+                tries += 1;
+                if (startedTimerRef.current || tries >= 10) {
+                    clearInterval(interval);
+                    return;
+                }
+                sendReady();
+            }, 500);
+        };
 
         const handleSelectionConfirmed = async (data: unknown) => {
             const { characterId } = data as { characterId: string };
@@ -237,11 +287,20 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
         const handleBanConfirmed = async (data: unknown) => {
             const { characterId } = data as { characterId: string };
+            const payload = {
+                player: sceneConfig.isHost ? "player1" : "player2",
+                characterId,
+            };
             try {
-                await broadcastGameEvent(matchId, "ban_confirmed", {
-                    player: sceneConfig.isHost ? "player1" : "player2",
-                    characterId,
-                });
+                if (channelRef.current) {
+                    await channelRef.current.send({
+                        type: "broadcast",
+                        event: "ban_confirmed",
+                        payload,
+                    });
+                } else {
+                    await broadcastGameEvent(matchId, "ban_confirmed", payload);
+                }
             } catch (err) {
                 console.error("[CharacterSelectClient] Failed to broadcast ban:", err);
             }
@@ -308,6 +367,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         EventBus.on("fight:matchResult", handleMatchResult);
         EventBus.on("fight:submitMove", handleSubmitMove);
         EventBus.on("fight:forfeit", handleForfeit);
+        EventBus.on("character_select_ready", handleSceneReady);
 
         return () => {
             EventBus.off("selection_confirmed", handleSelectionConfirmed);
@@ -315,6 +375,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             EventBus.off("fight:matchResult", handleMatchResult);
             EventBus.off("fight:submitMove", handleSubmitMove);
             EventBus.off("fight:forfeit", handleForfeit);
+            EventBus.off("character_select_ready", handleSceneReady);
         };
     }, [sceneConfig, matchId, publicKey]);
 
@@ -360,31 +421,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 </span>
             </div>
 
-            {/* On-chain registration status overlay */}
-            {regStatus !== "idle" && regStatus !== "complete" && regStatus !== "skipped" && (
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-                    <div className="bg-black/80 border border-cyber-gold/40 rounded-xl px-6 py-3 flex items-center gap-3 backdrop-blur-sm">
-                        {regStatus === "error" ? (
-                            <>
-                                <span className="w-3 h-3 rounded-full bg-red-500" />
-                                <span className="text-red-400 text-xs font-orbitron tracking-wider">
-                                    ON-CHAIN: {regError || "FAILED"}
-                                </span>
-                            </>
-                        ) : (
-                            <>
-                                <div className="w-4 h-4 border-2 border-cyber-gold border-t-transparent rounded-full animate-spin" />
-                                <span className="text-cyber-gold text-xs font-orbitron tracking-wider">
-                                    {regStatus === "preparing" && "PREPARING TX..."}
-                                    {regStatus === "signing" && "SIGN IN WALLET..."}
-                                    {regStatus === "waiting_for_opponent" && "WAITING FOR OPPONENT SIGNATURE..."}
-                                    {regStatus === "submitting" && "SUBMITTING ON-CHAIN..."}
-                                </span>
-                            </>
-                        )}
-                    </div>
-                </div>
-            )}
 
             <PhaserGame
                 currentScene="CharacterSelectScene"

@@ -13,7 +13,7 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
 import {
-    isContractConfigured,
+    isOnChainRegistrationConfigured,
     matchIdToSessionId,
     prepareRegistration,
     submitSignedRegistration,
@@ -27,6 +27,7 @@ interface PendingRegistration {
     player1Address: string;
     player2Address: string;
     signedAuthEntries: Record<string, string>; // address → signed XDR
+    requiredAuthAddresses: string[];
     submitted: boolean;
 }
 
@@ -41,7 +42,7 @@ export async function handlePrepareRegistration(
     _req: Request,
 ): Promise<Response> {
     try {
-        if (!isContractConfigured()) {
+        if (!isOnChainRegistrationConfigured()) {
             return Response.json(
                 { error: "On-chain registration is not configured" },
                 { status: 503 },
@@ -83,6 +84,7 @@ export async function handlePrepareRegistration(
             return Response.json({
                 sessionId: existing.prepared.sessionId,
                 authEntries: existing.prepared.authEntries,
+                requiredAuthAddresses: existing.requiredAuthAddresses,
             });
         }
 
@@ -99,12 +101,57 @@ export async function handlePrepareRegistration(
             player1Address: match.player1_address,
             player2Address: match.player2_address,
             signedAuthEntries: {},
+            requiredAuthAddresses: prepared.requiredAuthAddresses,
             submitted: false,
         });
+
+        if (prepared.requiredAuthAddresses.length === 0) {
+            const result = await submitSignedRegistration(
+                matchId,
+                match.player1_address,
+                match.player2_address,
+                {},
+                prepared.transactionXdr,
+            );
+
+            if (!result.success) {
+                pendingRegistrations.delete(matchId);
+                return Response.json(
+                    { error: result.error || "On-chain submission failed" },
+                    { status: 500 },
+                );
+            }
+
+            if (result.sessionId) {
+                await supabase
+                    .from("matches")
+                    .update({
+                        onchain_session_id: result.sessionId,
+                        onchain_tx_hash: result.txHash || null,
+                    })
+                    .eq("id", matchId);
+            }
+
+            await broadcastGameEvent(matchId, "registration_complete", {
+                sessionId: result.sessionId,
+                txHash: result.txHash,
+            });
+
+            pendingRegistrations.delete(matchId);
+
+            return Response.json({
+                sessionId: prepared.sessionId,
+                authEntries: prepared.authEntries,
+                requiredAuthAddresses: prepared.requiredAuthAddresses,
+                submitted: true,
+                txHash: result.txHash,
+            });
+        }
 
         return Response.json({
             sessionId: prepared.sessionId,
             authEntries: prepared.authEntries,
+            requiredAuthAddresses: prepared.requiredAuthAddresses,
         });
     } catch (err) {
         console.error("[Register/prepare] Error:", err);
@@ -172,9 +219,11 @@ export async function handleSubmitAuth(
         );
 
         // Check if both players have signed
-        const hasBoth =
-            pending.signedAuthEntries[pending.player1Address] &&
-            pending.signedAuthEntries[pending.player2Address];
+        const required = pending.requiredAuthAddresses.length > 0
+            ? pending.requiredAuthAddresses
+            : [pending.player1Address, pending.player2Address];
+
+        const hasBoth = required.every((addr) => pending.signedAuthEntries[addr]);
 
         if (!hasBoth) {
             // Broadcast to notify the other player we've signed

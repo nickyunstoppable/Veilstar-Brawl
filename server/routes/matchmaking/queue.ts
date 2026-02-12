@@ -12,7 +12,6 @@ import {
     getQueueSize,
     attemptMatch,
     getActiveMatchForPlayer,
-    broadcastMatchFound,
 } from "../../lib/matchmaker";
 import { getSupabase } from "../../lib/supabase";
 
@@ -78,7 +77,6 @@ export async function handleJoinQueue(req: Request): Promise<Response> {
                 for (const otherPlayer of otherPlayers) {
                     const otherResult = await attemptMatch(otherPlayer.address);
                     if (otherResult) {
-                        await broadcastMatchFound(otherResult);
                         if (otherResult.player1Address === address || otherResult.player2Address === address) {
                             match = otherResult;
                         }
@@ -253,8 +251,6 @@ export async function handleQueueStatus(req: Request): Promise<Response> {
         const matchResult = await attemptMatch(address);
 
         if (matchResult) {
-            await broadcastMatchFound(matchResult);
-
             return Response.json({
                 inQueue: false,
                 queueSize: await getQueueSize(),

@@ -181,8 +181,9 @@ export class CharacterSelectScene extends Phaser.Scene {
     // Listen for channel ready to trigger API calls
     this.setupChannelReadyHandler();
 
-    // Start the selection timer
-    this.selectionTimer.start();
+    // Timer starts only when BOTH clients have loaded the scene
+    // (CharacterSelectClient emits `selection_timer:start` after a Realtime handshake).
+    this.selectionTimer.setLabel("WAITING FOR OPPONENT...");
 
     // Background music
     this.sound.pauseOnBlur = false;
@@ -676,6 +677,11 @@ export class CharacterSelectScene extends Phaser.Scene {
       const payload = data as { characterId: string; player: string };
       this.onOpponentBanConfirmed(payload.characterId, payload.player);
     });
+
+    EventBus.on("selection_timer:start", () => {
+      this.selectionTimer.setLabel("SELECT YOUR FIGHTER");
+      this.selectionTimer.start();
+    });
   }
 
   // =========================================================================
@@ -1070,6 +1076,7 @@ export class CharacterSelectScene extends Phaser.Scene {
     EventBus.off("opponent_character_selected");
     EventBus.off("opponent_character_confirmed");
     EventBus.off("match_starting");
+    EventBus.off("selection_timer:start");
     EventBus.off("opponent_disconnected");
     EventBus.off("channel_ready");
     EventBus.off("game:banConfirmed");

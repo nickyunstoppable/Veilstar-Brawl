@@ -160,7 +160,7 @@ export class FightScene extends Phaser.Scene {
     }
 
     preload(): void {
-        loadBackground(this, "arena-bg", "/assets/arena.webp");
+        loadBackground(this, "arena-bg", "/assets/background_2.webp");
         loadUIAssets(this);
 
         const p1 = this.config?.player1Character || "dag-warrior";
@@ -1092,7 +1092,7 @@ export class FightScene extends Phaser.Scene {
             bgmLabel.setText(`BGM: ${this.bgmVolume > 0 ? "ON" : "OFF"}`);
             const bgm = this.sound.get("bgm_fight");
             if (bgm && "setVolume" in bgm) (bgm as Phaser.Sound.WebAudioSound).setVolume(this.bgmVolume);
-            try { localStorage.setItem("veilstar_brawl_bgm_volume", this.bgmVolume.toString()); } catch {}
+            try { localStorage.setItem("veilstar_brawl_bgm_volume", this.bgmVolume.toString()); } catch { }
         });
         this.settingsContainer.add(bgmLabel);
 
@@ -1103,7 +1103,7 @@ export class FightScene extends Phaser.Scene {
         sfxLabel.on("pointerdown", () => {
             this.sfxVolume = this.sfxVolume > 0 ? 0 : 0.5;
             sfxLabel.setText(`SFX: ${this.sfxVolume > 0 ? "ON" : "OFF"}`);
-            try { localStorage.setItem("veilstar_brawl_sfx_volume", this.sfxVolume.toString()); } catch {}
+            try { localStorage.setItem("veilstar_brawl_sfx_volume", this.sfxVolume.toString()); } catch { }
         });
         this.settingsContainer.add(sfxLabel);
 

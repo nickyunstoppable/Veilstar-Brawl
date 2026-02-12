@@ -1,13 +1,16 @@
 /**
  * QueuePage — Fullscreen matchmaking queue
  * Auto-joins queue on mount, shows immersive HUD while searching,
- * navigates to /match/:matchId when match found.
+ * triggers on-chain registration when opponent is found,
+ * navigates to /match/:matchId after registration completes.
  */
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import MatchmakingHUD from "@/components/matchmaking/MatchmakingHUD";
 import { useMatchmakingQueue } from "@/hooks/useMatchmakingQueue";
 import { useWallet } from "@/hooks/useWallet";
+import { useOnChainRegistration } from "@/hooks/useOnChainRegistration";
+import { getSupabaseClient } from "@/lib/supabase/client";
 
 function navigateTo(path: string) {
     window.history.pushState({}, "", path);
@@ -28,7 +31,24 @@ export default function QueuePage() {
         leaveQueue,
     } = useMatchmakingQueue();
 
+    const {
+        status: regStatus,
+        error: regError,
+        registerOnChain,
+        markComplete,
+    } = useOnChainRegistration();
+
     const [hasStarted, setHasStarted] = useState(false);
+    const navigationDoneRef = useRef(false);
+    const matchFoundAtRef = useRef<number | null>(null);
+    const registrationTriggeredRef = useRef(false);
+
+    // Track when the Opponent Found screen first appears
+    useEffect(() => {
+        if ((isMatching || matchResult) && !matchFoundAtRef.current) {
+            matchFoundAtRef.current = Date.now();
+        }
+    }, [isMatching, matchResult]);
 
     // Auto-join queue on mount if wallet connected
     useEffect(() => {
@@ -38,12 +58,59 @@ export default function QueuePage() {
         }
     }, [isConnected, publicKey, isInQueue, hasStarted, isJoining, joinQueue]);
 
-    // Navigate to match when matched with real player
+    // When match is found, trigger on-chain registration immediately.
     useEffect(() => {
-        if (matchResult) {
-            navigateTo(`/match/${matchResult.matchId}`);
-        }
-    }, [matchResult]);
+        if (!matchResult) return;
+        if (registrationTriggeredRef.current) return;
+
+        registrationTriggeredRef.current = true;
+        registerOnChain(matchResult.matchId).catch((err) => {
+            console.error("[QueuePage] Registration signing failed:", err);
+        });
+    }, [matchResult, registerOnChain]);
+
+    // Listen for registration_complete broadcast (when other player finishes signing)
+    // IMPORTANT: server broadcasts on `game:<matchId>`.
+    useEffect(() => {
+        if (!matchResult) return;
+
+        const supabase = getSupabaseClient();
+        const channel = supabase
+            .channel(`game:${matchResult.matchId}`)
+            .on("broadcast", { event: "registration_complete" }, (payload) => {
+                const data = payload.payload as { txHash?: string };
+                console.log("[QueuePage] registration_complete received");
+                markComplete(data?.txHash);
+            })
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }, [matchResult, markComplete]);
+
+    // Navigate to match only once BOTH players have signed (status === "complete").
+    // Enforce a minimum 2-second Opponent Found display so both players see it.
+    useEffect(() => {
+        if (!matchResult || navigationDoneRef.current) return;
+
+        if (regStatus !== "complete") return;
+
+        const MIN_DISPLAY_MS = 2000;
+        const elapsed = matchFoundAtRef.current
+            ? Date.now() - matchFoundAtRef.current
+            : 0;
+        const remaining = Math.max(0, MIN_DISPLAY_MS - elapsed);
+
+        const timer = setTimeout(() => {
+            if (!navigationDoneRef.current) {
+                navigationDoneRef.current = true;
+                navigateTo(`/match/${matchResult.matchId}`);
+            }
+        }, remaining);
+
+        return () => clearTimeout(timer);
+    }, [matchResult, regStatus]);
 
     // Wallet not connected
     if (!isConnected) {
@@ -98,8 +165,11 @@ export default function QueuePage() {
         );
     }
 
-    // Matching state — opponent found animation
-    if (isMatching) {
+    // Matching state — opponent found animation + on-chain registration
+    // Use both isMatching (queue status) and matchResult (definitive match found)
+    // because the initiating player may skip the "matching" state entirely,
+    // jumping straight from "queued" to "matched"
+    if (isMatching || matchResult) {
         return (
             <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50">
                 <div className="relative w-64 h-64 mb-12 flex items-center justify-center">
@@ -123,9 +193,44 @@ export default function QueuePage() {
                 <h2 className="text-2xl font-bold font-orbitron text-emerald-500 mb-2">
                     OPPONENT FOUND!
                 </h2>
-                <p className="text-cyber-gray font-montserrat">
-                    Preparing match...
-                </p>
+
+                {/* On-chain registration status */}
+                {regStatus !== "idle" && regStatus !== "complete" && regStatus !== "skipped" && (
+                    <div className="mt-4">
+                        <div className="bg-black/80 border border-cyber-gold/40 rounded-xl px-6 py-3 flex items-center gap-3 backdrop-blur-sm">
+                            {regStatus === "error" ? (
+                                <>
+                                    <span className="w-3 h-3 rounded-full bg-red-500" />
+                                    <span className="text-red-400 text-xs font-orbitron tracking-wider">
+                                        ON-CHAIN: {regError || "FAILED"}
+                                    </span>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="w-4 h-4 border-2 border-cyber-gold border-t-transparent rounded-full animate-spin" />
+                                    <span className="text-cyber-gold text-xs font-orbitron tracking-wider">
+                                        {regStatus === "preparing" && "PREPARING TX..."}
+                                        {regStatus === "signing" && "SIGN IN WALLET..."}
+                                        {regStatus === "waiting_for_opponent" && "WAITING FOR OPPONENT SIGNATURE..."}
+                                        {regStatus === "submitting" && "SUBMITTING ON-CHAIN..."}
+                                    </span>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {regStatus === "idle" && (
+                    <p className="text-cyber-gray font-montserrat">
+                        Preparing match...
+                    </p>
+                )}
+
+                {regStatus === "complete" && (
+                    <p className="text-cyber-gray font-montserrat">
+                        Entering character select...
+                    </p>
+                )}
             </div>
         );
     }

@@ -71,6 +71,10 @@ function getKeypairForAddress(address: string): Keypair | null {
     return null;
 }
 
+function addressKey(address: string): string {
+    return Address.fromString(address).toScAddress().toXDR("base64");
+}
+
 function createSigner(keypair: Keypair): Pick<contract.ClientOptions, "signTransaction" | "signAuthEntry"> {
     return {
         signTransaction: async (txXdr: string, opts?: any) => {
@@ -94,41 +98,39 @@ function createSigner(keypair: Keypair): Pick<contract.ClientOptions, "signTrans
 // CONTRACT CLIENT
 // =============================================================================
 
-/**
- * The contract spec for the new fighting-game contract.
- * Generated from the deployed WASM via `stellar contract inspect`.
- */
-const CONTRACT_SPEC_XDR = [
-    "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAABgAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTVhdGNoTm90SW5Qcm9ncmVzcwAAAAAABAAAAAAAAAAUSW5zdWZmaWNpZW50QmFsYW5jZQAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAG=",
-    "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAACAAAAAAAAAAHcGxheWVyMQAAAAATAAAAAAAAAA1wbGF5ZXIxX21vdmVzAAAAAAAABAAAAAAAAAAOcGxheWVyMV9wb2ludHMAAAAAAAsAAAAAAAAAB3BsYXllcjIAAAAAEwAAAAAAAAANcGxheWVyMl9tb3ZlcwAAAAAAAAQAAAAAAAAADnBsYXllcjJfcG9pbnRzAAAAAAALAAAAAAAAABN0b3RhbF94bG1fY29sbGVjdGVkAAAAAAsAAAAAAAAABndpbm5lcgAAAAAD6AAAABM=",
-    "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAABQAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAA9UcmVhc3VyeUFkZHJlc3MAAAAAAAAAAAAAAAAIWGxtVG9rZW4=",
-    "AAAAAwAAAAAAAAAAAAAACE1vdmVUeXBlAAAABAAAAAAAAAAFUHVuY2gAAAAAAAAAAAAAAAAAAABLaWNrAAAAAQAAAAAAAAAFQmxvY2sAAAAAAAACAAAAAAAAAAdTcGVjaWFsAAAAAAM=",
-    "AAAAAAAAAAAAAAAHZ2V0X2h1YgAAAAAAAAAAAQAAABM=",
-    "AAAAAAAAAAAAAAAHc2V0X2h1YgAAAAABAAAAAAAAAAduZXdfaHViAAAAABMAAAAA",
-    "AAAAAAAAAHFVcGRhdGUgdGhlIGNvbnRyYWN0IFdBU00gaGFzaCAodXBncmFkZSBjb250cmFjdCkKCiMgQXJndW1lbnRzCiogYG5ld193YXNtX2hhc2hgIC0gVGhlIGhhc2ggb2YgdGhlIG5ldyBXQVNNIGJpbmFyeQAAAAAAAAd1cGdyYWRlAAAAAAEAAAAAAAAADW5ld193YXNtX2hhc2gAAAAAAAPuAAAAIAAAAAA=",
-    "AAAAAAAAAEtFbmQgYSBtYXRjaCBhbmQgcmVwb3J0IHRvIEdhbWUgSHViLgpPbmx5IGFkbWluIGNhbiBmaW5hbGlzZSBhIG1hdGNoIHJlc3VsdC4AAAAACWVuZF9tYXRjaAAAAAAAAAIAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAAC3BsYXllcjFfd29uAAAAAAEAAAABAAAD6QAAAAIAAAAD",
-    "AAAAAAAAAAAAAAAJZ2V0X2FkbWluAAAAAAAAAAAAAAEAAAAT",
-    "AAAAAAAAABBHZXQgbWF0Y2ggc3RhdGUuAAAACWdldF9tYXRjaAAAAAAAAAEAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAABAAAD6QAAB9AAAAAFTWF0Y2gAAAAAAAAD",
-    "AAAAAAAAAAAAAAAJc2V0X2FkbWluAAAAAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
-    "AAAAAAAAADJTdGFydCBhIG5ldyBtYXRjaCDigJMgY2FsbHMgR2FtZSBIdWIgYHN0YXJ0X2dhbWVgLgAAAAAAC3N0YXJ0X21hdGNoAAAAAAUAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAAB3BsYXllcjEAAAAAEwAAAAAAAAAHcGxheWVyMgAAAAATAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAOcGxheWVyMl9wb2ludHMAAAAAAAsAAAABAAAD6QAAAAIAAAAD",
-    "AAAAAAAAAEVSZWNvcmQgYSBjb21iYXQgbW92ZSBvbi1jaGFpbiBhbmQgY29sbGVjdCAwLjAwMDEgWExNIGZyb20gdGhlIHBsYXllci4AAAAAAAALc3VibWl0X21vdmUAAAAABAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAltb3ZlX3R5cGUAAAAAAAfQAAAACE1vdmVUeXBlAAAAAAAAAAR0dXJuAAAABAAAAAEAAAPpAAAAAgAAAAM=",
-    "AAAAAAAAAAAAAAAMZ2V0X3RyZWFzdXJ5AAAAAAAAAAEAAAAT",
-    "AAAAAAAAAAAAAAAMc2V0X3RyZWFzdXJ5AAAAAQAAAAAAAAAMbmV3X3RyZWFzdXJ5AAAAEwAAAAA=",
-    "AAAAAAAAAPJJbml0aWFsaXNlIHRoZSBjb250cmFjdC4KCiMgQXJndW1lbnRzCiogYGFkbWluYCAgICDikIwgYWRtaW4gd2FsbGV0IChjYW4gc3dlZXAsIHVwZ3JhZGUsIGV0Yy4pCiogYGdhbWVfaHViYCAg4pCMIEdhbWUgSHViIGNvbnRyYWN0IGFkZHJlc3MKKiBgdHJlYXN1cnlgICDikIwgd2FsbGV0IHRoYXQgcmVjZWl2ZXMgc3dlcHQgWExNCiogYHhsbV90b2tlbmAg4pCMIFNBQyBjb250cmFjdCBhZGRyZXNzIGZvciBuYXRpdmUgWExNAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAQAAAAAAAAABWFkbWluAAAAAAAAEwAAAAAAAAAIZ2FtZV9odWIAAAATAAAAAAAAAAh0cmVhc3VyeQAAABMAAAAAAAAACXhsbV90b2tlbgAAAAAAABMAAAAA",
-    "AAAAAAAAAEpUcmFuc2ZlciBhY2N1bXVsYXRlZCBYTE0gdG8gdGhlIHRyZWFzdXJ5IHdhbGxldCwga2VlcGluZyBhIDEwIFhMTSByZXNlcnZlLgAAAAAADnN3ZWVwX3RyZWFzdXJ5AAAAAAAAAAAAAQAAA+kAAAALAAAAAw==",
-];
-
 let CONTRACT_SPEC: contract.Spec | null = null;
+let CONTRACT_SPEC_LOADING: Promise<contract.Spec> | null = null;
 
-function getContractSpec(): contract.Spec {
-    if (!CONTRACT_SPEC) {
-        CONTRACT_SPEC = new contract.Spec(CONTRACT_SPEC_XDR);
-    }
-    return CONTRACT_SPEC;
+async function getContractSpec(): Promise<contract.Spec> {
+    if (CONTRACT_SPEC) return CONTRACT_SPEC;
+    if (CONTRACT_SPEC_LOADING) return CONTRACT_SPEC_LOADING;
+
+    CONTRACT_SPEC_LOADING = (async () => {
+        try {
+            if (!CONTRACT_ID) {
+                throw new Error("Stellar contract not configured (missing CONTRACT_ID)");
+            }
+
+            const server = new rpc.Server(RPC_URL);
+            const wasm = await server.getContractWasmByContractId(CONTRACT_ID);
+            const spec = contract.Spec.fromWasm(wasm);
+            CONTRACT_SPEC = spec;
+            return spec;
+        } catch (err) {
+            CONTRACT_SPEC_LOADING = null;
+            throw err;
+        }
+    })();
+
+    return CONTRACT_SPEC_LOADING;
 }
 
-function createContractClient(publicKey: string, signer: Pick<contract.ClientOptions, "signTransaction" | "signAuthEntry">): contract.Client {
-    return new contract.Client(getContractSpec(), {
+async function createContractClient(
+    publicKey: string,
+    signer: Pick<contract.ClientOptions, "signTransaction" | "signAuthEntry">
+): Promise<contract.Client> {
+    const spec = await getContractSpec();
+    return new contract.Client(spec, {
         contractId: CONTRACT_ID,
         networkPassphrase: NETWORK_PASSPHRASE,
         rpcUrl: RPC_URL,
@@ -193,6 +195,98 @@ export function isContractConfigured(): boolean {
 }
 
 /**
+ * Check if the server can run the client-signed on-chain registration flow.
+ * This flow requires a funded fee-payer account to sign and submit the tx envelope.
+ */
+export function isOnChainRegistrationConfigured(): boolean {
+    return !!(CONTRACT_ID && ADMIN_SECRET);
+}
+
+// =============================================================================
+// XDR / error helpers
+// =============================================================================
+
+function tryDecodeTxResultXdr(resultXdr: string): string | null {
+    try {
+        const result = xdrLib.TransactionResult.fromXDR(resultXdr, "base64");
+        const txResult = result.result();
+        const txCode = txResult.switch().name;
+        return txCode;
+    } catch {
+        return null;
+    }
+}
+
+function extractResultXdr(err: any): string | undefined {
+    return (
+        err?.resultXdr ||
+        err?.result_xdr ||
+        err?.extras?.result_xdr ||
+        err?.response?.data?.extras?.result_xdr ||
+        err?.response?.data?.extras?.resultXdr ||
+        err?.response?.data?.result_xdr
+    );
+}
+
+function withDecodedResult(err: any, message: string): string {
+    const resultXdr = extractResultXdr(err);
+    if (!resultXdr) return message;
+
+    const decoded = tryDecodeTxResultXdr(resultXdr);
+    return decoded ? `${message} (result=${decoded})` : `${message} (resultXdr=${resultXdr})`;
+}
+
+function injectSignedAuthIntoTxEnvelope(
+    transactionXdr: string,
+    replacementsByAddressKey: Record<string, string | undefined>,
+): { updatedXdr: string; replacedCount: number } {
+    const envelope = xdrLib.TransactionEnvelope.fromXDR(transactionXdr, "base64");
+
+    // We only expect v1 tx envelopes here (no fee-bump). Handle fee-bump defensively.
+    const envelopeType = envelope.switch().name;
+    const tx = envelopeType === "envelopeTypeTxFeeBump"
+        ? envelope.feeBump().tx().innerTx().v1().tx()
+        : envelope.v1().tx();
+
+    let replacedCount = 0;
+
+    const ops = tx.operations();
+    for (const op of ops) {
+        if (op.body().switch().name !== "invokeHostFunction") continue;
+
+        const invoke = op.body().invokeHostFunctionOp();
+        const authList = invoke.auth();
+
+        for (let i = 0; i < authList.length; i++) {
+            const entry = authList[i];
+            if (entry.credentials().switch().name !== "sorobanCredentialsAddress") continue;
+            const entryKey = entry.credentials().address().address().toXDR("base64");
+            const signedXdr = replacementsByAddressKey[entryKey];
+            if (!signedXdr) continue;
+            authList[i] = xdrLib.SorobanAuthorizationEntry.fromXDR(signedXdr, "base64");
+            replacedCount++;
+        }
+    }
+
+    return { updatedXdr: envelope.toXDR("base64"), replacedCount };
+}
+
+function countInvokeHostFunctionAuthEntries(transactionXdr: string): number {
+    const envelope = xdrLib.TransactionEnvelope.fromXDR(transactionXdr, "base64");
+    const envelopeType = envelope.switch().name;
+    const tx = envelopeType === "envelopeTypeTxFeeBump"
+        ? envelope.feeBump().tx().innerTx().v1().tx()
+        : envelope.v1().tx();
+
+    let count = 0;
+    for (const op of tx.operations()) {
+        if (op.body().switch().name !== "invokeHostFunction") continue;
+        count += op.body().invokeHostFunctionOp().auth().length;
+    }
+    return count;
+}
+
+/**
  * Generate a deterministic session ID from a match UUID.
  * Maps the first 4 bytes of the match UUID to a u32.
  */
@@ -231,7 +325,7 @@ export async function registerMatchOnChain(
     try {
         console.log(`[Stellar] Registering match on-chain (sessionId: ${sessionId})`);
 
-        const buildClient = createContractClient(p2Keypair.publicKey(), createSigner(p2Keypair));
+        const buildClient = await createContractClient(p2Keypair.publicKey(), createSigner(p2Keypair));
 
         const tx = await (buildClient as any).start_game({
             session_id: sessionId,
@@ -296,6 +390,8 @@ export interface PreparedRegistration {
     sessionId: number;
     /** Per-player unsigned auth entry XDR (base64) keyed by player address */
     authEntries: Record<string, string>;
+    /** Players that must sign auth entries for this transaction */
+    requiredAuthAddresses: string[];
     /** Full transaction XDR before auth signing (base64) */
     transactionXdr: string;
 }
@@ -316,13 +412,20 @@ export async function prepareRegistration(
 
     const sessionId = matchIdToSessionId(matchId);
 
+    // Use admin as fee-payer/tx source for this server-submitted flow.
+    // If we used a player as tx source, we would also need the player's envelope signature.
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        throw new Error("On-chain registration requires ADMIN_SECRET (fee payer) to be configured");
+    }
+
     // Build a contract client with no signer — we only need to simulate
-    const spec = getContractSpec();
+    const spec = await getContractSpec();
     const readOnlyClient = new contract.Client(spec, {
         contractId: CONTRACT_ID,
         networkPassphrase: NETWORK_PASSPHRASE,
         rpcUrl: RPC_URL,
-        publicKey: player1Address, // tx source; either player works
+        publicKey: adminKeypair.publicKey(),
     });
 
     const tx = await (readOnlyClient as any).start_game({
@@ -340,28 +443,47 @@ export async function prepareRegistration(
 
     // Map each auth entry to the player address it belongs to
     const perPlayer: Record<string, string> = {};
+    const requiredAuth: string[] = [];
+    const player1Key = addressKey(player1Address);
+    const player2Key = addressKey(player2Address);
 
     for (const entry of authEntries) {
         try {
             if (entry.credentials().switch().name !== "sorobanCredentialsAddress") continue;
-            const addr = Address.fromScAddress(entry.credentials().address().address()).toString();
-            if (addr === player1Address || addr === player2Address) {
-                perPlayer[addr] = entry.toXDR("base64");
+            const entryKey = entry.credentials().address().address().toXDR("base64");
+            if (entryKey === player1Key) {
+                perPlayer[player1Address] = entry.toXDR("base64");
+                requiredAuth.push(player1Address);
+            } else if (entryKey === player2Key) {
+                perPlayer[player2Address] = entry.toXDR("base64");
+                requiredAuth.push(player2Address);
             }
         } catch {
             // skip non-address entries
         }
     }
 
-    if (!perPlayer[player1Address] || !perPlayer[player2Address]) {
-        throw new Error("Could not extract auth entries for both players from simulation");
+    if (requiredAuth.length === 0) {
+        console.warn("[Stellar] No player auth entries required by simulation; proceeding without client signatures");
+    } else if (requiredAuth.length === 1) {
+        console.warn(`[Stellar] Only one player auth entry required by simulation: ${requiredAuth[0]}`);
     }
 
     const transactionXdr = tx.toXDR();
 
+    // Sanity-check: the tx XDR must carry the stubbed auth entries that clients sign.
+    if (requiredAuth.length > 0) {
+        const embeddedAuthCount = countInvokeHostFunctionAuthEntries(transactionXdr);
+        if (embeddedAuthCount === 0) {
+            throw new Error(
+                "Prepared transaction XDR contains 0 auth entries; cannot run client-signed auth injection flow",
+            );
+        }
+    }
+
     console.log(`[Stellar] Prepared registration for session ${sessionId} — awaiting player signatures`);
 
-    return { sessionId, authEntries: perPlayer, transactionXdr };
+    return { sessionId, authEntries: perPlayer, requiredAuthAddresses: requiredAuth, transactionXdr };
 }
 
 /**
@@ -389,35 +511,31 @@ export async function submitSignedRegistration(
             return { success: false, error: "Admin keypair not available for tx submission", sessionId };
         }
 
-        const spec = getContractSpec();
+        const spec = await getContractSpec();
         const client = new contract.Client(spec, {
             contractId: CONTRACT_ID,
             networkPassphrase: NETWORK_PASSPHRASE,
             rpcUrl: RPC_URL,
-            publicKey: player1Address,
+            publicKey: adminKeypair.publicKey(),
             ...createSigner(adminKeypair),
         });
 
-        // Import the original transaction
-        const tx = client.txFromXDR(transactionXdr);
+        // Inject signed auth entries into the transaction envelope itself.
+        // This must happen before re-simulation/submission.
+        const replacementsByKey: Record<string, string | undefined> = {
+            [addressKey(player1Address)]: signedAuthEntries[player1Address],
+            [addressKey(player2Address)]: signedAuthEntries[player2Address],
+        };
 
-        // Replace stubbed auth entries with signed ones
-        const simAuth = tx.simulationData?.result?.auth;
-        if (simAuth) {
-            for (let i = 0; i < simAuth.length; i++) {
-                const entry = simAuth[i];
-                try {
-                    if (entry.credentials().switch().name !== "sorobanCredentialsAddress") continue;
-                    const addr = Address.fromScAddress(entry.credentials().address().address()).toString();
-                    const signed = signedAuthEntries[addr];
-                    if (signed) {
-                        simAuth[i] = xdrLib.SorobanAuthorizationEntry.fromXDR(signed, "base64");
-                    }
-                } catch {
-                    // skip
-                }
-            }
+        const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, replacementsByKey);
+        if (Object.keys(signedAuthEntries).length > 0 && replacedCount === 0) {
+            console.warn(
+                `[Stellar] Warning: received signed auth entries but replaced 0 entries in tx envelope (sessionId: ${sessionId})`,
+            );
         }
+
+        // Import the updated transaction
+        const tx = client.txFromXDR(updatedXdr);
 
         // Re-simulate, then sign envelope + submit
         await tx.simulate();
@@ -425,8 +543,9 @@ export async function submitSignedRegistration(
 
         console.log(`[Stellar] Client-signed registration submitted. Session: ${sessionId}, TX: ${txHash || "n/a"}`);
         return { success: true, txHash, sessionId };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+    } catch (err: any) {
+        const baseMessage = err instanceof Error ? err.message : String(err);
+        const message = withDecodedResult(err, baseMessage);
         console.error(`[Stellar] Failed to submit client-signed registration:`, message);
         return { success: false, error: message, sessionId };
     }
@@ -462,7 +581,7 @@ export async function submitMoveOnChain(
     }
 
     try {
-        const client = createContractClient(keypair.publicKey(), createSigner(keypair));
+        const client = await createContractClient(keypair.publicKey(), createSigner(keypair));
         const tx = await (client as any).submit_move({
             session_id: sessionId,
             player: playerAddress,
@@ -510,7 +629,7 @@ export async function reportMatchResultOnChain(
     try {
         console.log(`[Stellar] Reporting match result on-chain (sessionId: ${sessionId})`);
 
-        const client = createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
         const tx = await (client as any).end_game({
             session_id: sessionId,
             player1_won: player1Won,
@@ -539,7 +658,8 @@ export async function getOnChainMatchState(matchId: string): Promise<any | null>
     const sessionId = matchIdToSessionId(matchId);
 
     try {
-        const client = new contract.Client(getContractSpec(), {
+        const spec = await getContractSpec();
+        const client = new contract.Client(spec, {
             contractId: CONTRACT_ID,
             networkPassphrase: NETWORK_PASSPHRASE,
             rpcUrl: RPC_URL,

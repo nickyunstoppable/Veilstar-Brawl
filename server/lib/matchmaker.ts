@@ -268,19 +268,35 @@ export async function attemptMatch(address: string): Promise<MatchFoundResult | 
     }
 
     // Try to claim the opponent (set matched_with atomically)
-    const { error: claimError } = await supabase
+    const { data: claimedOpponent, error: claimError } = await supabase
         .from("matchmaking_queue")
         .update({ status: "matched", matched_with: address })
         .eq("address", opponent.address)
-        .eq("status", "searching");
+        .eq("status", "searching")
+        .is("matched_with", null)
+        .select("address");
 
-    if (claimError) return null;
+    if (claimError || !claimedOpponent || claimedOpponent.length === 0) return null;
 
-    // Mark ourselves as matched too
-    await supabase
+    // Mark ourselves as matched too (only if still searching and unmatched)
+    const { data: claimedSelf, error: claimSelfError } = await supabase
         .from("matchmaking_queue")
         .update({ status: "matched", matched_with: opponent.address })
-        .eq("address", address);
+        .eq("address", address)
+        .eq("status", "searching")
+        .is("matched_with", null)
+        .select("address");
+
+    if (claimSelfError || !claimedSelf || claimedSelf.length === 0) {
+        // Roll back opponent claim if we failed to claim ourselves
+        await supabase
+            .from("matchmaking_queue")
+            .update({ status: "searching", matched_with: null })
+            .eq("address", opponent.address)
+            .eq("status", "matched")
+            .eq("matched_with", address);
+        return null;
+    }
 
     // Create the match
     const match = await createMatch(address, opponent.address);
@@ -425,6 +441,24 @@ async function createMatch(
 // REALTIME BROADCASTING
 // =============================================================================
 
+async function sendBroadcast(
+    channel: any,
+    event: string,
+    payload: Record<string, unknown>
+): Promise<void> {
+    if (typeof channel.httpSend === "function") {
+        // supabase-js v2: httpSend(event, payload)
+        await channel.httpSend(event, payload);
+        return;
+    }
+
+    await channel.send({
+        type: "broadcast",
+        event,
+        payload,
+    });
+}
+
 /** Broadcast match found to both players via Supabase Realtime */
 async function _broadcastMatchFoundImpl(
     player1Address: string,
@@ -436,19 +470,11 @@ async function _broadcastMatchFoundImpl(
 
     try {
         const channel = supabase.channel(`matchmaking:${player1Address}`);
-        await channel.send({
-            type: "broadcast",
-            event: "match_found",
-            payload: { matchId, player1Address, player2Address, selectionDeadlineAt },
-        });
+        await sendBroadcast(channel as any, "match_found", { matchId, player1Address, player2Address, selectionDeadlineAt });
         await supabase.removeChannel(channel);
 
         const channel2 = supabase.channel(`matchmaking:${player2Address}`);
-        await channel2.send({
-            type: "broadcast",
-            event: "match_found",
-            payload: { matchId, player1Address, player2Address, selectionDeadlineAt },
-        });
+        await sendBroadcast(channel2 as any, "match_found", { matchId, player1Address, player2Address, selectionDeadlineAt });
         await supabase.removeChannel(channel2);
 
         console.log(`[Matchmaker] Broadcast match_found for ${matchId}`);
@@ -476,11 +502,7 @@ export async function broadcastGameEvent(
 
     try {
         const channel = supabase.channel(`game:${matchId}`);
-        await channel.send({
-            type: "broadcast",
-            event,
-            payload,
-        });
+        await sendBroadcast(channel as any, event, payload);
         await supabase.removeChannel(channel);
     } catch (err) {
         console.error(`[Matchmaker] Failed to broadcast ${event}:`, err);

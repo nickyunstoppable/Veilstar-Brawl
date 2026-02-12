@@ -13,10 +13,9 @@
 
 import { useCallback, useState, useRef } from "react";
 import { useWalletStore } from "../store/walletSlice";
-import { StellarWalletsKit } from "@creit-tech/stellar-wallets-kit/sdk";
+import { signAuthEntry as freighterSignAuthEntry } from "@stellar/freighter-api";
 import { NETWORK_PASSPHRASE } from "../utils/constants";
-import { authorizeEntry, Address, xdr } from "@stellar/stellar-sdk";
-import { calculateValidUntilLedger } from "../utils/ledgerUtils";
+import { authorizeEntry, Address, xdr, hash } from "@stellar/stellar-sdk";
 import { RPC_URL } from "../utils/constants";
 import { Buffer } from "buffer";
 
@@ -67,10 +66,24 @@ export function useOnChainRegistration() {
                     throw new Error(body.error || `Prepare failed (${prepRes.status})`);
                 }
 
-                const { authEntries } = (await prepRes.json()) as {
+                const { authEntries, requiredAuthAddresses, submitted, txHash: preparedTxHash } = (await prepRes.json()) as {
                     sessionId: number;
                     authEntries: Record<string, string>;
+                    requiredAuthAddresses?: string[];
+                    submitted?: boolean;
+                    txHash?: string;
                 };
+
+                if (submitted) {
+                    setStatus("complete");
+                    if (preparedTxHash) setTxHash(preparedTxHash);
+                    return true;
+                }
+
+                if (requiredAuthAddresses && !requiredAuthAddresses.includes(publicKey)) {
+                    setStatus("skipped");
+                    return true;
+                }
 
                 // Find our auth entry
                 const myAuthEntryXdr = authEntries[publicKey];
@@ -81,31 +94,40 @@ export function useOnChainRegistration() {
                 // Step 2: Sign the auth entry via Freighter
                 setStatus("signing");
 
-                const validUntilLedger = await calculateValidUntilLedger(RPC_URL, 5);
+                // Calculate a valid expiration ledger (~5 min from now)
+                const server = new (await import("@stellar/stellar-sdk")).rpc.Server(RPC_URL);
+                const latestLedger = await server.getLatestLedger();
+                const validUntilLedger = latestLedger.sequence + 60; // ~5 min
 
-                // Parse the unsigned auth entry
+                // Parse the unsigned auth entry (as prepared by the server simulation)
                 const unsignedEntry = xdr.SorobanAuthorizationEntry.fromXDR(
                     myAuthEntryXdr,
                     "base64",
                 );
 
-                // Use authorizeEntry to properly sign it
+                // Use authorizeEntry which handles the correct signature format:
+                // scvVec([scvMap({public_key: bytes(32), signature: bytes(64)})])
                 const signedEntry = await authorizeEntry(
                     unsignedEntry,
                     async (preimage) => {
-                        const result = await StellarWalletsKit.signAuthEntry(
-                            preimage.toXDR("base64"),
-                            {
-                                networkPassphrase: NETWORK_PASSPHRASE,
-                                address: publicKey,
-                            },
-                        );
+                        const preimageXdr = preimage.toXDR("base64");
+                        console.log("[Registration] Calling Freighter signAuthEntry for", publicKey.slice(0, 8));
 
-                        if (!result.signedAuthEntry) {
-                            throw new Error("Wallet returned empty signature");
+                        const result = await freighterSignAuthEntry(preimageXdr, {
+                            address: publicKey,
+                        });
+
+                        console.log("[Registration] Freighter signAuthEntry result:", JSON.stringify(result));
+
+                        const signedAuth = result?.signedAuthEntry ?? (result as any)?.result;
+                        if (!signedAuth) {
+                            throw new Error(
+                                `Wallet returned empty signature. Full response: ${JSON.stringify(result)}`
+                            );
                         }
 
-                        return Buffer.from(result.signedAuthEntry, "base64");
+                        // Return raw signature bytes — authorizeEntry wraps them correctly
+                        return Buffer.from(signedAuth, "base64");
                     },
                     validUntilLedger,
                     NETWORK_PASSPHRASE,

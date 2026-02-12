@@ -6,7 +6,7 @@
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
-import { isContractConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { isOnChainRegistrationConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 
 interface SelectCharacterBody {
     address: string;
@@ -129,7 +129,7 @@ export async function handleCharacterSelect(
                 .eq("match_id", matchId);
 
             // On-chain registration: the frontend handles signing via Freighter.
-            const requiresOnChainRegistration = isContractConfigured();
+            const requiresOnChainRegistration = isOnChainRegistrationConfigured();
 
             // Broadcast match start
             await broadcastGameEvent(matchId, "match_starting", {
