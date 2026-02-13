@@ -60,6 +60,17 @@ CREATE TABLE public.matches (
   bot_character_id text,
   player1_ban_id text,
   player2_ban_id text,
+  stake_amount_stroops text,
+  stake_fee_bps integer NOT NULL DEFAULT 10,
+  stake_deadline_at timestamp with time zone,
+  player1_stake_tx_id text,
+  player2_stake_tx_id text,
+  player1_stake_confirmed_at timestamp with time zone,
+  player2_stake_confirmed_at timestamp with time zone,
+  stake_paid_out boolean NOT NULL DEFAULT false,
+  protocol_fee_stroops text,
+  onchain_session_id integer,
+  onchain_tx_hash text,
   CONSTRAINT matches_pkey PRIMARY KEY (id),
   CONSTRAINT matches_player1_fkey FOREIGN KEY (player1_address) REFERENCES public.players(address),
   CONSTRAINT matches_winner_fkey FOREIGN KEY (winner_address) REFERENCES public.players(address)
@@ -106,6 +117,25 @@ CREATE TABLE public.power_surges (
   CONSTRAINT power_surges_pkey PRIMARY KEY (id),
   CONSTRAINT power_surges_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id)
 );
+CREATE TABLE public.round_private_commits (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL,
+  round_number integer NOT NULL CHECK (round_number >= 1),
+  player_address text NOT NULL,
+  commitment text NOT NULL,
+  encrypted_plan text,
+  proof_public_inputs jsonb,
+  transcript_hash text,
+  onchain_commit_tx_hash text,
+  verified_at timestamp with time zone,
+  resolved_at timestamp with time zone,
+  resolved_round_id uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT round_private_commits_pkey PRIMARY KEY (id),
+  CONSTRAINT round_private_commits_match_id_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
+  CONSTRAINT round_private_commits_resolved_round_id_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id)
+);
 CREATE TABLE public.rounds (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   match_id uuid NOT NULL,
@@ -130,25 +160,4 @@ CREATE TABLE public.rounds (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT rounds_pkey PRIMARY KEY (id),
   CONSTRAINT rounds_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id)
-);
-
-CREATE TABLE public.round_private_commits (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  match_id uuid NOT NULL,
-  round_number integer NOT NULL CHECK (round_number >= 1),
-  player_address text NOT NULL,
-  commitment text NOT NULL,
-  encrypted_plan text,
-  proof_public_inputs jsonb,
-  transcript_hash text,
-  onchain_commit_tx_hash text,
-  verified_at timestamp with time zone,
-  resolved_at timestamp with time zone,
-  resolved_round_id uuid,
-  created_at timestamp with time zone NOT NULL DEFAULT now(),
-  updated_at timestamp with time zone NOT NULL DEFAULT now(),
-  CONSTRAINT round_private_commits_pkey PRIMARY KEY (id),
-  CONSTRAINT round_private_commits_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
-  CONSTRAINT round_private_commits_resolved_round_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id),
-  CONSTRAINT round_private_commits_unique_player_round UNIQUE (match_id, round_number, player_address)
 );

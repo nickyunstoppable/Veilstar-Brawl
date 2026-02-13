@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import GameLayout from '../components/layout/GameLayout';
 import DecorativeLine from '../components/landing/DecorativeLine';
+import RoomCreate from '../components/matchmaking/RoomCreate';
+import RoomJoin from '../components/matchmaking/RoomJoin';
 
 type ViewState = 'main' | 'create' | 'join';
 
@@ -28,70 +30,10 @@ export default function PlayPage() {
 
           <div className="container mx-auto px-6 lg:px-12 xl:px-24 relative z-10 flex justify-center">
             {view === 'create' && (
-              <div className="w-full max-w-md">
-                <div className="bg-black/40 border border-cyber-blue/30 rounded-[20px] p-8">
-                  <h2 className="text-2xl font-bold text-white font-orbitron mb-6">
-                    CREATE LOBBY
-                  </h2>
-                  <p className="text-cyber-gray text-sm mb-6">
-                    Generate a room code and share it with a friend to start a private match.
-                  </p>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-cyber-gray text-xs font-orbitron mb-2">
-                        STAKE AMOUNT
-                      </label>
-                      <input
-                        type="number"
-                        placeholder="0.00"
-                        className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-white font-mono focus:border-cyber-blue/50 focus:outline-none transition-colors"
-                      />
-                    </div>
-                    <button className="w-full bg-transparent border border-cyber-blue text-cyber-blue font-orbitron hover:bg-cyber-blue/10 py-3 rounded-xl transition-all text-sm">
-                      GENERATE CODE
-                    </button>
-                    <button
-                      onClick={() => setView('main')}
-                      className="w-full bg-transparent border border-white/10 text-cyber-gray font-orbitron hover:bg-white/5 py-3 rounded-xl transition-all text-sm"
-                    >
-                      BACK
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <RoomCreate onCancel={() => setView('main')} />
             )}
             {view === 'join' && (
-              <div className="w-full max-w-md">
-                <div className="bg-black/40 border border-cyber-orange/30 rounded-[20px] p-8">
-                  <h2 className="text-2xl font-bold text-white font-orbitron mb-6">
-                    JOIN ROOM
-                  </h2>
-                  <p className="text-cyber-gray text-sm mb-6">
-                    Enter the room code to join an existing lobby.
-                  </p>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-cyber-gray text-xs font-orbitron mb-2">
-                        ROOM CODE
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Enter code..."
-                        className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-white font-mono uppercase tracking-widest text-center text-lg focus:border-cyber-orange/50 focus:outline-none transition-colors"
-                      />
-                    </div>
-                    <button className="w-full bg-transparent border border-cyber-orange text-cyber-orange font-orbitron hover:bg-cyber-orange/10 py-3 rounded-xl transition-all text-sm">
-                      JOIN MATCH
-                    </button>
-                    <button
-                      onClick={() => setView('main')}
-                      className="w-full bg-transparent border border-white/10 text-cyber-gray font-orbitron hover:bg-white/5 py-3 rounded-xl transition-all text-sm"
-                    >
-                      BACK
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <RoomJoin onCancel={() => setView('main')} />
             )}
           </div>
         </div>

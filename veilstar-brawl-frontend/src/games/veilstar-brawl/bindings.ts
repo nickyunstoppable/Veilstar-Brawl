@@ -21,28 +21,21 @@ import type {
   Timepoint,
   Duration,
 } from "@stellar/stellar-sdk/contract";
-export { Address } from "@stellar/stellar-sdk";
-export type {
-  AssembledTransaction,
-  Client as ContractClient,
-  ClientOptions as ContractClientOptions,
-  MethodOptions,
-  Result,
-  Spec as ContractSpec,
-} from "@stellar/stellar-sdk/contract";
-export type {
-  u32,
-  i32,
-  u64,
-  i64,
-  u128,
-  i128,
-  u256,
-  i256,
-  Option,
-  Timepoint,
-  Duration,
-} from "@stellar/stellar-sdk/contract";
+export {
+  Address,
+  Asset,
+  Keypair,
+  Networks,
+  Operation,
+  StrKey,
+  Transaction,
+  TransactionBuilder,
+  nativeToScVal,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
+export * as contract from "@stellar/stellar-sdk/contract";
+export * as rpc from "@stellar/stellar-sdk/rpc";
 
 if (typeof window !== "undefined") {
   //@ts-ignore Buffer exists
@@ -53,7 +46,7 @@ if (typeof window !== "undefined") {
 export const networks = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
-    contractId: "CAPBCVLDP2XIFPN77G4ENVE4PPQ3WVLF5DWDSFG4MET35Z674K6XLZPN",
+    contractId: "CDPVFSIY2GIU2MIJFJLNASJPCG4UMSYDJEQSSCMKGCHBH2GYHZS5KYOM",
   }
 } as const
 
@@ -63,22 +56,32 @@ export const Errors = {
   3: {message:"MatchAlreadyEnded"},
   4: {message:"MatchNotInProgress"},
   5: {message:"InsufficientBalance"},
-  6: {message:"NothingToSweep"}
+  6: {message:"NothingToSweep"},
+  7: {message:"InvalidStake"},
+  8: {message:"StakeNotConfigured"},
+  9: {message:"StakeAlreadyPaid"},
+  10: {message:"StakeNotPaid"},
+  11: {message:"SweepTooEarly"}
 }
 
 
 export interface Match {
+  fee_accrued_stroops: i128;
   player1: string;
   player1_moves: u32;
   player1_points: i128;
+  player1_stake_paid: boolean;
   player2: string;
   player2_moves: u32;
   player2_points: i128;
+  player2_stake_paid: boolean;
+  stake_amount_stroops: i128;
+  stake_fee_bps: u32;
   total_xlm_collected: i128;
   winner: Option<string>;
 }
 
-export type DataKey = {tag: "Match", values: readonly [u32]} | {tag: "GameHubAddress", values: void} | {tag: "Admin", values: void} | {tag: "TreasuryAddress", values: void} | {tag: "XlmToken", values: void};
+export type DataKey = {tag: "Match", values: readonly [u32]} | {tag: "GameHubAddress", values: void} | {tag: "Admin", values: void} | {tag: "TreasuryAddress", values: void} | {tag: "XlmToken", values: void} | {tag: "FeeAccrued", values: void} | {tag: "LastSweepTs", values: void};
 
 export enum MoveType {
   Punch = 0,
@@ -149,10 +152,34 @@ export interface Client {
   set_treasury: ({new_treasury}: {new_treasury: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
+   * Construct and simulate a deposit_stake transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Player deposit for stake-enabled matches.
+   * Required amount is stake + 0.1% fee, transferred to this contract.
+   */
+  deposit_stake: ({session_id, player}: {session_id: u32, player: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a sweep_treasury transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Transfer accumulated XLM to the treasury wallet, keeping a 10 XLM reserve.
+   * Transfer accrued protocol fees to treasury wallet at most once every 24 hours.
    */
   sweep_treasury: (options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
+
+  /**
+   * Construct and simulate a get_fee_accrued transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_fee_accrued: (options?: MethodOptions) => Promise<AssembledTransaction<i128>>
+
+  /**
+   * Construct and simulate a set_match_stake transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Configure stake for a session before deposits begin.
+   * Stake amount is the base wager (e.g. 1 XLM). Each player deposits stake + 0.1% fee.
+   */
+  set_match_stake: ({session_id, stake_amount_stroops}: {session_id: u32, stake_amount_stroops: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a get_last_sweep_ts transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_last_sweep_ts: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
   /**
    * Construct and simulate a submit_power_surge transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -180,9 +207,9 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAABgAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAG",
-        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAACAAAAAAAAAAHcGxheWVyMQAAAAATAAAAAAAAAA1wbGF5ZXIxX21vdmVzAAAAAAAABAAAAAAAAAAOcGxheWVyMV9wb2ludHMAAAAAAAsAAAAAAAAAB3BsYXllcjIAAAAAEwAAAAAAAAANcGxheWVyMl9tb3ZlcwAAAAAAAAQAAAAAAAAADnBsYXllcjJfcG9pbnRzAAAAAAALAAAAAAAAABN0b3RhbF94bG1fY29sbGVjdGVkAAAAAAsAAAAAAAAABndpbm5lcgAAAAAD6AAAABM=",
-        "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAABQAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAA9UcmVhc3VyeUFkZHJlc3MAAAAAAAAAAAAAAAAIWGxtVG9rZW4=",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACwAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAGAAAAAAAAAAxJbnZhbGlkU3Rha2UAAAAHAAAAAAAAABJTdGFrZU5vdENvbmZpZ3VyZWQAAAAAAAgAAAAAAAAAEFN0YWtlQWxyZWFkeVBhaWQAAAAJAAAAAAAAAAxTdGFrZU5vdFBhaWQAAAAKAAAAAAAAAA1Td2VlcFRvb0Vhcmx5AAAAAAAACw==",
+        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAADQAAAAAAAAATZmVlX2FjY3J1ZWRfc3Ryb29wcwAAAAALAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADXBsYXllcjFfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMV9zdGFrZV9wYWlkAAAAAAABAAAAAAAAAAdwbGF5ZXIyAAAAABMAAAAAAAAADXBsYXllcjJfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIyX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMl9zdGFrZV9wYWlkAAAAAAABAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAAAAAAADXN0YWtlX2ZlZV9icHMAAAAAAAAEAAAAAAAAABN0b3RhbF94bG1fY29sbGVjdGVkAAAAAAsAAAAAAAAABndpbm5lcgAAAAAD6AAAABM=",
+        "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAABwAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAA9UcmVhc3VyeUFkZHJlc3MAAAAAAAAAAAAAAAAIWGxtVG9rZW4AAAAAAAAAAAAAAApGZWVBY2NydWVkAAAAAAAAAAAAAAAAAAtMYXN0U3dlZXBUcwA=",
         "AAAAAwAAAAAAAAAAAAAACE1vdmVUeXBlAAAABAAAAAAAAAAFUHVuY2gAAAAAAAAAAAAAAAAAAARLaWNrAAAAAQAAAAAAAAAFQmxvY2sAAAAAAAACAAAAAAAAAAdTcGVjaWFsAAAAAAM=",
         "AAAAAAAAAAAAAAAHZ2V0X2h1YgAAAAAAAAAAAQAAABM=",
         "AAAAAAAAAAAAAAAHc2V0X2h1YgAAAAABAAAAAAAAAAduZXdfaHViAAAAABMAAAAA",
@@ -196,7 +223,11 @@ export class Client extends ContractClient {
         "AAAAAAAAAAAAAAAMZ2V0X3RyZWFzdXJ5AAAAAAAAAAEAAAAT",
         "AAAAAAAAAAAAAAAMc2V0X3RyZWFzdXJ5AAAAAQAAAAAAAAAMbmV3X3RyZWFzdXJ5AAAAEwAAAAA=",
         "AAAAAAAAAPJJbml0aWFsaXNlIHRoZSBjb250cmFjdC4KCiMgQXJndW1lbnRzCiogYGFkbWluYCAgICAg4oCTIGFkbWluIHdhbGxldCAoY2FuIHN3ZWVwLCB1cGdyYWRlLCBldGMuKQoqIGBnYW1lX2h1YmAgIOKAkyBHYW1lIEh1YiBjb250cmFjdCBhZGRyZXNzCiogYHRyZWFzdXJ5YCAg4oCTIHdhbGxldCB0aGF0IHJlY2VpdmVzIHN3ZXB0IFhMTQoqIGB4bG1fdG9rZW5gIOKAkyBTQUMgY29udHJhY3QgYWRkcmVzcyBmb3IgbmF0aXZlIFhMTQAAAAAADV9fY29uc3RydWN0b3IAAAAAAAAEAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAACGdhbWVfaHViAAAAEwAAAAAAAAAIdHJlYXN1cnkAAAATAAAAAAAAAAl4bG1fdG9rZW4AAAAAAAATAAAAAA==",
-        "AAAAAAAAAEpUcmFuc2ZlciBhY2N1bXVsYXRlZCBYTE0gdG8gdGhlIHRyZWFzdXJ5IHdhbGxldCwga2VlcGluZyBhIDEwIFhMTSByZXNlcnZlLgAAAAAADnN3ZWVwX3RyZWFzdXJ5AAAAAAAAAAAAAQAAA+kAAAALAAAAAw==",
+        "AAAAAAAAAGxQbGF5ZXIgZGVwb3NpdCBmb3Igc3Rha2UtZW5hYmxlZCBtYXRjaGVzLgpSZXF1aXJlZCBhbW91bnQgaXMgc3Rha2UgKyAwLjElIGZlZSwgdHJhbnNmZXJyZWQgdG8gdGhpcyBjb250cmFjdC4AAAANZGVwb3NpdF9zdGFrZQAAAAAAAAIAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAABnBsYXllcgAAAAAAEwAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAE5UcmFuc2ZlciBhY2NydWVkIHByb3RvY29sIGZlZXMgdG8gdHJlYXN1cnkgd2FsbGV0IGF0IG1vc3Qgb25jZSBldmVyeSAyNCBob3Vycy4AAAAAAA5zd2VlcF90cmVhc3VyeQAAAAAAAAAAAAEAAAPpAAAACwAAAAM=",
+        "AAAAAAAAAAAAAAAPZ2V0X2ZlZV9hY2NydWVkAAAAAAAAAAABAAAACw==",
+        "AAAAAAAAAIhDb25maWd1cmUgc3Rha2UgZm9yIGEgc2Vzc2lvbiBiZWZvcmUgZGVwb3NpdHMgYmVnaW4uClN0YWtlIGFtb3VudCBpcyB0aGUgYmFzZSB3YWdlciAoZS5nLiAxIFhMTSkuIEVhY2ggcGxheWVyIGRlcG9zaXRzIHN0YWtlICsgMC4xJSBmZWUuAAAAD3NldF9tYXRjaF9zdGFrZQAAAAACAAAAAAAAAApzZXNzaW9uX2lkAAAAAAAEAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAAAAAAARZ2V0X2xhc3Rfc3dlZXBfdHMAAAAAAAAAAAAAAQAAAAY=",
         "AAAAAAAAAEpSZWNvcmQgYSBwb3dlciBzdXJnZSBwaWNrIG9uLWNoYWluIGFuZCBjb2xsZWN0IDAuMDAwMSBYTE0gZnJvbSB0aGUgcGxheWVyLgAAAAAAEnN1Ym1pdF9wb3dlcl9zdXJnZQAAAAAABAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAVyb3VuZAAAAAAAAAQAAAAAAAAACWNhcmRfY29kZQAAAAAAAAQAAAABAAAD6QAAAAIAAAAD" ]),
       options
     )
@@ -213,7 +244,11 @@ export class Client extends ContractClient {
         submit_move: this.txFromJSON<Result<void>>,
         get_treasury: this.txFromJSON<string>,
         set_treasury: this.txFromJSON<null>,
+        deposit_stake: this.txFromJSON<Result<void>>,
         sweep_treasury: this.txFromJSON<Result<i128>>,
+        get_fee_accrued: this.txFromJSON<i128>,
+        set_match_stake: this.txFromJSON<Result<void>>,
+        get_last_sweep_ts: this.txFromJSON<u64>,
         submit_power_surge: this.txFromJSON<Result<void>>
   }
 }

@@ -7,7 +7,8 @@
  */
 
 import { $ } from "bun";
-import { existsSync } from "fs";
+import { copyFileSync, existsSync } from "fs";
+import { join } from "path";
 import { readEnvFile, getEnvValue } from "./utils/env";
 import { getWorkspaceContracts, listContractNames, selectContracts } from "./utils/contracts";
 
@@ -62,6 +63,28 @@ if (selection.unknown.length > 0 || selection.ambiguous.length > 0) {
 const contractsToBind = selection.contracts;
 const contractIds: Record<string, string> = {};
 
+function trySyncFrontendBinding(contractName: string, generatedDir: string): string[] {
+  const copiedTo: string[] = [];
+  const generatedIndex = join(generatedDir, "src", "index.ts");
+
+  if (!existsSync(generatedIndex)) {
+    return copiedTo;
+  }
+
+  const candidateTargets = [
+    join(`${contractName}-frontend`, "src", "games", contractName, "bindings.ts"),
+    join("sgs_frontend", "src", "games", contractName, "bindings.ts"),
+  ];
+
+  for (const target of candidateTargets) {
+    if (!existsSync(target)) continue;
+    copyFileSync(generatedIndex, target);
+    copiedTo.push(target);
+  }
+
+  return copiedTo;
+}
+
 if (existsSync("deployment.json")) {
   const deploymentInfo = await Bun.file("deployment.json").json();
   if (deploymentInfo?.contracts && typeof deploymentInfo.contracts === 'object') {
@@ -96,6 +119,12 @@ for (const contract of contractsToBind) {
   console.log(`Generating bindings for ${contract.packageName}...`);
   try {
     await $`stellar contract bindings typescript --contract-id ${contractId} --output-dir ${contract.bindingsOutDir} --network testnet --rpc-url https://soroban-testnet.stellar.org --network-passphrase "Test SDF Network ; September 2015" --overwrite`;
+    const syncedTargets = trySyncFrontendBinding(contract.packageName, contract.bindingsOutDir);
+    if (syncedTargets.length > 0) {
+      for (const target of syncedTargets) {
+        console.log(`🔁 Synced frontend binding: ${target}`);
+      }
+    }
     console.log(`✅ ${contract.packageName} bindings generated\n`);
   } catch (error) {
     console.error(`❌ Failed to generate ${contract.packageName} bindings:`, error);

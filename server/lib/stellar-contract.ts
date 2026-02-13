@@ -275,6 +275,10 @@ export interface OnChainResult {
     sessionId?: number;
 }
 
+export interface SweepFeesResult extends OnChainResult {
+    sweptAmountStroops?: string;
+}
+
 export interface PreparedPlayerAction {
     sessionId: number;
     transactionXdr: string;
@@ -926,6 +930,67 @@ export async function submitSignedPowerSurgeOnChain(
     }
 }
 
+/**
+ * Prepare a stake-deposit transaction where the player must sign auth.
+ */
+export async function prepareStakeDepositOnChain(
+    matchId: string,
+    playerAddress: string,
+): Promise<PreparedPlayerAction> {
+    if (!isClientSignedActionConfigured()) {
+        throw new Error("Client-signed action flow is not configured");
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+
+    const adminClient = await createAdminContractClient();
+    const tx = await (adminClient as any).deposit_stake({
+        session_id: sessionId,
+        player: playerAddress,
+    });
+
+    const authEntryXdr = getPlayerAuthEntryXdr(tx.simulationData?.result?.auth, playerAddress);
+    const transactionXdr = tx.toXDR();
+
+    return { sessionId, transactionXdr, authEntryXdr };
+}
+
+/**
+ * Submit a previously prepared stake-deposit transaction with signed auth entry.
+ */
+export async function submitSignedStakeDepositOnChain(
+    matchId: string,
+    playerAddress: string,
+    signedAuthEntryXdr: string,
+    transactionXdr: string,
+): Promise<OnChainResult> {
+    if (!isClientSignedActionConfigured()) {
+        return { success: false, error: "Client-signed action flow is not configured" };
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+
+    try {
+        const adminClient = await createAdminContractClient();
+        const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, {
+            [addressKey(playerAddress)]: signedAuthEntryXdr,
+        });
+
+        if (replacedCount === 0) {
+            return { success: false, error: "Signed auth entry did not match transaction auth entries", sessionId };
+        }
+
+        const tx = adminClient.txFromXDR(updatedXdr);
+        await tx.simulate();
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err: any) {
+        const baseMessage = err instanceof Error ? err.message : String(err);
+        return { success: false, error: withDecodedResult(err, baseMessage), sessionId };
+    }
+}
+
 // =============================================================================
 // end_match — called when the server determines a winner
 // =============================================================================
@@ -996,5 +1061,84 @@ export async function getOnChainMatchState(matchId: string): Promise<any | null>
         return tx.result;
     } catch {
         return null;
+    }
+}
+
+/**
+ * Configure stake amount for a match on-chain.
+ */
+export async function setMatchStakeOnChain(matchId: string, stakeAmountStroops: bigint): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const sessionId = matchIdToSessionId(matchId);
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available", sessionId };
+    }
+
+    try {
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
+        const setMatchStake = (client as any).set_match_stake;
+        if (typeof setMatchStake !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose set_match_stake. Redeploy the updated veilstar-brawl contract and restart server.",
+                sessionId,
+            };
+        }
+        const tx = await setMatchStake({
+            session_id: sessionId,
+            stake_amount_stroops: stakeAmountStroops,
+        });
+        const { txHash } = await signAndSendTx(tx);
+        return { success: true, txHash, sessionId };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message, sessionId };
+    }
+}
+
+/**
+ * Sweep accrued protocol fees from contract to configured treasury.
+ * Contract enforces the 24h interval.
+ */
+export async function sweepTreasuryFeesOnChain(): Promise<SweepFeesResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available" };
+    }
+
+    try {
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
+        const sweepTreasury = (client as any).sweep_treasury;
+        if (typeof sweepTreasury !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose sweep_treasury. Redeploy the updated veilstar-brawl contract and restart server.",
+            };
+        }
+        const tx = await sweepTreasury();
+        const { txHash } = await signAndSendTx(tx);
+
+        let sweptAmountStroops: string | undefined;
+        try {
+            const result = tx?.result;
+            if (result !== undefined && result !== null) {
+                sweptAmountStroops = typeof result === "bigint" ? result.toString() : String(result);
+            }
+        } catch {
+            // ignore result parsing errors
+        }
+
+        return { success: true, txHash, sweptAmountStroops };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
     }
 }

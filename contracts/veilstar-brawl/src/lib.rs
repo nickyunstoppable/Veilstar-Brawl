@@ -3,18 +3,21 @@
 //! # Veilstar Brawl — Fighting Game Contract
 //!
 //! A two-player fighting game contract purpose-built for the Veilstar Brawl game.
-//! Every combat move (punch, kick, block, special) is recorded on-chain and costs
-//! 0.0001 XLM per move, transferred via the native XLM Stellar Asset Contract.
+//! It supports:
+//! - on-chain combat move recording,
+//! - optional per-match XLM staking (winner takes 2x stake),
+//! - protocol fee accounting (0.1% per player stake deposit),
+//! - periodic fee sweep to treasury.
 //!
 //! **Game Hub Integration:**
 //! Calls `start_game()` and `end_game()` on the Game Hub contract to satisfy
 //! hackathon requirements and register every match lifecycle event.
 //!
 //! **XLM Flow:**
-//! - Each `submit_move` transfers 0.0001 XLM from the player to this contract.
-//! - Each `submit_power_surge` also transfers 0.0001 XLM from the player.
-//! - Admin can call `sweep_treasury` to forward accumulated XLM to a treasury
-//!   wallet, keeping a 10 XLM reserve for transaction fees.
+//! - `set_match_stake` sets the base stake for a session.
+//! - `deposit_stake` charges each player: `stake + 0.1% fee`.
+//! - `end_game` pays winner `2 * stake` and accrues fees on contract storage.
+//! - `sweep_treasury` can transfer accrued fees to treasury once every 24 hours.
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype,
@@ -54,6 +57,11 @@ pub enum Error {
     MatchNotInProgress = 4,
     InsufficientBalance = 5,
     NothingToSweep = 6,
+    InvalidStake = 7,
+    StakeNotConfigured = 8,
+    StakeAlreadyPaid = 9,
+    StakeNotPaid = 10,
+    SweepTooEarly = 11,
 }
 
 // ==========================================================================
@@ -84,6 +92,11 @@ pub struct Match {
     pub player1_moves: u32,
     pub player2_moves: u32,
     pub total_xlm_collected: i128,
+    pub stake_amount_stroops: i128,
+    pub stake_fee_bps: u32,
+    pub player1_stake_paid: bool,
+    pub player2_stake_paid: bool,
+    pub fee_accrued_stroops: i128,
     pub winner: Option<Address>,
 }
 
@@ -95,6 +108,8 @@ pub enum DataKey {
     Admin,
     TreasuryAddress,
     XlmToken,
+    FeeAccrued,
+    LastSweepTs,
 }
 
 // ==========================================================================
@@ -109,6 +124,12 @@ const MOVE_COST_STROOPS: i128 = 1_000;
 
 /// Minimum reserve kept in contract (10 XLM)
 const RESERVE_STROOPS: i128 = 100_000_000;
+
+/// 0.1% protocol fee in basis points.
+const STAKE_FEE_BPS: u32 = 10;
+
+/// 24h sweep interval.
+const FEE_SWEEP_INTERVAL_SECONDS: u64 = 86_400;
 
 // ==========================================================================
 // Contract
@@ -145,6 +166,8 @@ impl VeilstarBrawlContract {
             .instance()
             .set(&DataKey::TreasuryAddress, &treasury);
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
+        env.storage().instance().set(&DataKey::FeeAccrued, &0_i128);
+        env.storage().instance().set(&DataKey::LastSweepTs, &0_u64);
     }
 
     // ======================================================================
@@ -196,6 +219,11 @@ impl VeilstarBrawlContract {
             player1_moves: 0,
             player2_moves: 0,
             total_xlm_collected: 0,
+            stake_amount_stroops: 0,
+            stake_fee_bps: STAKE_FEE_BPS,
+            player1_stake_paid: false,
+            player2_stake_paid: false,
+            fee_accrued_stroops: 0,
             winner: None,
         };
 
@@ -351,6 +379,37 @@ impl VeilstarBrawlContract {
         } else {
             m.player2.clone()
         };
+
+        // If stake is configured, require both players to have deposited before finalizing.
+        if m.stake_amount_stroops > 0 {
+            if !m.player1_stake_paid || !m.player2_stake_paid {
+                return Err(Error::StakeNotPaid);
+            }
+
+            // Winner gets exactly 2 * stake amount. Fee is retained in contract accounting.
+            let xlm_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::XlmToken)
+                .expect("XLM token not set");
+            let xlm = token::Client::new(&env, &xlm_addr);
+
+            let winner_payout = m.stake_amount_stroops * 2;
+            xlm.transfer(&env.current_contract_address(), &winner, &winner_payout);
+
+            // Retain total fee from both sides in contract-level accrued fee bucket.
+            let per_player_fee = Self::calc_fee(m.stake_amount_stroops, m.stake_fee_bps);
+            let total_fee = per_player_fee * 2;
+            let mut accrued: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::FeeAccrued)
+                .unwrap_or(0_i128);
+            accrued += total_fee;
+            env.storage().instance().set(&DataKey::FeeAccrued, &accrued);
+            m.fee_accrued_stroops += total_fee;
+        }
+
         m.winner = Some(winner);
 
         env.storage().temporary().set(&key, &m);
@@ -370,11 +429,98 @@ impl VeilstarBrawlContract {
         Ok(())
     }
 
+    /// Configure stake for a session before deposits begin.
+    /// Stake amount is the base wager (e.g. 1 XLM). Each player deposits stake + 0.1% fee.
+    pub fn set_match_stake(env: Env, session_id: u32, stake_amount_stroops: i128) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if stake_amount_stroops <= 0 {
+            return Err(Error::InvalidStake);
+        }
+
+        if m.player1_stake_paid || m.player2_stake_paid {
+            return Err(Error::StakeAlreadyPaid);
+        }
+
+        m.stake_amount_stroops = stake_amount_stroops;
+        m.stake_fee_bps = STAKE_FEE_BPS;
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        Ok(())
+    }
+
+    /// Player deposit for stake-enabled matches.
+    /// Required amount is stake + 0.1% fee, transferred to this contract.
+    pub fn deposit_stake(env: Env, session_id: u32, player: Address) -> Result<(), Error> {
+        player.require_auth();
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.stake_amount_stroops <= 0 {
+            return Err(Error::StakeNotConfigured);
+        }
+
+        let is_p1 = player == m.player1;
+        let is_p2 = player == m.player2;
+        if !is_p1 && !is_p2 {
+            return Err(Error::NotPlayer);
+        }
+
+        if (is_p1 && m.player1_stake_paid) || (is_p2 && m.player2_stake_paid) {
+            return Err(Error::StakeAlreadyPaid);
+        }
+
+        let fee = Self::calc_fee(m.stake_amount_stroops, m.stake_fee_bps);
+        let required = m.stake_amount_stroops + fee;
+
+        let xlm_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::XlmToken)
+            .expect("XLM token not set");
+        let xlm = token::Client::new(&env, &xlm_addr);
+        xlm.transfer(&player, &env.current_contract_address(), &required);
+
+        if is_p1 {
+            m.player1_stake_paid = true;
+        } else {
+            m.player2_stake_paid = true;
+        }
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        Ok(())
+    }
+
     // ======================================================================
     // Treasury sweep
     // ======================================================================
 
-    /// Transfer accumulated XLM to the treasury wallet, keeping a 10 XLM reserve.
+    /// Transfer accrued protocol fees to treasury wallet at most once every 24 hours.
     pub fn sweep_treasury(env: Env) -> Result<i128, Error> {
         let admin: Address = env
             .storage()
@@ -383,6 +529,17 @@ impl VeilstarBrawlContract {
             .expect("Admin not set");
         admin.require_auth();
 
+        let now_ts = env.ledger().timestamp();
+        let last_sweep: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastSweepTs)
+            .unwrap_or(0_u64);
+
+        if last_sweep > 0 && now_ts.saturating_sub(last_sweep) < FEE_SWEEP_INTERVAL_SECONDS {
+            return Err(Error::SweepTooEarly);
+        }
+
         let xlm_addr: Address = env
             .storage()
             .instance()
@@ -390,8 +547,27 @@ impl VeilstarBrawlContract {
             .expect("XLM token not set");
         let xlm = token::Client::new(&env, &xlm_addr);
 
+        let accrued_fee: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeAccrued)
+            .unwrap_or(0_i128);
+
+        if accrued_fee <= 0 {
+            return Err(Error::NothingToSweep);
+        }
+
         let balance = xlm.balance(&env.current_contract_address());
-        let sweepable = balance - RESERVE_STROOPS;
+        let sweepable = if balance > RESERVE_STROOPS {
+            let above_reserve = balance - RESERVE_STROOPS;
+            if above_reserve < accrued_fee {
+                above_reserve
+            } else {
+                accrued_fee
+            }
+        } else {
+            0
+        };
 
         if sweepable <= 0 {
             return Err(Error::NothingToSweep);
@@ -404,6 +580,10 @@ impl VeilstarBrawlContract {
             .expect("Treasury not set");
 
         xlm.transfer(&env.current_contract_address(), &treasury, &sweepable);
+
+        let remaining_fee = accrued_fee - sweepable;
+        env.storage().instance().set(&DataKey::FeeAccrued, &remaining_fee);
+        env.storage().instance().set(&DataKey::LastSweepTs, &now_ts);
 
         Ok(sweepable)
     }
@@ -439,6 +619,20 @@ impl VeilstarBrawlContract {
             .instance()
             .get(&DataKey::TreasuryAddress)
             .expect("Treasury not set")
+    }
+
+    pub fn get_fee_accrued(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeAccrued)
+            .unwrap_or(0_i128)
+    }
+
+    pub fn get_last_sweep_ts(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LastSweepTs)
+            .unwrap_or(0_u64)
     }
 
     // ======================================================================
@@ -487,6 +681,12 @@ impl VeilstarBrawlContract {
             .expect("Admin not set");
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    fn calc_fee(stake_amount_stroops: i128, fee_bps: u32) -> i128 {
+        // round up so 1 XLM always charges at least 0.001 XLM equivalent if needed by precision,
+        // but with stroops precision this computes exact for many values (e.g. 1 XLM => 10,000 stroops).
+        ((stake_amount_stroops * fee_bps as i128) + 9_999) / 10_000
     }
 }
 

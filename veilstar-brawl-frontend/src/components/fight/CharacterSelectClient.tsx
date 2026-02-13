@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { PhaserGame } from "@/game/PhaserGame";
 import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
+import { useOnChainRegistration } from "@/hooks/useOnChainRegistration";
 import { commitPrivateRoundPlan, provePrivateRoundPlan, resolvePrivateRound } from "@/lib/zkPrivateRoundClient";
 
 import { getSupabaseClient } from "@/lib/supabase/client";
@@ -29,6 +30,19 @@ interface CharacterSelectClientProps {
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const USE_OFFCHAIN_ACTIONS = (import.meta.env.VITE_ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
 const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const STROOPS_PER_XLM = 10_000_000;
+
+interface StakeGateState {
+    required: boolean;
+    stakeAmountStroops: string;
+    feeBps: number;
+    myConfirmed: boolean;
+    opponentConfirmed: boolean;
+    bothConfirmed: boolean;
+    pendingRegistration: boolean;
+    isSubmitting: boolean;
+    error: string | null;
+}
 
 interface PrivateRoundPlanState {
     moveType?: string;
@@ -45,6 +59,25 @@ interface PrivateRoundPlanState {
     walletSignature?: string;
     moveSigned?: boolean;
     surgeSigned?: boolean;
+}
+
+function parseStroops(raw: unknown): bigint {
+    try {
+        if (!raw) return 0n;
+        return BigInt(String(raw));
+    } catch {
+        return 0n;
+    }
+}
+
+function calcStakeFee(stakeAmountStroops: bigint, feeBps: number): bigint {
+    return ((stakeAmountStroops * BigInt(feeBps)) + 9999n) / 10000n;
+}
+
+function toXlmDisplay(stroops: bigint): string {
+    const xlm = Number(stroops) / STROOPS_PER_XLM;
+    if (!Number.isFinite(xlm)) return "0";
+    return xlm.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 async function waitForSubscribed(channel: RealtimeChannel, timeoutMs: number = 2500): Promise<boolean> {
@@ -100,7 +133,13 @@ function navigateTo(path: string) {
 
 export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: CharacterSelectClientProps) {
     const { publicKey, walletType, networkPassphrase } = useWallet();
+    const {
+        status: registrationStatus,
+        error: registrationError,
+        registerOnChain,
+    } = useOnChainRegistration();
     const [sceneConfig, setSceneConfig] = useState<CharacterSelectSceneConfig | null>(null);
+    const [stakeGate, setStakeGate] = useState<StakeGateState | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const channelRef = useRef<RealtimeChannel | null>(null);
@@ -120,10 +159,174 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
     const onMatchEndRef = useRef(onMatchEnd);
     const onExitRef = useRef(onExit);
+    const registrationTriggeredRef = useRef(false);
+    const registrationCompleteRef = useRef(false);
     useEffect(() => {
         onMatchEndRef.current = onMatchEnd;
         onExitRef.current = onExit;
     }, [onMatchEnd, onExit]);
+
+    useEffect(() => {
+        registrationTriggeredRef.current = false;
+        registrationCompleteRef.current = false;
+    }, [matchId]);
+
+    useEffect(() => {
+        if (!publicKey || !stakeGate?.required || !stakeGate.pendingRegistration) return;
+        if (registrationTriggeredRef.current) return;
+
+        registrationTriggeredRef.current = true;
+        registerOnChain(matchId).catch((err) => {
+            console.error("[CharacterSelectClient] Registration signing failed:", err);
+            registrationTriggeredRef.current = false;
+        });
+    }, [matchId, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required]);
+
+    useEffect(() => {
+        if (registrationStatus === "complete" || registrationStatus === "skipped") {
+            registrationCompleteRef.current = true;
+            setStakeGate((prev) => prev
+                ? {
+                    ...prev,
+                    pendingRegistration: false,
+                    error: null,
+                }
+                : prev,
+            );
+        }
+
+        if (registrationStatus === "error") {
+            setStakeGate((prev) => prev
+                ? {
+                    ...prev,
+                    pendingRegistration: true,
+                    error: registrationError || "On-chain registration failed",
+                }
+                : prev,
+            );
+            registrationTriggeredRef.current = false;
+        }
+    }, [registrationError, registrationStatus]);
+
+    const signStakeAuthEntry = useCallback(async (authEntryXdr: string, address: string): Promise<string> => {
+        if (walletType !== "wallet") {
+            throw new Error("Wallet signing is required for stake deposit");
+        }
+
+        const { signAuthEntry } = await import("@stellar/freighter-api");
+        const { authorizeEntry, rpc, xdr } = await import("@stellar/stellar-sdk");
+        const { Buffer } = await import("buffer");
+
+        const rpcUrl = import.meta.env.VITE_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
+        const effectivePassphrase = networkPassphrase || "Test SDF Network ; September 2015";
+
+        const server = new rpc.Server(rpcUrl);
+        const latestLedger = await server.getLatestLedger();
+        const validUntilLedger = latestLedger.sequence + 60;
+
+        const unsignedEntry = xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, "base64");
+
+        const signedEntry = await authorizeEntry(
+            unsignedEntry,
+            async (preimage) => {
+                const result = await signAuthEntry(preimage.toXDR("base64"), { address });
+                if (result.error) {
+                    throw new Error(result.error.message || "Auth entry signing failed");
+                }
+
+                const signed = result?.signedAuthEntry ?? (result as any)?.result;
+                if (!signed) {
+                    throw new Error("Wallet signature was cancelled");
+                }
+
+                return Buffer.from(signed, "base64");
+            },
+            validUntilLedger,
+            effectivePassphrase,
+        );
+
+        return signedEntry.toXDR("base64");
+    }, [networkPassphrase, walletType]);
+
+    const handleSubmitStakeDeposit = useCallback(async () => {
+        if (!publicKey || !stakeGate?.required || stakeGate.myConfirmed) return;
+
+        setStakeGate((prev) => prev ? { ...prev, isSubmitting: true, error: null } : prev);
+
+        try {
+            const prepareRes = await fetch(`${API_BASE}/api/matches/${matchId}/stake/prepare`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ address: publicKey }),
+            });
+
+            const prepareJson = await prepareRes.json().catch(() => ({}));
+
+            if (!prepareRes.ok) {
+                throw new Error(prepareJson?.error || "Failed to prepare stake deposit");
+            }
+
+            if (prepareJson?.alreadyConfirmed) {
+                setStakeGate((prev) => prev
+                    ? {
+                        ...prev,
+                        myConfirmed: true,
+                        opponentConfirmed: !!prepareJson?.opponentConfirmed,
+                        bothConfirmed: !!prepareJson?.bothConfirmed,
+                        pendingRegistration: false,
+                        isSubmitting: false,
+                        error: null,
+                    }
+                    : prev,
+                );
+                return;
+            }
+
+            if (!prepareJson?.authEntryXdr || !prepareJson?.transactionXdr) {
+                throw new Error("Stake prepare did not return auth entry or transaction");
+            }
+
+            const signedAuthEntryXdr = await signStakeAuthEntry(prepareJson.authEntryXdr, publicKey);
+
+            const submitRes = await fetch(`${API_BASE}/api/matches/${matchId}/stake/submit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    address: publicKey,
+                    signedAuthEntryXdr,
+                    transactionXdr: prepareJson.transactionXdr,
+                }),
+            });
+
+            const submitJson = await submitRes.json().catch(() => ({}));
+
+            if (!submitRes.ok) {
+                throw new Error(submitJson?.details || submitJson?.error || "Failed to submit stake deposit");
+            }
+
+            setStakeGate((prev) => prev
+                ? {
+                    ...prev,
+                    myConfirmed: true,
+                    opponentConfirmed: !!submitJson?.opponentConfirmed,
+                    bothConfirmed: !!submitJson?.bothConfirmed,
+                    pendingRegistration: false,
+                    isSubmitting: false,
+                    error: null,
+                }
+                : prev,
+            );
+        } catch (err) {
+            setStakeGate((prev) => prev
+                ? {
+                    ...prev,
+                    isSubmitting: false,
+                    error: err instanceof Error ? err.message : "Failed to submit stake deposit",
+                }
+                : prev,
+            );
+        }
+    }, [matchId, publicKey, signStakeAuthEntry, stakeGate]);
 
     // Fetch match data and build scene config
     useEffect(() => {
@@ -141,6 +344,30 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const match = data.match;
 
                 const isHost = match.player1_address === publicKey;
+                const hasStake = parseStroops(match.stake_amount_stroops) > 0n;
+                const myConfirmed = isHost
+                    ? !!match.player1_stake_confirmed_at
+                    : !!match.player2_stake_confirmed_at;
+                const opponentConfirmed = isHost
+                    ? !!match.player2_stake_confirmed_at
+                    : !!match.player1_stake_confirmed_at;
+                const bothConfirmed = myConfirmed && opponentConfirmed;
+
+                if (hasStake) {
+                    setStakeGate({
+                        required: true,
+                        stakeAmountStroops: String(match.stake_amount_stroops),
+                        feeBps: Number(match.stake_fee_bps || 10),
+                        myConfirmed,
+                        opponentConfirmed,
+                        bothConfirmed,
+                        pendingRegistration: !match.onchain_session_id,
+                        isSubmitting: false,
+                        error: null,
+                    });
+                } else {
+                    setStakeGate(null);
+                }
 
                 const playerBanId = isHost
                     ? (match.player1_ban_id ?? match.player1_ban_character_id ?? null)
@@ -228,6 +455,50 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 })
                 .on("broadcast", { event: "registration_complete" }, (payload) => {
                     EventBus.emit("registration_complete", payload.payload);
+                    registrationCompleteRef.current = true;
+                    setStakeGate((prev) => prev
+                        ? {
+                            ...prev,
+                            pendingRegistration: false,
+                            error: null,
+                        }
+                        : prev,
+                    );
+                })
+                .on("broadcast", { event: "stake_confirmed" }, (payload) => {
+                    const data = payload.payload as { player?: string; bothConfirmed?: boolean };
+                    const myRole = sceneConfig.isHost ? "player1" : "player2";
+                    const confirmedRole = data?.player;
+
+                    setStakeGate((prev) => {
+                        if (!prev?.required) return prev;
+                        const myConfirmed = prev.myConfirmed || confirmedRole === myRole;
+                        const opponentConfirmed = prev.opponentConfirmed || (!!confirmedRole && confirmedRole !== myRole);
+                        const bothConfirmed = !!data?.bothConfirmed || (myConfirmed && opponentConfirmed);
+                        return {
+                            ...prev,
+                            myConfirmed,
+                            opponentConfirmed,
+                            bothConfirmed,
+                            pendingRegistration: false,
+                            isSubmitting: false,
+                            error: null,
+                        };
+                    });
+                })
+                .on("broadcast", { event: "stake_ready" }, () => {
+                    setStakeGate((prev) => prev
+                        ? {
+                            ...prev,
+                            bothConfirmed: true,
+                            myConfirmed: true,
+                            opponentConfirmed: true,
+                            pendingRegistration: false,
+                            isSubmitting: false,
+                            error: null,
+                        }
+                        : prev,
+                    );
                 })
                 .on("broadcast", { event: "scene_ready" }, (payload) => {
                     const data = payload.payload as { role?: string };
@@ -394,6 +665,40 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const data = await res.json();
                 const match = data?.match;
                 if (!match) return;
+
+                const hasStake = parseStroops(match.stake_amount_stroops) > 0n;
+                if (hasStake) {
+                    const myConfirmed = myRole === "player1"
+                        ? !!match.player1_stake_confirmed_at
+                        : !!match.player2_stake_confirmed_at;
+                    const opponentConfirmed = myRole === "player1"
+                        ? !!match.player2_stake_confirmed_at
+                        : !!match.player1_stake_confirmed_at;
+                    const bothConfirmed = myConfirmed && opponentConfirmed;
+
+                    setStakeGate((prev) => prev
+                        ? {
+                            ...prev,
+                            myConfirmed,
+                            opponentConfirmed,
+                            bothConfirmed,
+                            pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
+                        }
+                        : {
+                            required: true,
+                            stakeAmountStroops: String(match.stake_amount_stroops),
+                            feeBps: Number(match.stake_fee_bps || 10),
+                            myConfirmed,
+                            opponentConfirmed,
+                            bothConfirmed,
+                            pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
+                            isSubmitting: false,
+                            error: null,
+                        },
+                    );
+                } else {
+                    setStakeGate(null);
+                }
 
                 const opponentCharacterId = myRole === "player1"
                     ? match.player2_character_id
@@ -1569,6 +1874,75 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         className="w-full bg-transparent border border-white/10 text-cyber-gray font-orbitron hover:bg-white/5 py-3 rounded-xl text-sm"
                     >
                         BACK TO ARENA
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    const stakeAmountStroops = stakeGate?.required ? parseStroops(stakeGate.stakeAmountStroops) : 0n;
+    const stakeFeeStroops = stakeGate?.required ? calcStakeFee(stakeAmountStroops, stakeGate.feeBps) : 0n;
+    const requiredDepositStroops = stakeAmountStroops + stakeFeeStroops;
+    const shouldBlockForStake = !!stakeGate?.required && !stakeGate.bothConfirmed;
+
+    if (shouldBlockForStake) {
+        return (
+            <div className="fixed inset-0 bg-black flex items-center justify-center z-50 p-4">
+                <div className="w-full max-w-lg bg-black/60 border border-cyber-gold/30 rounded-[20px] p-8">
+                    <h2 className="text-2xl font-bold text-cyber-gold font-orbitron mb-2">STAKE DEPOSIT REQUIRED</h2>
+                    <p className="text-cyber-gray text-sm mb-6">
+                        Both players must confirm their stake on-chain before character selection begins.
+                    </p>
+
+                    <div className="bg-cyber-gold/10 border border-cyber-gold/30 rounded-xl p-4 mb-4">
+                        <p className="text-cyber-gold font-orbitron font-bold">
+                            Stake: {toXlmDisplay(stakeAmountStroops)} XLM per player
+                        </p>
+                        <p className="text-cyber-gray text-xs mt-1">
+                            Deposit now: {toXlmDisplay(requiredDepositStroops)} XLM ({toXlmDisplay(stakeAmountStroops)} + {toXlmDisplay(stakeFeeStroops)} fee)
+                        </p>
+                        <p className="text-green-400 text-xs mt-1">
+                            Winner payout: {toXlmDisplay(stakeAmountStroops * 2n)} XLM
+                        </p>
+                    </div>
+
+                    <div className="space-y-2 mb-5 text-sm">
+                        <p className={stakeGate.myConfirmed ? "text-green-400" : "text-cyber-gray"}>
+                            {stakeGate.myConfirmed ? "✓" : "○"} Your stake confirmed
+                        </p>
+                        <p className={stakeGate.opponentConfirmed ? "text-green-400" : "text-cyber-gray"}>
+                            {stakeGate.opponentConfirmed ? "✓" : "○"} Opponent stake confirmed
+                        </p>
+                    </div>
+
+                    {stakeGate.pendingRegistration && (
+                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 mb-4">
+                            <p className="text-yellow-400 text-sm">
+                                {registrationStatus === "preparing" && "Preparing on-chain registration transaction..."}
+                                {registrationStatus === "signing" && "Check your wallet and sign the match registration."}
+                                {registrationStatus === "waiting_for_opponent" && "Waiting for opponent wallet signature on registration..."}
+                                {(registrationStatus === "idle" || registrationStatus === "complete" || registrationStatus === "skipped" || registrationStatus === "error") &&
+                                    "Waiting for on-chain match registration to complete before stake deposit."}
+                            </p>
+                        </div>
+                    )}
+
+                    {stakeGate.error && (
+                        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 mb-4">
+                            <p className="text-red-400 text-sm">{stakeGate.error}</p>
+                        </div>
+                    )}
+
+                    <button
+                        onClick={handleSubmitStakeDeposit}
+                        disabled={stakeGate.isSubmitting || stakeGate.myConfirmed || stakeGate.pendingRegistration}
+                        className="w-full bg-gradient-cyber text-white border-0 font-orbitron hover:opacity-90 py-3 rounded-xl text-sm disabled:opacity-50"
+                    >
+                        {stakeGate.myConfirmed
+                            ? (stakeGate.opponentConfirmed ? "WAITING FOR MATCH..." : "WAITING FOR OPPONENT...")
+                            : stakeGate.isSubmitting
+                                ? "AWAITING WALLET CONFIRMATION..."
+                                : `CONFIRM ${toXlmDisplay(requiredDepositStroops)} XLM STAKE`}
                     </button>
                 </div>
             </div>

@@ -16,9 +16,38 @@ import {
     isOnChainRegistrationConfigured,
     matchIdToSessionId,
     prepareRegistration,
+    setMatchStakeOnChain,
     submitSignedRegistration,
     type PreparedRegistration,
 } from "../../lib/stellar-contract";
+
+async function configureStakeIfNeeded(matchId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    const supabase = getSupabase();
+    const { data: match } = await supabase
+        .from("matches")
+        .select("stake_amount_stroops")
+        .eq("id", matchId)
+        .maybeSingle();
+
+    const rawStake = match?.stake_amount_stroops;
+    if (!rawStake) return { ok: true };
+
+    let stakeAmountStroops: bigint;
+    try {
+        stakeAmountStroops = BigInt(rawStake);
+    } catch {
+        return { ok: false, error: "Invalid stake_amount_stroops in match record" };
+    }
+
+    if (stakeAmountStroops <= 0n) return { ok: true };
+
+    const onChainStake = await setMatchStakeOnChain(matchId, stakeAmountStroops);
+    if (!onChainStake.success) {
+        return { ok: false, error: onChainStake.error || "Failed to configure on-chain stake" };
+    }
+
+    return { ok: true };
+}
 
 // In-memory store for pending registrations.
 // Keyed by matchId → { prepared data, collected signed auth entries }
@@ -144,6 +173,15 @@ export async function handlePrepareRegistration(
                         onchain_tx_hash: result.txHash || null,
                     })
                     .eq("id", matchId);
+            }
+
+            const stakeConfig = await configureStakeIfNeeded(matchId);
+            if (!stakeConfig.ok) {
+                pendingRegistrations.delete(matchId);
+                return Response.json(
+                    { error: stakeConfig.error },
+                    { status: 500 },
+                );
             }
 
             await broadcastGameEvent(matchId, "registration_complete", {
@@ -348,6 +386,21 @@ export async function handleSubmitAuth(
 
             return Response.json(
                 { error: result.error || "On-chain submission failed" },
+                { status: 500 },
+            );
+        }
+
+        const stakeConfig = await configureStakeIfNeeded(matchId);
+        if (!stakeConfig.ok) {
+            pending.submitted = false;
+            pending.signedAuthEntries = {};
+
+            await broadcastGameEvent(matchId, "registration_failed", {
+                error: stakeConfig.error,
+            });
+
+            return Response.json(
+                { error: stakeConfig.error },
                 { status: 500 },
             );
         }

@@ -545,3 +545,159 @@ export async function cleanupStaleQueue(maxAgeMinutes: number = 30): Promise<num
 
     return data?.length ?? 0;
 }
+
+export interface PrivateRoomResult {
+    id: string;
+    code: string;
+    stakeAmountStroops?: string;
+}
+
+export interface JoinRoomResult {
+    id: string;
+    hostAddress: string;
+    selectionDeadlineAt?: string;
+    stakeAmountStroops?: string;
+    stakeDeadlineAt?: string;
+}
+
+const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const STAKE_DEPOSIT_TIMEOUT_SECONDS = 60;
+
+function generateRoomCode(): string {
+    let code = "";
+    for (let i = 0; i < 6; i++) {
+        const index = Math.floor(Math.random() * ROOM_CODE_ALPHABET.length);
+        code += ROOM_CODE_ALPHABET[index];
+    }
+    return code;
+}
+
+async function generateUniqueRoomCode(maxAttempts: number = 8): Promise<string> {
+    const supabase = getSupabase();
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const code = generateRoomCode();
+        const { data } = await supabase
+            .from("matches")
+            .select("id")
+            .eq("room_code", code)
+            .maybeSingle();
+
+        if (!data) return code;
+    }
+
+    throw new Error("Failed to generate unique room code");
+}
+
+export async function createRoom(
+    hostAddress: string,
+    stakeAmountStroops?: bigint
+): Promise<PrivateRoomResult | null> {
+    try {
+        const supabase = getSupabase();
+        const roomCode = await generateUniqueRoomCode();
+        const hasStake = !!stakeAmountStroops && stakeAmountStroops > 0n;
+
+        const insertData: Record<string, unknown> = {
+            player1_address: hostAddress,
+            room_code: roomCode,
+            status: "waiting",
+            format: "best_of_3",
+            fight_phase: "waiting",
+            stake_fee_bps: 10,
+        };
+
+        if (hasStake) {
+            insertData.stake_amount_stroops = stakeAmountStroops!.toString();
+        }
+
+        const { data, error } = await supabase
+            .from("matches")
+            .insert(insertData)
+            .select("id, room_code, stake_amount_stroops")
+            .single();
+
+        if (error || !data) {
+            console.error("Failed to create room:", error);
+            return null;
+        }
+
+        return {
+            id: data.id,
+            code: data.room_code,
+            stakeAmountStroops: data.stake_amount_stroops ?? undefined,
+        };
+    } catch (error) {
+        console.error("Error creating room:", error);
+        return null;
+    }
+}
+
+export async function joinRoom(
+    guestAddress: string,
+    roomCode: string
+): Promise<JoinRoomResult | null> {
+    try {
+        const supabase = getSupabase();
+
+        const { data: room, error: findError } = await supabase
+            .from("matches")
+            .select("id, player1_address, player2_address, status, stake_amount_stroops")
+            .eq("room_code", roomCode.toUpperCase())
+            .eq("status", "waiting")
+            .single();
+
+        if (findError || !room) {
+            return null;
+        }
+
+        if (room.player2_address) {
+            return null;
+        }
+
+        if (room.player1_address === guestAddress) {
+            return null;
+        }
+
+        const hasStake = !!room.stake_amount_stroops && BigInt(room.stake_amount_stroops) > 0n;
+
+        const selectionDeadlineAt = hasStake
+            ? null
+            : new Date(Date.now() + CHARACTER_SELECT_TIMEOUT_SECONDS * 1000).toISOString();
+
+        const stakeDeadlineAt = hasStake
+            ? new Date(Date.now() + STAKE_DEPOSIT_TIMEOUT_SECONDS * 1000).toISOString()
+            : undefined;
+
+        const updateData: Record<string, unknown> = {
+            player2_address: guestAddress,
+            status: "character_select",
+        };
+
+        if (selectionDeadlineAt) updateData.selection_deadline_at = selectionDeadlineAt;
+        if (stakeDeadlineAt) updateData.stake_deadline_at = stakeDeadlineAt;
+
+        const { data: updated, error: updateError } = await supabase
+            .from("matches")
+            .update(updateData)
+            .eq("id", room.id)
+            .select("selection_deadline_at, stake_deadline_at")
+            .single();
+
+        if (updateError || !updated) {
+            console.error("Failed to join room:", updateError);
+            return null;
+        }
+
+        return {
+            id: room.id,
+            hostAddress: room.player1_address,
+            selectionDeadlineAt: updated.selection_deadline_at ?? undefined,
+            stakeAmountStroops: room.stake_amount_stroops ?? undefined,
+            stakeDeadlineAt: updated.stake_deadline_at ?? undefined,
+        };
+    } catch (error) {
+        console.error("Error joining room:", error);
+        return null;
+    }
+}

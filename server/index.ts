@@ -6,8 +6,10 @@
  */
 
 import { handleJoinQueue, handleQueueStatus, handleLeaveQueue } from "./routes/matchmaking/queue";
+import { handleCreateRoom, handleJoinRoom } from "./routes/matchmaking/rooms";
 import { handleGetMatch } from "./routes/matches/match";
 import { handlePrepareMoveOnChain, handleSubmitMove } from "./routes/matches/move";
+import { handlePrepareStakeDeposit, handleSubmitStakeDeposit } from "./routes/matches/stake";
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleSubmitBan } from "./routes/matches/ban";
 import { handleForfeit } from "./routes/matches/forfeit";
@@ -27,6 +29,7 @@ import { handleCommitPrivateRoundPlan, handleResolvePrivateRound } from "./route
 import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
+import { handleSweepFeesCron } from "./routes/cron/sweep-fees";
 import { ensureEnvLoaded } from "./lib/env";
 
 ensureEnvLoaded();
@@ -106,6 +109,18 @@ async function handleRequest(req: Request): Promise<Response> {
         if (method === "DELETE") return corsResponse(await handleLeaveQueue(req), req);
     }
 
+    if (pathname === "/api/matchmaking/rooms" && method === "POST") {
+        return corsResponse(await handleCreateRoom(req), req);
+    }
+
+    if (pathname === "/api/matchmaking/rooms/join" && method === "POST") {
+        return corsResponse(await handleJoinRoom(req), req);
+    }
+
+    if (pathname === "/api/cron/sweep-fees" && method === "POST") {
+        return corsResponse(await handleSweepFeesCron(req), req);
+    }
+
     // -----------------------------------------------
     // Leaderboard
     // -----------------------------------------------
@@ -147,6 +162,16 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/move
         if (pathname === `/api/matches/${matchId}/move` && method === "POST") {
             return corsResponse(await handleSubmitMove(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/stake/prepare
+        if (pathname === `/api/matches/${matchId}/stake/prepare` && method === "POST") {
+            return corsResponse(await handlePrepareStakeDeposit(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/stake/submit
+        if (pathname === `/api/matches/${matchId}/stake/submit` && method === "POST") {
+            return corsResponse(await handleSubmitStakeDeposit(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/move/prepare
