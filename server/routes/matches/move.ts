@@ -238,6 +238,12 @@ export async function handleSubmitMove(
 
         const currentRound = await getOrCreateCurrentRound(matchId);
 
+        const { data: stunSnapshot } = await supabase
+            .from("fight_state_snapshots")
+            .select("player1_is_stunned, player2_is_stunned")
+            .eq("match_id", matchId)
+            .maybeSingle();
+
         // Check if player already submitted for this round
         const moveColumn = isPlayer1 ? "player1_move" : "player2_move";
         if (currentRound[moveColumn]) {
@@ -283,9 +289,14 @@ export async function handleSubmitMove(
             onChainTxHash = onChainResult.txHash || null;
         }
 
-        // Submit the move
+        // Submit the move (server-authoritative stun forces "stunned")
+        const submitterIsStunned = isPlayer1
+            ? Boolean(stunSnapshot?.player1_is_stunned)
+            : Boolean(stunSnapshot?.player2_is_stunned);
+        const resolvedMove = submitterIsStunned ? "stunned" : body.move;
+
         const updateData: Record<string, unknown> = {
-            [moveColumn]: body.move,
+            [moveColumn]: resolvedMove,
         };
 
         const { error: updateError } = await supabase
@@ -306,7 +317,7 @@ export async function handleSubmitMove(
             .insert({
                 round_id: currentRound.id,
                 player_address: body.address,
-                move_type: body.move,
+                move_type: resolvedMove,
                 signature: body.signature || null,
                 signed_message: body.signedMessage || null,
             });
@@ -328,12 +339,49 @@ export async function handleSubmitMove(
             onChainTxHash,
         });
 
-        // Re-fetch to check if both submitted
-        const { data: updatedRound } = await supabase
+        // Re-fetch to check if both submitted and auto-assign stunned opponent if needed
+        let { data: updatedRound } = await supabase
             .from("rounds")
             .select("*")
             .eq("id", currentRound.id)
             .single();
+
+        if (updatedRound) {
+            const autoAssignUpdate: Record<string, unknown> = {};
+            const autoSnapshotUpdate: Record<string, unknown> = {};
+
+            if (!updatedRound.player1_move && stunSnapshot?.player1_is_stunned) {
+                autoAssignUpdate.player1_move = "stunned";
+                autoSnapshotUpdate.player1_has_submitted_move = true;
+            }
+
+            if (!updatedRound.player2_move && stunSnapshot?.player2_is_stunned) {
+                autoAssignUpdate.player2_move = "stunned";
+                autoSnapshotUpdate.player2_has_submitted_move = true;
+            }
+
+            if (Object.keys(autoAssignUpdate).length > 0) {
+                await supabase
+                    .from("rounds")
+                    .update(autoAssignUpdate)
+                    .eq("id", currentRound.id);
+
+                if (Object.keys(autoSnapshotUpdate).length > 0) {
+                    await supabase
+                        .from("fight_state_snapshots")
+                        .update(autoSnapshotUpdate)
+                        .eq("match_id", matchId);
+                }
+
+                const refreshed = await supabase
+                    .from("rounds")
+                    .select("*")
+                    .eq("id", currentRound.id)
+                    .single();
+
+                updatedRound = refreshed.data;
+            }
+        }
 
         let bothSubmitted = updatedRound?.player1_move && updatedRound?.player2_move;
 

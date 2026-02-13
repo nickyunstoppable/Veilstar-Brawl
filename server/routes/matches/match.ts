@@ -5,13 +5,20 @@
 
 import { getSupabase } from "../../lib/supabase";
 
-export async function handleGetMatch(matchId: string): Promise<Response> {
+export async function handleGetMatch(matchId: string, req?: Request): Promise<Response> {
     try {
         const supabase = getSupabase();
+        const lite = (() => {
+            if (!req) return false;
+            const url = new URL(req.url);
+            return url.searchParams.get("lite") === "1";
+        })();
 
         const { data: match, error } = await supabase
             .from("matches")
-            .select("*")
+            .select(lite
+                ? "id,status,player1_address,player2_address,winner_address,player1_rounds_won,player2_rounds_won,fight_phase,updated_at"
+                : "*")
             .eq("id", matchId)
             .single();
 
@@ -28,6 +35,14 @@ export async function handleGetMatch(matchId: string): Promise<Response> {
             .select("*")
             .eq("match_id", matchId)
             .maybeSingle();
+
+        if (lite) {
+            return Response.json({
+                match,
+                fightState: fightState ?? null,
+                rounds: [],
+            });
+        }
 
         // Fetch rounds
         const { data: rounds } = await supabase

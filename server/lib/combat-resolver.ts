@@ -22,8 +22,10 @@ import {
     isValidMove,
 } from "./round-resolver";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "./stellar-contract";
-import { shouldAutoProveFinalize, triggerAutoProveFinalize } from "./zk-finalizer-client";
-import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, type PowerSurgeCardId } from "./power-surge";
+import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
+import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type PowerSurgeCardId } from "./power-surge";
+
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 
 // =============================================================================
 // TYPES
@@ -49,6 +51,104 @@ export interface CombatResolutionResult {
     matchWinner: "player1" | "player2" | null;
     narrative: string;
     error?: string;
+}
+
+interface PrivateRoundPlanPayload {
+    move?: MoveType;
+}
+
+function parsePrivateRoundPlan(raw: unknown): PrivateRoundPlanPayload {
+    if (!raw || typeof raw !== "string") return {};
+
+    const normalize = (parsed: PrivateRoundPlanPayload): PrivateRoundPlanPayload => ({
+        move: parsed.move && isValidMove(parsed.move) ? parsed.move : undefined,
+    });
+
+    try {
+        return normalize(JSON.parse(raw) as PrivateRoundPlanPayload);
+    } catch {
+        try {
+            const decoded = Buffer.from(raw, "base64").toString("utf8");
+            return normalize(JSON.parse(decoded) as PrivateRoundPlanPayload);
+        } catch {
+            return {};
+        }
+    }
+}
+
+function getPlannedMoveForTurn(plan: PrivateRoundPlanPayload, turnNumber: number): MoveType | null {
+    if (!Number.isInteger(turnNumber) || turnNumber < 1) return null;
+
+    if (plan.move && isValidMove(plan.move)) return plan.move;
+    return null;
+}
+
+async function getPrivateAutoMovesForTurn(params: {
+    matchId: string;
+    roundNumber: number;
+    turnNumber: number;
+    player1Address: string;
+    player2Address: string;
+}): Promise<{ player1Move: MoveType | null; player2Move: MoveType | null }> {
+    const supabase = getSupabase();
+    const { data: commitRows } = await supabase
+        .from("round_private_commits")
+        .select("player_address, encrypted_plan")
+        .eq("match_id", params.matchId)
+        .eq("round_number", params.roundNumber);
+
+    const byAddress = new Map<string, PrivateRoundPlanPayload>();
+    for (const row of commitRows || []) {
+        byAddress.set(row.player_address, parsePrivateRoundPlan((row as any).encrypted_plan));
+    }
+
+    const p1Plan = byAddress.get(params.player1Address) || {};
+    const p2Plan = byAddress.get(params.player2Address) || {};
+
+    return {
+        player1Move: getPlannedMoveForTurn(p1Plan, params.turnNumber),
+        player2Move: getPlannedMoveForTurn(p2Plan, params.turnNumber),
+    };
+}
+
+async function getOrCreateRoundTurn(params: {
+    matchId: string;
+    roundNumber: number;
+    turnNumber: number;
+}): Promise<{ id: string }> {
+    const supabase = getSupabase();
+
+    const { data: existing } = await supabase
+        .from("rounds")
+        .select("id")
+        .eq("match_id", params.matchId)
+        .eq("round_number", params.roundNumber)
+        .eq("turn_number", params.turnNumber)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (existing?.id) {
+        return { id: existing.id };
+    }
+
+    const { data: created, error } = await supabase
+        .from("rounds")
+        .insert({
+            match_id: params.matchId,
+            round_number: params.roundNumber,
+            turn_number: params.turnNumber,
+            countdown_seconds: 0,
+            move_deadline_at: new Date(Date.now() + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000).toISOString(),
+        })
+        .select("id")
+        .single();
+
+    if (error || !created?.id) {
+        throw new Error(`Failed to create private auto-turn row: ${error?.message || "unknown error"}`);
+    }
+
+    return { id: created.id };
 }
 
 // =============================================================================
@@ -118,8 +218,29 @@ export async function resolveTurn(
         const deck = normalizeStoredDeck(match.power_surge_deck);
         const roundKey = String(currentRound.round_number);
         const roundDeck = deck.rounds[roundKey];
-        const p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
-        const p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
+        let p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
+        let p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
+
+        // PRIVATE MODE fallback: selections are persisted in power_surges during
+        // zk round resolve and may not be mirrored into matches.power_surge_deck.
+        if (PRIVATE_ROUNDS_ENABLED && (!p1Surge || !p2Surge)) {
+            const { data: surgeRow } = await supabase
+                .from("power_surges")
+                .select("player1_card_id, player2_card_id")
+                .eq("match_id", matchId)
+                .eq("round_number", currentRound.round_number)
+                .maybeSingle();
+
+            const p1FromRow = surgeRow?.player1_card_id;
+            const p2FromRow = surgeRow?.player2_card_id;
+
+            if (!p1Surge && isPowerSurgeCardId(p1FromRow)) {
+                p1Surge = p1FromRow;
+            }
+            if (!p2Surge && isPowerSurgeCardId(p2FromRow)) {
+                p2Surge = p2FromRow;
+            }
+        }
 
         // Resolve the turn
         const input: RoundResolutionInput = {
@@ -227,9 +348,9 @@ export async function resolveTurn(
                 player2_guard_meter: resolution.player2GuardAfter,
                 player2_rounds_won: p2RoundsWon,
                 player2_has_submitted_move: false,
-                // Stun only lasts for one turn
-                player1_is_stunned: false,
-                player2_is_stunned: false,
+                // Carry stun from outcome into next turn (cleared after consuming on next resolve)
+                player1_is_stunned: resolution.player1IsStunnedNext,
+                player2_is_stunned: resolution.player2IsStunnedNext,
                 last_resolved_player1_move: p1Move,
                 last_resolved_player2_move: p2Move,
                 last_narrative: resolution.narrative,
@@ -267,10 +388,12 @@ export async function resolveTurn(
             player1: {
                 move: p1Move,
                 damageDealt: resolution.player1.damageDealt,
+                damageTaken: resolution.player1.damageTaken,
                 healthAfter: resolution.player1HealthAfter,
                 energyAfter: resolution.player1EnergyAfter,
                 guardMeterAfter: resolution.player1GuardAfter,
-                isStunned: false,
+                outcome: resolution.player1.outcome,
+                isStunned: resolution.player1IsStunnedNext,
                 hpRegen: resolution.player1.hpRegen ?? 0,
                 lifesteal: resolution.player1.lifesteal ?? 0,
                 energyDrained: resolution.player1.energyDrained ?? 0,
@@ -278,10 +401,12 @@ export async function resolveTurn(
             player2: {
                 move: p2Move,
                 damageDealt: resolution.player2.damageDealt,
+                damageTaken: resolution.player2.damageTaken,
                 healthAfter: resolution.player2HealthAfter,
                 energyAfter: resolution.player2EnergyAfter,
                 guardMeterAfter: resolution.player2GuardAfter,
-                isStunned: false,
+                outcome: resolution.player2.outcome,
+                isStunned: resolution.player2IsStunnedNext,
                 hpRegen: resolution.player2.hpRegen ?? 0,
                 lifesteal: resolution.player2.lifesteal ?? 0,
                 energyDrained: resolution.player2.energyDrained ?? 0,
@@ -296,7 +421,11 @@ export async function resolveTurn(
 
             // Report result on-chain (non-blocking)
             let onChainTxHash: string | undefined;
-            if (!shouldAutoProveFinalize() && isStellarConfigured()) {
+            let onChainSkippedReason: string | undefined;
+            const autoFinalize = getAutoProveFinalizeStatus();
+            const stellarReady = isStellarConfigured();
+
+            if (!autoFinalize.enabled && stellarReady) {
                 try {
                     const onChainResult = await reportMatchResultOnChain(
                         matchId,
@@ -318,20 +447,28 @@ export async function resolveTurn(
                 }
             }
 
-            if (shouldAutoProveFinalize()) {
+            if (autoFinalize.enabled) {
                 triggerAutoProveFinalize(matchId, winnerAddr, "combat-resolver");
+            } else if (!stellarReady) {
+                onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
+                console.warn(`[CombatResolver] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
             }
 
             await broadcastGameEvent(matchId, "match_ended", {
                 matchId,
                 winner: matchWinner,
                 winnerAddress: winnerAddr,
+                finalScore: {
+                    player1RoundsWon: p1RoundsWon,
+                    player2RoundsWon: p2RoundsWon,
+                },
                 player1RoundsWon: p1RoundsWon,
                 player2RoundsWon: p2RoundsWon,
                 reason: "knockout",
                 ratingChanges: eloChanges ?? undefined,
                 onChainSessionId: matchIdToSessionId(matchId),
                 onChainTxHash,
+                onChainSkippedReason,
                 contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
         } else if (roundOver) {
@@ -386,8 +523,8 @@ export async function resolveTurn(
                         player2Energy: resolution.player2EnergyAfter,
                         player1GuardMeter: resolution.player1GuardAfter,
                         player2GuardMeter: resolution.player2GuardAfter,
-                        player1IsStunned: false,
-                        player2IsStunned: false,
+                        player1IsStunned: resolution.player1IsStunnedNext,
+                        player2IsStunned: resolution.player2IsStunnedNext,
                         moveDeadlineAt: moveDeadlineNext,
                         countdownEndsAt: Date.now() + GAME_CONSTANTS.COUNTDOWN_SECONDS * 1000,
                     });
@@ -432,6 +569,27 @@ async function replayToCurrentState(
     const matchId = match.id as string;
     const deck = normalizeStoredDeck(match.power_surge_deck);
 
+    const privateSurgesByRound = new Map<number, { player1: PowerSurgeCardId | null; player2: PowerSurgeCardId | null }>();
+    if (PRIVATE_ROUNDS_ENABLED) {
+        const { data: surgeRows } = await supabase
+            .from("power_surges")
+            .select("round_number, player1_card_id, player2_card_id")
+            .eq("match_id", matchId);
+
+        for (const row of surgeRows || []) {
+            const roundNumber = Number((row as any).round_number);
+            if (!Number.isInteger(roundNumber) || roundNumber < 1) continue;
+
+            const p1Raw = (row as any).player1_card_id;
+            const p2Raw = (row as any).player2_card_id;
+
+            privateSurgesByRound.set(roundNumber, {
+                player1: isPowerSurgeCardId(p1Raw) ? p1Raw : null,
+                player2: isPowerSurgeCardId(p2Raw) ? p2Raw : null,
+            });
+        }
+    }
+
     // Fetch all resolved rounds before this one
     const { data: previousRounds } = await supabase
         .from("rounds")
@@ -462,8 +620,14 @@ async function replayToCurrentState(
 
         const roundKey = String(round.round_number);
         const roundDeck = deck.rounds[roundKey];
-        const p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
-        const p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
+        let p1Surge = (roundDeck?.player1Selection ?? null) as PowerSurgeCardId | null;
+        let p2Surge = (roundDeck?.player2Selection ?? null) as PowerSurgeCardId | null;
+
+        if (PRIVATE_ROUNDS_ENABLED && (!p1Surge || !p2Surge)) {
+            const privateRoundSurges = privateSurgesByRound.get(round.round_number);
+            if (!p1Surge) p1Surge = privateRoundSurges?.player1 ?? null;
+            if (!p2Surge) p2Surge = privateRoundSurges?.player2 ?? null;
+        }
 
         const input: RoundResolutionInput = {
             player1Move: round.player1_move as MoveType,

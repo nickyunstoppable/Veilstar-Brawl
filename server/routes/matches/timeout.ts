@@ -6,7 +6,8 @@
 
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
-import { triggerAutoProveFinalize } from "../../lib/zk-finalizer-client";
+import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
 interface TimeoutBody {
     address: string;
@@ -121,16 +122,52 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             .eq("id", matchId)
             .in("status", ["in_progress", "character_select"]);
 
+        let onChainTxHash: string | undefined;
+        let onChainSkippedReason: string | undefined;
+        const autoFinalize = getAutoProveFinalizeStatus();
+        const stellarReady = isStellarConfigured();
+
+        if (!autoFinalize.enabled && stellarReady) {
+            try {
+                const onChainResult = await reportMatchResultOnChain(
+                    matchId,
+                    match.player1_address,
+                    match.player2_address,
+                    winnerAddress,
+                );
+                onChainTxHash = onChainResult.txHash;
+                if (onChainResult.txHash) {
+                    await supabase
+                        .from("matches")
+                        .update({ onchain_result_tx_hash: onChainResult.txHash })
+                        .eq("id", matchId);
+                }
+            } catch (err) {
+                console.error("[Timeout POST] On-chain report error:", err);
+            }
+        } else if (autoFinalize.enabled) {
+            triggerAutoProveFinalize(matchId, winnerAddress, "timeout");
+        } else {
+            onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
+            console.warn(`[Timeout POST] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
+        }
+
         const matchEndedPayload = {
             matchId,
             winner,
             winnerAddress,
-            reason: "opponent_disconnected",
+            reason: "timeout",
+            finalScore: {
+                player1RoundsWon,
+                player2RoundsWon,
+            },
             player1RoundsWon,
             player2RoundsWon,
+            onChainSessionId: matchIdToSessionId(matchId),
+            onChainTxHash,
+            onChainSkippedReason,
+            contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "",
         };
-
-        triggerAutoProveFinalize(matchId, winnerAddress, "timeout");
 
         await broadcastGameEvent(matchId, "match_ended", matchEndedPayload);
 

@@ -54,7 +54,6 @@ export interface GameEvents {
     matchId: string;
     moveType: string;
     playerRole: string;
-    plannedMoves?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
   };
   "game:submitPrivateRoundPlan": {
     matchId: string;

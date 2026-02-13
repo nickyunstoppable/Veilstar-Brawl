@@ -99,7 +99,24 @@ export function useOnChainRegistration() {
                     submitted,
                     txHash: preparedTxHash,
                     transactionXdr,
-                } = preparedJson;
+                    skipped: serverSkipped,
+                } = preparedJson as {
+                    sessionId: number;
+                    authEntries: Record<string, string>;
+                    requiredAuthAddresses?: string[];
+                    transactionXdr?: string;
+                    submitted?: boolean;
+                    txHash?: string;
+                    skipped?: boolean;
+                };
+
+                // If the server says registration was skipped (match cancelled/abandoned),
+                // treat as complete so the frontend proceeds gracefully.
+                if (serverSkipped) {
+                    console.warn("[useOnChainRegistration] Server skipped registration (match may have been cancelled)");
+                    setStatus("complete");
+                    return true;
+                }
 
                 if (transactionXdr) {
                     try {

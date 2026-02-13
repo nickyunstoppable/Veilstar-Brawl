@@ -10,12 +10,22 @@
 export type MoveType = "punch" | "kick" | "block" | "special" | "stunned";
 export type PlayerRole = "player1" | "player2";
 export type RoundWinner = "player1" | "player2" | "draw" | null;
+export type MoveOutcome =
+    | "hit"
+    | "blocked"
+    | "stunned"
+    | "staggered"
+    | "reflected"
+    | "shattered"
+    | "missed"
+    | "guarding";
 
 export interface PlayerMoveResult {
     move: MoveType;
     damageDealt: number;
     damageTaken: number;
     moveSuccess: boolean;
+    outcome?: MoveOutcome;
     hpRegen?: number;
     lifesteal?: number;
     energyDrained?: number;
@@ -32,6 +42,8 @@ export interface RoundResolutionResult {
     player2EnergyAfter: number;
     player1GuardAfter: number;
     player2GuardAfter: number;
+    player1IsStunnedNext: boolean;
+    player2IsStunnedNext: boolean;
     narrative: string;
 }
 
@@ -60,15 +72,15 @@ export interface MoveProperties {
 
 export const MOVE_PROPERTIES: Record<MoveType, MoveProperties> = {
     punch: {
-        damage: 8,
+        damage: 10,
         energyCost: 0,
         guardDamage: 5,
         guardBuild: 0,
         description: "Quick strike",
     },
     kick: {
-        damage: 14,
-        energyCost: 15,
+        damage: 15,
+        energyCost: 25,
         guardDamage: 10,
         guardBuild: 0,
         description: "Powerful kick",
@@ -81,8 +93,8 @@ export const MOVE_PROPERTIES: Record<MoveType, MoveProperties> = {
         description: "Defensive stance",
     },
     special: {
-        damage: 22,
-        energyCost: 40,
+        damage: 25,
+        energyCost: 50,
         guardDamage: 20,
         guardBuild: 0,
         description: "Devastating special attack",
@@ -103,14 +115,25 @@ export const MOVE_PROPERTIES: Record<MoveType, MoveProperties> = {
 export const DAMAGE_MULTIPLIERS = {
     /** Base damage when attack beats defense */
     NORMAL: 1.0,
-    /** Reduced damage when blocked */
-    BLOCKED: 0.25,
+    /** Reduced damage when blocked/guarding */
+    BLOCKED: 0.5,
     /** Bonus when guard meter is full and guard breaks */
     GUARD_BREAK: 1.5,
-    /** Special vs block bonus */
-    SPECIAL_VS_BLOCK: 1.2,
+    /** Special vs block shatter bonus */
+    SPECIAL_VS_BLOCK: 1.5,
     /** Chip damage through block (percentage of base) */
     CHIP_DAMAGE: 0.15,
+};
+
+export const COMBAT_CONSTANTS = {
+    /** Guard buildup on successful guarding turn */
+    GUARD_BUILDUP_ON_BLOCK: 25,
+    /** Extra guard buildup when block absorbs an attack */
+    GUARD_BUILDUP_ON_HIT: 15,
+    /** Kick reflection self-damage percent */
+    KICK_REFLECT_PERCENT: 0.3,
+    /** Extra damage when block is shattered by special */
+    SHATTER_DAMAGE_MULTIPLIER: 1.5,
 };
 
 // =============================================================================
@@ -140,15 +163,53 @@ export const GAME_CONSTANTS = {
 
 // =============================================================================
 // MOVE ADVANTAGE TABLE
-// Punch beats Kick, Kick beats Block, Block beats Punch, Special beats all but Block
+// Punch > Special, Kick > Punch, Block > Kick, Special > Block
 // =============================================================================
 
 export const MOVE_ADVANTAGE: Record<MoveType, MoveType[]> = {
-    punch: ["kick"],
-    kick: ["block"],
-    block: ["punch"],
-    special: ["punch", "kick"],
+    punch: ["special"],
+    kick: ["punch"],
+    block: ["kick"],
+    special: ["block"],
     stunned: [],
+};
+
+export const RESOLUTION_MATRIX: Record<MoveType, Record<MoveType, MoveOutcome>> = {
+    punch: {
+        punch: "hit",
+        kick: "staggered",
+        block: "blocked",
+        special: "hit",
+        stunned: "hit",
+    },
+    kick: {
+        punch: "hit",
+        kick: "hit",
+        block: "reflected",
+        special: "hit",
+        stunned: "hit",
+    },
+    block: {
+        punch: "guarding",
+        kick: "guarding",
+        block: "guarding",
+        special: "shattered",
+        stunned: "guarding",
+    },
+    special: {
+        punch: "missed",
+        kick: "hit",
+        block: "hit",
+        special: "hit",
+        stunned: "hit",
+    },
+    stunned: {
+        punch: "stunned",
+        kick: "stunned",
+        block: "stunned",
+        special: "stunned",
+        stunned: "stunned",
+    },
 };
 
 // =============================================================================

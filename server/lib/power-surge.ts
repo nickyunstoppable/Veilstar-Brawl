@@ -4,7 +4,8 @@
  * Provides deterministic per-round shared card decks and selection persistence in matches.power_surge_deck.
  *
  * NOTE: This is intentionally minimal vs the full client SurgeEffects system.
- * For now, the server only derives stun flags from the selected cards (mempool-congest).
+ * Stun flags are still part of the legacy snapshot schema, but there are
+ * currently no stun-type surge cards in this deck.
  */
 
 import crypto from "crypto";
@@ -134,8 +135,9 @@ export function computeStunFlags(p1Selection: PowerSurgeCardId | null, p2Selecti
   player1Stunned: boolean;
   player2Stunned: boolean;
 } {
-  // mempool-congest stuns opponent for 1 turn
-  const player1Stunned = p2Selection === "mempool-congest";
-  const player2Stunned = p1Selection === "mempool-congest";
+  // Keep signature for compatibility with legacy flow;
+  // no current surge card applies stun.
+  const player1Stunned = false;
+  const player2Stunned = false;
   return { player1Stunned, player2Stunned };
 }

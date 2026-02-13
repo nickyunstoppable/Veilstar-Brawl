@@ -237,11 +237,9 @@ export class FightScene extends Phaser.Scene {
 
   // Countdown deduplication - track the last turn we started a countdown for
   private lastCountdownStartedForTurn: string = "";
+  private lastResolvedEventKey: string = "";
+  private processedResolvedTurns: Set<string> = new Set();
 
-  // Private round planning (phase 2): queue up to 10 moves, submit first move only.
-  // Remaining planned moves are strategy notes and are intentionally discarded when round changes.
-  private privateRoundPlannedMoves: Record<number, MoveType[]> = {};
-  private readonly privateRoundPlanSize: number = 10;
 
   constructor() {
     super({ key: "FightScene" });
@@ -2134,71 +2132,6 @@ export class FightScene extends Phaser.Scene {
       return;
     }
 
-    const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
-
-    if (PRIVATE_ROUNDS_ENABLED) {
-      const roundPlan = this.privateRoundPlannedMoves[currentRound] || [];
-
-      if (roundPlan.length < this.privateRoundPlanSize) {
-        roundPlan.push(move);
-        this.privateRoundPlannedMoves[currentRound] = roundPlan;
-
-        this.selectedMove = null;
-
-        const selectedButton = this.moveButtons.get(move);
-        if (selectedButton) {
-          this.tweens.add({
-            targets: selectedButton,
-            scaleX: 1.08,
-            scaleY: 1.08,
-            duration: 120,
-            yoyo: true,
-            ease: "Sine.easeInOut",
-          });
-        }
-
-        this.moveButtons.forEach((button) => {
-          button.setAlpha(1);
-          button.setInteractive();
-          button.list.forEach((child: any) => {
-            if (child.clearTint) child.clearTint();
-          });
-        });
-
-        const planned = roundPlan.length;
-        this.turnIndicatorText.setText(`Phase 2/2: Plan moves (${planned}/${this.privateRoundPlanSize})`);
-        this.turnIndicatorText.setColor("#40e0d0");
-        this.narrativeText.setText(`Planned ${planned}/${this.privateRoundPlanSize} moves`);
-        this.narrativeText.setAlpha(1);
-        this.narrativeText.setColor("#9ca3af");
-
-        if (planned < this.privateRoundPlanSize) {
-          return;
-        }
-
-        const firstPlannedMove = roundPlan[0];
-        this.selectedMove = firstPlannedMove;
-        this.isWaitingForOpponent = true;
-        this.turnIndicatorText.setText("Plan locked. Submitting first move...");
-        this.turnIndicatorText.setColor("#f97316");
-
-        this.moveButtons.forEach(btn => {
-          btn.disableInteractive();
-          if (btn !== this.moveButtons.get(firstPlannedMove)) {
-            btn.setAlpha(0.5);
-          }
-        });
-
-        this.handleSubmitMove({
-          matchId: this.config.matchId,
-          moveType: firstPlannedMove,
-          playerRole: this.config.playerRole,
-          plannedMoves: [...roundPlan],
-        });
-        return;
-      }
-    }
-
     // Check if affordable using server state energy
     const currentEnergy = role === "player1"
       ? (this.serverState?.player1Energy ?? this.combatEngine.getState().player1.energy)
@@ -2436,6 +2369,7 @@ export class FightScene extends Phaser.Scene {
     this.turnTimer = 20;
     this.localMoveSubmitted = false;
     this.moveInFlight = false;
+    this.isWaitingForOpponent = false;
     this.timerExpiredHandled = false;
     this.turnIndicatorText.setText("Select your move!");
 
@@ -2500,12 +2434,9 @@ export class FightScene extends Phaser.Scene {
     this.timerExpiredHandled = true;
 
     if (PRIVATE_ROUNDS_ENABLED) {
-      const currentRound = this.serverState?.currentRound ?? 1;
-      const plannedMoves = this.privateRoundPlannedMoves[currentRound] || [];
-
       if (!this.localMoveSubmitted && !this.moveInFlight) {
-        const fallbackMove = plannedMoves[0] ?? "block";
-        this.turnIndicatorText.setText("Planning timer expired. Submitting fallback move...");
+        const fallbackMove: MoveType = "block";
+        this.turnIndicatorText.setText("Time's up. Submitting fallback move...");
         this.turnIndicatorText.setColor("#f97316");
         this.isWaitingForOpponent = true;
 
@@ -3023,6 +2954,13 @@ export class FightScene extends Phaser.Scene {
         if (payload.cancelled) {
           console.log(`[FightScene] Move in-flight cancelled for ${payload.player}`);
           this.moveInFlight = false;
+          if (this.turnIndicatorText?.text === "Submitting move...") {
+            this.isWaitingForOpponent = false;
+            this.turnIndicatorText.setText("Select your move!");
+            this.turnIndicatorText.setColor("#40e0d0");
+            this.selectedMove = null;
+            this.updateMoveButtonAffordability();
+          }
         } else {
           console.log(`[FightScene] Move in-flight for ${payload.player}`);
           this.moveInFlight = true;
@@ -3054,7 +2992,7 @@ export class FightScene extends Phaser.Scene {
       }
     });
 
-    // Private round planning flow status updates
+    // Private turn flow status updates (ZK commit/reveal each turn)
     EventBus.on("game:privateRoundCommitted", (data: unknown) => {
       const payload = data as {
         bothCommitted?: boolean;
@@ -3066,19 +3004,19 @@ export class FightScene extends Phaser.Scene {
       if (this.phase !== "selecting") return;
 
       if (payload.bothRevealed) {
-        this.turnIndicatorText.setText("Plans revealed. Resolving...");
+        this.turnIndicatorText.setText("Both moves submitted. Resolving turn...");
         this.turnIndicatorText.setColor("#22c55e");
         return;
       }
 
       if (payload.bothCommitted) {
-        this.turnIndicatorText.setText("Plans locked. Waiting reveals...");
+        this.turnIndicatorText.setText("Both moves committed. Waiting to resolve...");
         this.turnIndicatorText.setColor("#22c55e");
         return;
       }
 
       if (payload.player1Committed || payload.player2Committed) {
-        this.turnIndicatorText.setText("Plan locked. Waiting for opponent...");
+        this.turnIndicatorText.setText("Move committed. Waiting for opponent...");
         this.turnIndicatorText.setColor("#f97316");
       }
     });
@@ -3086,6 +3024,8 @@ export class FightScene extends Phaser.Scene {
     // Listen for round resolution (from server combat resolver)
     EventBus.on("game:roundResolved", (data: unknown) => {
       const raw = data as any;
+      const eventRoundNumber = Number(raw.roundNumber ?? this.serverState?.currentRound ?? 1);
+      const eventTurnNumber = Number(raw.turnNumber ?? this.combatEngine?.getState()?.currentTurn ?? 1);
 
       const currentState = this.serverState;
       const localState = this.combatEngine.getState();
@@ -3117,6 +3057,8 @@ export class FightScene extends Phaser.Scene {
       })();
 
       const payload = {
+        roundNumber: eventRoundNumber,
+        turnNumber: eventTurnNumber,
         player1: {
           move: (raw.player1?.move ?? raw.player1Move ?? "block") as MoveType,
           damageDealt: Number(raw.player1?.damageDealt ?? raw.player1DamageDealt ?? 0),
@@ -3154,6 +3096,19 @@ export class FightScene extends Phaser.Scene {
         player2RoundsWon: Number(raw.player2RoundsWon ?? fallbackP2RoundsWon),
       };
 
+      const dedupeKey = `${payload.roundNumber}-${payload.turnNumber}-${payload.player1Health}-${payload.player2Health}-${payload.player1Energy}-${payload.player2Energy}`;
+      const turnKey = `${payload.roundNumber}-${payload.turnNumber}`;
+      if (this.processedResolvedTurns.has(turnKey)) {
+        console.log(`[FightScene] Duplicate roundResolved ignored for turn ${turnKey}`);
+        return;
+      }
+      if (this.lastResolvedEventKey === dedupeKey && (this.isResolving || this.phase === "resolving")) {
+        console.log(`[FightScene] Duplicate roundResolved ignored for key ${dedupeKey}`);
+        return;
+      }
+      this.lastResolvedEventKey = dedupeKey;
+      this.processedResolvedTurns.add(turnKey);
+
       this.handleServerRoundResolved(payload);
     });
 
@@ -3163,11 +3118,20 @@ export class FightScene extends Phaser.Scene {
         winner: "player1" | "player2";
         winnerAddress: string;
         reason: string;
+        finalScore?: {
+          player1RoundsWon?: number;
+          player2RoundsWon?: number;
+        };
+        player1RoundsWon?: number;
+        player2RoundsWon?: number;
         ratingChanges?: {
           winner: { before: number; after: number; change: number };
           loser: { before: number; after: number; change: number };
         };
         isPrivateRoom?: boolean;
+        onChainSessionId?: number;
+        onChainTxHash?: string;
+        contractId?: string;
       };
 
       // Guard: ignore duplicate match_ended events (e.g. broadcast arriving after
@@ -3769,6 +3733,11 @@ export class FightScene extends Phaser.Scene {
     this.stunnedAutoSubmitAt = 0;
     this.bothStunnedSkipAt = 0;
 
+    // Reset move submission flags so buttons re-enable for the new round/turn
+    this.isWaitingForOpponent = false;
+    this.localMoveSubmitted = false;
+    this.moveInFlight = false;
+
     // Store the deadline for synchronized timing
     this.moveDeadlineAt = payload.moveDeadlineAt;
 
@@ -3956,44 +3925,9 @@ export class FightScene extends Phaser.Scene {
     this.stunnedAutoSubmitAt = 0;
     this.bothStunnedSkipAt = 0;
 
+    const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
+
     // Check if Power Surge selection is still ongoing - BOTH players must complete
-    const currentRound = this.serverState?.currentRound ?? 1;
-
-    if (PRIVATE_ROUNDS_ENABLED) {
-      const plannedMoves = this.privateRoundPlannedMoves[currentRound] || [];
-      this.privateRoundPlannedMoves[currentRound] = plannedMoves;
-
-      if (plannedMoves.length < this.privateRoundPlanSize) {
-        this.phase = "selecting";
-        this.selectedMove = null;
-        this.isWaitingForOpponent = false;
-        this.localMoveSubmitted = false;
-        this.moveInFlight = false;
-
-        this.turnIndicatorText.setText(`Phase 2/2: Plan moves (${plannedMoves.length}/${this.privateRoundPlanSize})`);
-        this.turnIndicatorText.setColor("#40e0d0");
-        this.narrativeText.setText("Plan 10 moves for this round. First planned move is submitted.");
-        this.narrativeText.setAlpha(1);
-        this.narrativeText.setColor("#9ca3af");
-
-        this.resetButtonVisuals();
-        this.moveButtons.forEach((button) => {
-          button.setAlpha(1);
-          button.setInteractive();
-          button.list.forEach((child: any) => {
-            if (child.clearTint) child.clearTint();
-          });
-        });
-
-        this.turnTimer = Math.max(1, Math.floor((moveDeadlineAt - Date.now()) / 1000));
-        this.roundTimerText.setText(`${this.turnTimer}s`);
-        this.roundTimerText.setColor("#40e0d0");
-        this.moveDeadlineAt = moveDeadlineAt;
-        this.timerExpiredHandled = false;
-        return;
-      }
-    }
-
     // Check database to see if both players have submitted their Power Surge selections
     const areBothSurgesComplete = await this.checkBothSurgesComplete(currentRound);
 
@@ -4198,6 +4132,8 @@ export class FightScene extends Phaser.Scene {
    * Handle server-resolved round (production mode).
    */
   private handleServerRoundResolved(payload: {
+    roundNumber?: number;
+    turnNumber?: number;
     player1: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; hpRegen?: number; lifesteal?: number; energyDrained?: number };
     player2: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; hpRegen?: number; lifesteal?: number; energyDrained?: number };
     player1Health: number;
@@ -4394,7 +4330,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            // Show energy drain effect if P2 lost energy from P1's surge (e.g., GhostDAG, Vaultbreaker)
+            // Show energy drain effect if P2 lost energy from P1's surge (e.g., Mempool Siphon, Vaultbreaker)
             if (payload.player2.energyDrained && payload.player2.energyDrained > 0) {
               this.time.delayedCall(500, () => {
                 this.showFloatingText(
@@ -4473,7 +4409,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            // Show energy drain effect if P1 lost energy from P2's surge (e.g., GhostDAG, Vaultbreaker)
+            // Show energy drain effect if P1 lost energy from P2's surge (e.g., Mempool Siphon, Vaultbreaker)
             if (payload.player1.energyDrained && payload.player1.energyDrained > 0) {
               this.time.delayedCall(500, () => {
                 this.showFloatingText(
@@ -4634,11 +4570,20 @@ export class FightScene extends Phaser.Scene {
     winner: "player1" | "player2";
     winnerAddress: string;
     reason: string;
+    finalScore?: {
+      player1RoundsWon?: number;
+      player2RoundsWon?: number;
+    };
+    player1RoundsWon?: number;
+    player2RoundsWon?: number;
     ratingChanges?: {
       winner: { before: number; after: number; change: number };
       loser: { before: number; after: number; change: number };
     };
     isPrivateRoom?: boolean;
+    onChainSessionId?: number;
+    onChainTxHash?: string;
+    contractId?: string;
   }): void {
     // Use helper for SFX and Animations
     this.showMatchEnd(payload.winner);
@@ -4648,31 +4593,45 @@ export class FightScene extends Phaser.Scene {
     const delayMs = payload.reason === "forfeit" ? 1500 : 5000;
 
     this.time.delayedCall(delayMs, () => {
-      // Construct detailed result from server state + payload
-      const result = {
-        winner: payload.winner,
-        reason: (payload.reason as any),
-        player1FinalHealth: this.serverState?.player1Health ?? 0,
-        player2FinalHealth: this.serverState?.player2Health ?? 0,
-        player1RoundsWon: this.serverState?.player1RoundsWon ?? 0,
-        player2RoundsWon: this.serverState?.player2RoundsWon ?? 0,
-        txIds: [],
+      const player1RoundsWon =
+        payload.finalScore?.player1RoundsWon ??
+        payload.player1RoundsWon ??
+        this.serverState?.player1RoundsWon ??
+        0;
+      const player2RoundsWon =
+        payload.finalScore?.player2RoundsWon ??
+        payload.player2RoundsWon ??
+        this.serverState?.player2RoundsWon ??
+        0;
+
+      const normalizedReason =
+        payload.reason === "knockout" ||
+        payload.reason === "timeout" ||
+        payload.reason === "forfeit"
+          ? payload.reason
+          : "decision";
+
+      const isWinner = payload.winner === this.config.playerRole;
+
+      EventBus.emit("fight:matchResult", {
+        isWinner,
         ratingChanges: payload.ratingChanges,
-        isPrivateRoom: payload.isPrivateRoom,
-      };
+        onChainSessionId: payload.onChainSessionId,
+        onChainTxHash: payload.onChainTxHash,
+        contractId: payload.contractId,
+      });
 
-      // Emit for React components (optional)
-      EventBus.emit("match:ended", { result });
-
-      // Transition to ResultsScene
       this.scene.start("ResultsScene", {
-        result,
+        isWinner,
         playerRole: this.config.playerRole,
         matchId: this.config.matchId,
-        player1CharacterId: this.config.player1Character,
-        player2CharacterId: this.config.player2Character,
-        isPrivateRoom: payload.isPrivateRoom,
-        isSpectator: this.config.isSpectator,
+        player1RoundsWon,
+        player2RoundsWon,
+        reason: normalizedReason,
+        ratingChanges: payload.ratingChanges,
+        onChainSessionId: payload.onChainSessionId,
+        onChainTxHash: payload.onChainTxHash,
+        contractId: payload.contractId,
       });
     });
   }
@@ -5022,71 +4981,71 @@ export class FightScene extends Phaser.Scene {
         waitForOpponent: !PRIVATE_ROUNDS_ENABLED,
         onCardSelected: async (cardId: PowerSurgeCardId) => {
           await new Promise<void>((resolve, reject) => {
-              const timeout = this.time.delayedCall(30000, () => {
+            const timeout = this.time.delayedCall(30000, () => {
+              EventBus.off("game:powerSurgeSelected", onSelected);
+              EventBus.off("game:powerSurgeError", onError);
+              reject(new Error("Power Surge confirmation timed out"));
+            });
+
+            const onSelected = (data: unknown) => {
+              const payload = data as {
+                player?: "player1" | "player2";
+                cardId?: PowerSurgeCardId;
+                roundNumber?: number;
+              };
+
+              if (
+                payload.player === this.config.playerRole
+                && payload.cardId === cardId
+                && payload.roundNumber === roundNumber
+              ) {
+                timeout.remove(false);
                 EventBus.off("game:powerSurgeSelected", onSelected);
                 EventBus.off("game:powerSurgeError", onError);
-                reject(new Error("Power Surge confirmation timed out"));
-              });
+                resolve();
+              }
+            };
 
-              const onSelected = (data: unknown) => {
-                const payload = data as {
-                  player?: "player1" | "player2";
-                  cardId?: PowerSurgeCardId;
-                  roundNumber?: number;
-                };
-
-                if (
-                  payload.player === this.config.playerRole
-                  && payload.cardId === cardId
-                  && payload.roundNumber === roundNumber
-                ) {
-                  timeout.remove(false);
-                  EventBus.off("game:powerSurgeSelected", onSelected);
-                  EventBus.off("game:powerSurgeError", onError);
-                  resolve();
-                }
+            const onError = (data: unknown) => {
+              const payload = data as {
+                player?: "player1" | "player2";
+                cardId?: PowerSurgeCardId;
+                roundNumber?: number;
+                error?: string;
               };
 
-              const onError = (data: unknown) => {
-                const payload = data as {
-                  player?: "player1" | "player2";
-                  cardId?: PowerSurgeCardId;
-                  roundNumber?: number;
-                  error?: string;
-                };
+              if (
+                payload.player === this.config.playerRole
+                && payload.cardId === cardId
+                && payload.roundNumber === roundNumber
+              ) {
+                timeout.remove(false);
+                EventBus.off("game:powerSurgeSelected", onSelected);
+                EventBus.off("game:powerSurgeError", onError);
+                reject(new Error(payload.error || "Power Surge selection failed"));
+              }
+            };
 
-                if (
-                  payload.player === this.config.playerRole
-                  && payload.cardId === cardId
-                  && payload.roundNumber === roundNumber
-                ) {
-                  timeout.remove(false);
-                  EventBus.off("game:powerSurgeSelected", onSelected);
-                  EventBus.off("game:powerSurgeError", onError);
-                  reject(new Error(payload.error || "Power Surge selection failed"));
-                }
-              };
-
-              EventBus.on("game:powerSurgeSelected", onSelected);
-              EventBus.on("game:powerSurgeError", onError);
-              EventBus.emit("fight:selectPowerSurge", {
-                matchId: this.config.matchId,
-                roundNumber,
-                playerRole: this.config.playerRole,
-                playerAddress,
-                cardId,
-              });
-            });
-
-            // Store local active surge
-            this.activeSurges[this.config.playerRole as "player1" | "player2"] = cardId;
-
-            // Emit event for combat engine
-            EventBus.emit("surge:applied", {
-              player: this.config.playerRole,
-              cardId,
+            EventBus.on("game:powerSurgeSelected", onSelected);
+            EventBus.on("game:powerSurgeError", onError);
+            EventBus.emit("fight:selectPowerSurge", {
+              matchId: this.config.matchId,
               roundNumber,
+              playerRole: this.config.playerRole,
+              playerAddress,
+              cardId,
             });
+          });
+
+          // Store local active surge
+          this.activeSurges[this.config.playerRole as "player1" | "player2"] = cardId;
+
+          // Emit event for combat engine
+          EventBus.emit("surge:applied", {
+            player: this.config.playerRole,
+            cardId,
+            roundNumber,
+          });
         },
         onTimeout: () => {
           console.log("[FightScene] Power Surge selection timed out");
@@ -5215,7 +5174,7 @@ export class FightScene extends Phaser.Scene {
       const isOpponent = payload.player !== this.config.playerRole;
 
       // If opponent picked a stun card, I am stunned
-      const isStunCard = card?.effectType === "opponent_stun" || card?.id === "mempool-congest";
+      const isStunCard = card?.effectType === "opponent_stun";
       if (isOpponent && isStunCard) {
         console.log(`[FightScene] Late stun apply from handleOpponentSurgeSelected: ${card?.name ?? payload.cardId}`);
         this.turnIndicatorText.setText("YOU ARE STUNNED!");
@@ -5267,7 +5226,7 @@ export class FightScene extends Phaser.Scene {
       // NOTE: We do NOT apply immediate visual stun for Mempool Congest here.
       // The stun effect only applies on turn 1 of the round, not immediately on card selection.
       // The visual stun will be applied when the round actually starts and stun state is confirmed.
-      const isStunCard = card.effectType === "opponent_stun" || card.id === "mempool-congest";
+      const isStunCard = card.effectType === "opponent_stun";
       if (isStunCard) {
         console.log(`[FightScene] Mempool Congest selected - stun will apply on turn 1`);
         // Just show a brief text notification

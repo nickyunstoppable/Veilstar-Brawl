@@ -9,6 +9,8 @@ import { Scene } from "phaser";
 import { GAME_DIMENSIONS } from "../config";
 import { EventBus } from "../EventBus";
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+
 export interface ResultsSceneData {
     isWinner: boolean;
     playerRole: "player1" | "player2";
@@ -27,6 +29,11 @@ export interface ResultsSceneData {
 
 export class ResultsScene extends Scene {
     private resultsData!: ResultsSceneData;
+    private onChainStatusContainer?: Phaser.GameObjects.Container;
+    private onChainStatusBg?: Phaser.GameObjects.Rectangle;
+    private onChainStatusLabelText?: Phaser.GameObjects.Text;
+    private onChainStatusTxText?: Phaser.GameObjects.Text;
+    private onChainPollTimer?: Phaser.Time.TimerEvent;
 
     constructor() {
         super("ResultsScene");
@@ -35,6 +42,8 @@ export class ResultsScene extends Scene {
     create(data: ResultsSceneData) {
         this.resultsData = data;
         this.cameras.main.fadeIn(800, 0, 0, 0);
+        this.events.once("shutdown", () => this.stopOnChainPolling());
+        this.events.once("destroy", () => this.stopOnChainPolling());
 
         // Background
         this.add.rectangle(
@@ -123,6 +132,7 @@ export class ResultsScene extends Scene {
 
         // ── On-chain status ──
         this.createOnChainStatus();
+        this.startOnChainPolling();
 
         // ── Buttons ──
         this.createButtons();
@@ -282,16 +292,24 @@ export class ResultsScene extends Scene {
             .setStrokeStyle(1, hasHash ? 0x22c55e : 0xfbbf24);
         container.add(bg);
 
-        container.add(this.add.text(0, hasHash ? -14 : 0, statusLabel, {
+        const statusText = this.add.text(0, hasHash ? -14 : 0, statusLabel, {
             fontFamily: "Orbitron, monospace", fontSize: "13px", color: statusColor,
-        }).setOrigin(0.5));
+        }).setOrigin(0.5);
+        container.add(statusText);
 
+        let txText: Phaser.GameObjects.Text | undefined;
         if (this.resultsData.onChainTxHash) {
             const short = `TX: ${this.resultsData.onChainTxHash.slice(0, 10)}...${this.resultsData.onChainTxHash.slice(-10)}`;
-            container.add(this.add.text(0, 10, short, {
+            txText = this.add.text(0, 10, short, {
                 fontFamily: "monospace", fontSize: "11px", color: "#888888",
-            }).setOrigin(0.5));
+            }).setOrigin(0.5);
+            container.add(txText);
         }
+
+        this.onChainStatusContainer = container;
+        this.onChainStatusBg = bg;
+        this.onChainStatusLabelText = statusText;
+        this.onChainStatusTxText = txText;
 
         container.setAlpha(0);
         this.tweens.add({
@@ -299,6 +317,97 @@ export class ResultsScene extends Scene {
             alpha: 1,
             duration: 600,
             delay: 1200,
+        });
+    }
+
+    private startOnChainPolling() {
+        if (!this.resultsData.onChainSessionId) return;
+        if (this.resultsData.onChainTxHash) return;
+
+        this.onChainPollTimer = this.time.addEvent({
+            delay: 2500,
+            loop: true,
+            callback: () => {
+                void this.pollOnChainStatus();
+            },
+        });
+
+        void this.pollOnChainStatus();
+    }
+
+    private stopOnChainPolling() {
+        if (this.onChainPollTimer) {
+            this.onChainPollTimer.remove(false);
+            this.onChainPollTimer = undefined;
+        }
+    }
+
+    private async pollOnChainStatus() {
+        const matchId = this.resultsData.matchId;
+        if (!matchId) return;
+        if (this.resultsData.onChainTxHash) {
+            this.stopOnChainPolling();
+            return;
+        }
+
+        const url = `${API_BASE}/api/matches/${matchId}?lite=1`;
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return;
+
+            const json = await res.json() as {
+                match?: {
+                    onchain_result_tx_hash?: string | null;
+                    onChainTxHash?: string | null;
+                };
+            };
+
+            const txHash =
+                json?.match?.onchain_result_tx_hash
+                || json?.match?.onChainTxHash
+                || null;
+
+            if (!txHash) return;
+
+            this.resultsData.onChainTxHash = txHash;
+            this.updateOnChainStatusToVerified(txHash);
+            this.stopOnChainPolling();
+        } catch {
+            // Best-effort polling; keep trying silently.
+        }
+    }
+
+    private updateOnChainStatusToVerified(txHash: string) {
+        if (!this.onChainStatusContainer || !this.onChainStatusBg || !this.onChainStatusLabelText) return;
+        const sessionId = this.resultsData.onChainSessionId;
+        if (!sessionId) return;
+
+        this.onChainStatusBg.setSize(500, 70);
+        this.onChainStatusBg.setStrokeStyle(1, 0x22c55e);
+        this.onChainStatusLabelText.setText(`⛓ ON-CHAIN VERIFIED ✓  Session #${sessionId}`);
+        this.onChainStatusLabelText.setColor("#22c55e");
+        this.onChainStatusLabelText.setY(-14);
+
+        const short = `TX: ${txHash.slice(0, 10)}...${txHash.slice(-10)}`;
+        if (!this.onChainStatusTxText) {
+            this.onChainStatusTxText = this.add.text(0, 10, short, {
+                fontFamily: "monospace",
+                fontSize: "11px",
+                color: "#888888",
+            }).setOrigin(0.5);
+            this.onChainStatusContainer.add(this.onChainStatusTxText);
+        } else {
+            this.onChainStatusTxText.setText(short);
+            this.onChainStatusTxText.setY(10);
+        }
+
+        this.tweens.add({
+            targets: this.onChainStatusContainer,
+            scaleX: 1.03,
+            scaleY: 1.03,
+            duration: 140,
+            yoyo: true,
+            ease: "Sine.easeInOut",
         });
     }
 

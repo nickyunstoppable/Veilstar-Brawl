@@ -34,7 +34,7 @@ ensureEnvLoaded();
 const RPC_URL = process.env.VITE_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = process.env.VITE_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
 const CONTRACT_ID = process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "";
-const ADMIN_SECRET = process.env.VITE_DEV_PLAYER1_SECRET || ""; // Admin = Player 1 dev wallet
+const ADMIN_SECRET = process.env.VITE_DEV_ADMIN_SECRET || process.env.VITE_DEV_PLAYER1_SECRET || "";
 const PLAYER1_SECRET = process.env.VITE_DEV_PLAYER1_SECRET || "";
 const PLAYER2_SECRET = process.env.VITE_DEV_PLAYER2_SECRET || "";
 
@@ -189,6 +189,39 @@ function isTransientSubmissionError(err: any): boolean {
     );
 }
 
+function extractTxHashFromSentTx(sentTx: any): string | undefined {
+    if (!sentTx) return undefined;
+
+    const candidates: Array<unknown> = [
+        sentTx?.hash,
+        sentTx?.txHash,
+        sentTx?.sendTransactionResponse?.hash,
+        sentTx?.sendTransactionResponse?.transactionHash,
+        sentTx?.result?.hash,
+        sentTx?.result?.transactionHash,
+    ];
+
+    const getTransactionResponse = sentTx?.getTransactionResponse;
+    if (typeof getTransactionResponse === "function") {
+        try {
+            const resp = getTransactionResponse.call(sentTx);
+            candidates.push(resp?.hash, resp?.transactionHash);
+        } catch {
+            // ignore callable access errors
+        }
+    } else if (getTransactionResponse && typeof getTransactionResponse === "object") {
+        candidates.push((getTransactionResponse as any).hash, (getTransactionResponse as any).transactionHash);
+    }
+
+    for (const value of candidates) {
+        if (typeof value === "string" && value.length > 0) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
 /**
  * Sign + send an assembled transaction, handling the "NoSignatureNeeded" edge case.
  */
@@ -209,8 +242,11 @@ async function signAndSendTx(tx: any): Promise<{ sentTx: any; txHash?: string }>
                 }
             }
 
-            const txResponse = sentTx.getTransactionResponse;
-            const txHash = txResponse && "hash" in txResponse ? (txResponse as any).hash : undefined;
+            const txHash = extractTxHashFromSentTx(sentTx);
+            if (!txHash) {
+                const keys = Object.keys(sentTx || {}).slice(0, 20).join(", ");
+                console.warn(`[Stellar] Transaction submitted but tx hash unavailable (response keys: ${keys || "none"})`);
+            }
             return { sentTx, txHash };
         } catch (err: any) {
             lastErr = err;

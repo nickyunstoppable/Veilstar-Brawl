@@ -7,6 +7,7 @@ import { getSupabase } from "./supabase";
 interface ProveAndFinalizeParams {
     matchId: string;
     winnerAddress: string;
+    allowRemoteDelegation?: boolean;
 }
 
 interface ProveAndFinalizeResult {
@@ -15,19 +16,48 @@ interface ProveAndFinalizeResult {
     finalizeResponse?: unknown;
 }
 
-export function shouldAutoProveFinalize(): boolean {
+function getRemoteZkBaseUrl(): string {
+    return (
+        process.env.ZK_FINALIZE_API_BASE_URL?.trim()
+        || process.env.VITE_ZK_API_BASE_URL?.trim()
+        || ""
+    ).replace(/\/$/, "");
+}
+
+export interface AutoProveFinalizeStatus {
+    enabled: boolean;
+    reason: string;
+}
+
+export function getAutoProveFinalizeStatus(): AutoProveFinalizeStatus {
     const autoEnabled = (process.env.ZK_AUTO_PROVE_FINALIZE ?? "true") !== "false";
     if (!autoEnabled) {
-        return false;
+        return { enabled: false, reason: "ZK_AUTO_PROVE_FINALIZE=false" };
     }
 
     const proveEnabled = (process.env.ZK_PROVE_ENABLED ?? "true") !== "false";
     if (!proveEnabled) {
-        return false;
+        return { enabled: false, reason: "ZK_PROVE_ENABLED=false" };
+    }
+
+    const remoteBaseUrl = getRemoteZkBaseUrl();
+    if (remoteBaseUrl) {
+        return { enabled: true, reason: `remote zk finalize via ${remoteBaseUrl}` };
     }
 
     const proveCommand = process.env.ZK_PROVE_CMD?.trim();
-    return Boolean(proveCommand);
+    if (!proveCommand) {
+        return {
+            enabled: false,
+            reason: "ZK_PROVE_CMD is not configured (and no ZK_FINALIZE_API_BASE_URL/VITE_ZK_API_BASE_URL)",
+        };
+    }
+
+    return { enabled: true, reason: "configured" };
+}
+
+export function shouldAutoProveFinalize(): boolean {
+    return getAutoProveFinalizeStatus().enabled;
 }
 
 export function triggerAutoProveFinalize(matchId: string, winnerAddress: string, context: string): void {
@@ -101,7 +131,27 @@ function replaceTemplateArgs(args: string[], replacements: Record<string, string
 
 function getServerBaseUrl(): string {
     return process.env.SERVER_INTERNAL_BASE_URL
-        || `http://127.0.0.1:${process.env.SERVER_PORT || "3001"}`;
+        || `http://127.0.0.1:${process.env.ZK_SERVER_PORT || process.env.PORT || process.env.SERVER_PORT || "3001"}`;
+}
+
+function isSelfDelegationUrl(remoteBaseUrl: string): boolean {
+    try {
+        const remote = new URL(remoteBaseUrl);
+        const currentPort = process.env.ZK_SERVER_PORT || process.env.PORT || process.env.SERVER_PORT || "3001";
+        const selfHosts = new Set<string>([
+            `localhost:${currentPort}`,
+            `127.0.0.1:${currentPort}`,
+        ]);
+
+        const flyAppName = process.env.FLY_APP_NAME?.trim();
+        if (flyAppName) {
+            selfHosts.add(`${flyAppName}.fly.dev`);
+        }
+
+        return selfHosts.has(remote.host);
+    } catch {
+        return false;
+    }
 }
 
 async function loadMatchTranscript(matchId: string): Promise<unknown> {
@@ -151,6 +201,34 @@ export async function proveAndFinalizeMatch(
         throw new Error("ZK proving is disabled (ZK_PROVE_ENABLED=false)");
     }
 
+    const allowRemoteDelegation = params.allowRemoteDelegation !== false;
+    const remoteZkBaseUrl = getRemoteZkBaseUrl();
+    if (allowRemoteDelegation && remoteZkBaseUrl && !isSelfDelegationUrl(remoteZkBaseUrl)) {
+        const remoteUrl = `${remoteZkBaseUrl}/api/matches/${params.matchId}/zk/prove-finalize`;
+        const finalizeRes = await fetch(remoteUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ winnerAddress: params.winnerAddress }),
+        });
+
+        const finalizeJson = await finalizeRes.json().catch(() => null);
+        if (!finalizeRes.ok) {
+            throw new Error(
+                `Remote ZK prove+finalize failed (${finalizeRes.status}): ${JSON.stringify(finalizeJson)}`,
+            );
+        }
+
+        return {
+            success: true,
+            proofCommand: `remote:${remoteUrl}`,
+            finalizeResponse: finalizeJson,
+        };
+    }
+
+    if (allowRemoteDelegation && remoteZkBaseUrl && isSelfDelegationUrl(remoteZkBaseUrl)) {
+        console.warn(`[ZK Finalizer] Remote delegation target resolves to self (${remoteZkBaseUrl}); using local prove/finalize path.`);
+    }
+
     const proveCommandTemplate = process.env.ZK_PROVE_CMD;
     if (!proveCommandTemplate) {
         throw new Error("ZK_PROVE_CMD is not configured");
@@ -198,10 +276,13 @@ export async function proveAndFinalizeMatch(
             );
         }
 
-        const [proof, publicInputs] = await Promise.all([
-            readFile(proofPath, "utf8"),
-            readFile(publicInputsPath, "utf8").catch(() => "[]"),
+        const [proofBytes, publicInputsBytes] = await Promise.all([
+            readFile(proofPath),
+            readFile(publicInputsPath).catch(() => Buffer.from("[]", "utf8")),
         ]);
+
+        const proof = `base64:${proofBytes.toString("base64")}`;
+        const publicInputs = `base64:${publicInputsBytes.toString("base64")}`;
 
         const finalizeRes = await fetch(`${getServerBaseUrl()}/api/matches/${params.matchId}/zk/finalize`, {
             method: "POST",

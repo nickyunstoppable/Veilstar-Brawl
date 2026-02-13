@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export interface ZkProofPayload {
     proof: string;
@@ -17,6 +17,10 @@ export interface ZkVerificationResult {
     command: string;
     output?: string;
 }
+
+const verificationResultCache = new Map<string, ZkVerificationResult>();
+const verificationInFlight = new Map<string, Promise<ZkVerificationResult>>();
+const MAX_VERIFICATION_CACHE_ENTRIES = 256;
 
 function parseCommandLine(input: string): string[] {
     const args: string[] = [];
@@ -86,6 +90,26 @@ function decodeMaybeBase64(value: unknown): Buffer | null {
     return Buffer.from(raw, "base64");
 }
 
+function makeVerificationCacheKey(payload: ZkProofPayload): string {
+    const hash = createHash("sha256");
+    hash.update(String(payload.proof ?? ""));
+    hash.update("|");
+    hash.update(stringifyPublicInputs(payload.publicInputs));
+    hash.update("|");
+    hash.update(String(payload.transcriptHash ?? ""));
+    hash.update("|");
+    hash.update(String(payload.matchId ?? ""));
+    hash.update("|");
+    hash.update(String(payload.winnerAddress ?? ""));
+    return hash.digest("hex");
+}
+
+function pruneVerificationCacheIfNeeded(): void {
+    if (verificationResultCache.size <= MAX_VERIFICATION_CACHE_ENTRIES) return;
+    const oldestKey = verificationResultCache.keys().next().value;
+    if (oldestKey) verificationResultCache.delete(oldestKey);
+}
+
 export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerificationResult> {
     const verifyEnabled = (process.env.ZK_VERIFY_ENABLED ?? "true") !== "false";
     if (!verifyEnabled) {
@@ -102,70 +126,95 @@ export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerifi
         throw new Error("ZK verification is enabled but ZK_VK_PATH is not configured");
     }
 
-    const commandTemplate = process.env.ZK_VERIFY_CMD
-        || "bb verify -k {VK_PATH} -p {PROOF_PATH} -i {PUBLIC_INPUTS_PATH}";
+    const cacheKey = makeVerificationCacheKey(payload);
+    const cached = verificationResultCache.get(cacheKey);
+    if (cached) {
+        return cached;
+    }
 
-    const workingDir = join(tmpdir(), `vbb-zk-${randomUUID()}`);
-    await mkdir(workingDir, { recursive: true });
+    const pending = verificationInFlight.get(cacheKey);
+    if (pending) {
+        return pending;
+    }
 
-    const proofPath = join(workingDir, "proof.bin");
-    const publicInputsPath = join(workingDir, "public_inputs.json");
+    const verifyPromise = (async (): Promise<ZkVerificationResult> => {
+        const commandTemplate = process.env.ZK_VERIFY_CMD
+            || "bb verify -k {VK_PATH} -p {PROOF_PATH} -i {PUBLIC_INPUTS_PATH}";
 
+        const workingDir = join(tmpdir(), `vbb-zk-${randomUUID()}`);
+        await mkdir(workingDir, { recursive: true });
+
+        const proofPath = join(workingDir, "proof.bin");
+        const publicInputsPath = join(workingDir, "public_inputs.json");
+
+        try {
+            const proofBytes = decodeMaybeBase64(payload.proof);
+            if (proofBytes) {
+                await writeFile(proofPath, proofBytes);
+            } else {
+                await writeFile(proofPath, payload.proof, "utf8");
+            }
+
+            const publicInputBytes = decodeMaybeBase64(payload.publicInputs);
+            if (publicInputBytes) {
+                await writeFile(publicInputsPath, publicInputBytes);
+            } else {
+                await writeFile(publicInputsPath, stringifyPublicInputs(payload.publicInputs), "utf8");
+            }
+
+            const parsed = parseCommandLine(commandTemplate);
+            if (parsed.length === 0) {
+                throw new Error("ZK_VERIFY_CMD is empty");
+            }
+
+            const [command, ...argTemplate] = parsed;
+            const args = replaceTemplateArgs(argTemplate, {
+                "{VK_PATH}": verificationKeyPath,
+                "{PROOF_PATH}": proofPath,
+                "{PUBLIC_INPUTS_PATH}": publicInputsPath,
+                "{MATCH_ID}": payload.matchId,
+                "{WINNER_ADDRESS}": payload.winnerAddress,
+                "{TRANSCRIPT_HASH}": payload.transcriptHash ?? "",
+            });
+
+            const proc = Bun.spawn({
+                cmd: [command, ...args],
+                stdout: "pipe",
+                stderr: "pipe",
+            });
+
+            const [stdout, stderr] = await Promise.all([
+                new Response(proc.stdout).text(),
+                new Response(proc.stderr).text(),
+            ]);
+            const exitCode = await proc.exited;
+
+            if (exitCode !== 0) {
+                throw new Error(
+                    `Noir verification failed (exit=${exitCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                );
+            }
+
+            const result: ZkVerificationResult = {
+                ok: true,
+                backend: "external",
+                command: [command, ...args].join(" "),
+                output: `${stdout}\n${stderr}`.trim(),
+            };
+
+            verificationResultCache.set(cacheKey, result);
+            pruneVerificationCacheIfNeeded();
+
+            return result;
+        } finally {
+            await rm(workingDir, { recursive: true, force: true });
+        }
+    })();
+
+    verificationInFlight.set(cacheKey, verifyPromise);
     try {
-        const proofBytes = decodeMaybeBase64(payload.proof);
-        if (proofBytes) {
-            await writeFile(proofPath, proofBytes);
-        } else {
-            await writeFile(proofPath, payload.proof, "utf8");
-        }
-
-        const publicInputBytes = decodeMaybeBase64(payload.publicInputs);
-        if (publicInputBytes) {
-            await writeFile(publicInputsPath, publicInputBytes);
-        } else {
-            await writeFile(publicInputsPath, stringifyPublicInputs(payload.publicInputs), "utf8");
-        }
-
-        const parsed = parseCommandLine(commandTemplate);
-        if (parsed.length === 0) {
-            throw new Error("ZK_VERIFY_CMD is empty");
-        }
-
-        const [command, ...argTemplate] = parsed;
-        const args = replaceTemplateArgs(argTemplate, {
-            "{VK_PATH}": verificationKeyPath,
-            "{PROOF_PATH}": proofPath,
-            "{PUBLIC_INPUTS_PATH}": publicInputsPath,
-            "{MATCH_ID}": payload.matchId,
-            "{WINNER_ADDRESS}": payload.winnerAddress,
-            "{TRANSCRIPT_HASH}": payload.transcriptHash ?? "",
-        });
-
-        const proc = Bun.spawn({
-            cmd: [command, ...args],
-            stdout: "pipe",
-            stderr: "pipe",
-        });
-
-        const [stdout, stderr] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-        ]);
-        const exitCode = await proc.exited;
-
-        if (exitCode !== 0) {
-            throw new Error(
-                `Noir verification failed (exit=${exitCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-            );
-        }
-
-        return {
-            ok: true,
-            backend: "external",
-            command: [command, ...args].join(" "),
-            output: `${stdout}\n${stderr}`.trim(),
-        };
+        return await verifyPromise;
     } finally {
-        await rm(workingDir, { recursive: true, force: true });
+        verificationInFlight.delete(cacheKey);
     }
 }

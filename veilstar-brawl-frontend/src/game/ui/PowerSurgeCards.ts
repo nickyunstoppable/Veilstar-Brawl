@@ -479,7 +479,7 @@ export class PowerSurgeCards {
       "dag-overclock": "⚡",
       "block-fortress": "🏰",
       "tx-storm": "🌀",
-      "mempool-congest": "🔥",
+      "mempool-congest": "🪫",
       "blue-set-heal": "💙",
       "orphan-smasher": "💥",
       "10bps-barrage": "🎯",

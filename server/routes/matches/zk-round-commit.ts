@@ -7,6 +7,7 @@ import { isPowerSurgeCardId, type PowerSurgeCardId } from "../../lib/power-surge
 import { resolveTurn } from "../../lib/combat-resolver";
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const privateRoundResolveLocks = new Set<string>();
 
 interface CommitPrivateRoundBody {
     address?: string;
@@ -52,7 +53,29 @@ async function getOrCreateRound(matchId: string, roundNumber: number) {
         .maybeSingle();
 
     if (existing) {
-        return existing;
+        const alreadyFilled = !!existing.player1_move && !!existing.player2_move;
+        if (!alreadyFilled) {
+            return existing;
+        }
+
+        const moveDeadlineAt = new Date(Date.now() + 20_000).toISOString();
+        const { data: nextTurn, error: nextTurnError } = await supabase
+            .from("rounds")
+            .insert({
+                match_id: matchId,
+                round_number: roundNumber,
+                turn_number: (existing.turn_number || 1) + 1,
+                move_deadline_at: moveDeadlineAt,
+                countdown_seconds: 0,
+            })
+            .select("*")
+            .single();
+
+        if (nextTurnError || !nextTurn) {
+            throw new Error("Failed to create next private round turn");
+        }
+
+        return nextTurn;
     }
 
     const moveDeadlineAt = new Date(Date.now() + 20_000).toISOString();
@@ -109,6 +132,19 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             return Response.json({ error: "Not a participant in this match" }, { status: 403 });
         }
 
+        const isPlayer1 = address === match.player1_address;
+        const opponentAddress = isPlayer1 ? match.player2_address : match.player1_address;
+
+        const { data: stunSnapshot } = await supabase
+            .from("fight_state_snapshots")
+            .select("player1_is_stunned, player2_is_stunned")
+            .eq("match_id", matchId)
+            .maybeSingle();
+
+        const opponentIsStunned = isPlayer1
+            ? Boolean(stunSnapshot?.player2_is_stunned)
+            : Boolean(stunSnapshot?.player1_is_stunned);
+
         if (match.status !== "in_progress") {
             return Response.json(
                 { error: `Match is not in progress (status: ${match.status})` },
@@ -141,6 +177,8 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                     transcript_hash: body.transcriptHash ?? null,
                     onchain_commit_tx_hash: body.onChainCommitTxHash ?? null,
                     verified_at: new Date().toISOString(),
+                    resolved_at: null,
+                    resolved_round_id: null,
                     updated_at: new Date().toISOString(),
                 },
                 { onConflict: "match_id,round_number,player_address" },
@@ -155,11 +193,42 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
 
         const { data: commits } = await supabase
             .from("round_private_commits")
-            .select("player_address")
+            .select("player_address, encrypted_plan")
             .eq("match_id", matchId)
-            .eq("round_number", roundNumber);
+            .eq("round_number", roundNumber)
+            .is("resolved_round_id", null);
 
-        const committedPlayers = new Set((commits || []).map((row: any) => row.player_address));
+        const alreadyCommitted = new Set((commits || []).map((row: any) => row.player_address));
+        if (opponentIsStunned && !alreadyCommitted.has(opponentAddress)) {
+            await supabase
+                .from("round_private_commits")
+                .upsert(
+                    {
+                        match_id: matchId,
+                        round_number: roundNumber,
+                        player_address: opponentAddress,
+                        commitment: `auto-stunned:${matchId}:${roundNumber}:${opponentAddress}`,
+                        encrypted_plan: JSON.stringify({ move: "stunned", surgeCardId: null }),
+                        proof_public_inputs: null,
+                        transcript_hash: null,
+                        onchain_commit_tx_hash: null,
+                        verified_at: new Date().toISOString(),
+                        resolved_at: null,
+                        resolved_round_id: null,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "match_id,round_number,player_address" },
+                );
+        }
+
+        const { data: commitsAfterAuto } = await supabase
+            .from("round_private_commits")
+            .select("player_address, encrypted_plan")
+            .eq("match_id", matchId)
+            .eq("round_number", roundNumber)
+            .is("resolved_round_id", null);
+
+        const committedPlayers = new Set((commitsAfterAuto || []).map((row: any) => row.player_address));
         const player1Committed = committedPlayers.has(match.player1_address);
         const player2Committed = committedPlayers.has(match.player2_address);
         const bothCommitted = player1Committed && player2Committed;
@@ -252,13 +321,67 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             return Response.json({ error: "Not a participant in this match" }, { status: 403 });
         }
 
+        const opponentAddress = isPlayer1 ? match.player2_address : match.player1_address;
+
+        const { data: preCommitStunSnapshot } = await supabase
+            .from("fight_state_snapshots")
+            .select("player1_is_stunned, player2_is_stunned")
+            .eq("match_id", matchId)
+            .maybeSingle();
+
+        const opponentIsStunnedPreCommit = isPlayer1
+            ? Boolean(preCommitStunSnapshot?.player2_is_stunned)
+            : Boolean(preCommitStunSnapshot?.player1_is_stunned);
+
+        const { data: stunSnapshot } = await supabase
+            .from("fight_state_snapshots")
+            .select("player1_is_stunned, player2_is_stunned")
+            .eq("match_id", matchId)
+            .maybeSingle();
+
+        const submitterIsStunned = isPlayer1
+            ? Boolean(stunSnapshot?.player1_is_stunned)
+            : Boolean(stunSnapshot?.player2_is_stunned);
+        const resolvedMove = submitterIsStunned ? "stunned" : body.move;
+
         const { data: commits } = await supabase
             .from("round_private_commits")
-            .select("player_address")
+            .select("player_address, encrypted_plan")
             .eq("match_id", matchId)
-            .eq("round_number", roundNumber);
+            .eq("round_number", roundNumber)
+            .is("resolved_round_id", null);
 
-        const committedPlayers = new Set((commits || []).map((row: any) => row.player_address));
+        const existingCommitters = new Set((commits || []).map((row: any) => row.player_address));
+        if (opponentIsStunnedPreCommit && !existingCommitters.has(opponentAddress)) {
+            await supabase
+                .from("round_private_commits")
+                .upsert(
+                    {
+                        match_id: matchId,
+                        round_number: roundNumber,
+                        player_address: opponentAddress,
+                        commitment: `auto-stunned:${matchId}:${roundNumber}:${opponentAddress}`,
+                        encrypted_plan: JSON.stringify({ move: "stunned", surgeCardId: null }),
+                        proof_public_inputs: null,
+                        transcript_hash: null,
+                        onchain_commit_tx_hash: null,
+                        verified_at: new Date().toISOString(),
+                        resolved_at: null,
+                        resolved_round_id: null,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "match_id,round_number,player_address" },
+                );
+        }
+
+        const { data: commitsAfterAuto } = await supabase
+            .from("round_private_commits")
+            .select("player_address, encrypted_plan")
+            .eq("match_id", matchId)
+            .eq("round_number", roundNumber)
+            .is("resolved_round_id", null);
+
+        const committedPlayers = new Set((commitsAfterAuto || []).map((row: any) => row.player_address));
         if (!committedPlayers.has(match.player1_address) || !committedPlayers.has(match.player2_address)) {
             return Response.json(
                 { error: "Cannot resolve: both players have not committed yet" },
@@ -278,44 +401,81 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             return Response.json({ error: "Round resolution proof verification failed" }, { status: 400 });
         }
 
+        const parseStoredPlan = (raw: unknown): { move?: MoveType; surgeCardId?: PowerSurgeCardId | null } => {
+            if (!raw || typeof raw !== "string") return {};
+
+            const parseJsonPlan = (jsonText: string) => {
+                const parsed = JSON.parse(jsonText) as { move?: MoveType; surgeCardId?: PowerSurgeCardId | null };
+                return {
+                    move: parsed.move,
+                    surgeCardId: parsed.surgeCardId,
+                };
+            };
+
+            try {
+                return parseJsonPlan(raw);
+            } catch {
+                try {
+                    const decoded = Buffer.from(raw, "base64").toString("utf8");
+                    return parseJsonPlan(decoded);
+                } catch {
+                    return {};
+                }
+            }
+        };
+
         await supabase
             .from("round_private_commits")
             .update({
-                encrypted_plan: JSON.stringify({ move: body.move, surgeCardId: body.surgeCardId || null }),
+                encrypted_plan: JSON.stringify({
+                    move: resolvedMove,
+                    surgeCardId: body.surgeCardId || null,
+                }),
                 proof_public_inputs: body.publicInputs ?? null,
                 transcript_hash: body.transcriptHash ?? null,
                 updated_at: new Date().toISOString(),
             })
             .eq("match_id", matchId)
             .eq("round_number", roundNumber)
-            .eq("player_address", address);
+            .eq("player_address", address)
+            .is("resolved_round_id", null);
 
         const { data: revealRows } = await supabase
             .from("round_private_commits")
             .select("player_address, encrypted_plan, resolved_at")
             .eq("match_id", matchId)
-            .eq("round_number", roundNumber);
+            .eq("round_number", roundNumber)
+            .is("resolved_round_id", null);
 
-        const parsePlan = (raw: unknown): { move?: MoveType; surgeCardId?: PowerSurgeCardId | null } => {
-            if (!raw || typeof raw !== "string") return {};
-            try {
-                return JSON.parse(raw) as { move?: MoveType; surgeCardId?: PowerSurgeCardId | null };
-            } catch {
-                return {};
-            }
-        };
+        const parsePlan = (raw: unknown): { move?: MoveType; surgeCardId?: PowerSurgeCardId | null } => parseStoredPlan(raw);
 
         const byAddress = new Map<string, { move?: MoveType; surgeCardId?: PowerSurgeCardId | null }>();
         for (const row of revealRows || []) {
             byAddress.set(row.player_address, parsePlan((row as any).encrypted_plan));
         }
 
-        const p1Plan = byAddress.get(match.player1_address) || {};
-        const p2Plan = byAddress.get(match.player2_address) || {};
+        const p1RawPlan = byAddress.get(match.player1_address) || {};
+        const p2RawPlan = byAddress.get(match.player2_address) || {};
+
+        const p1Move = (p1RawPlan.move && isValidMove(p1RawPlan.move))
+            ? p1RawPlan.move
+            : (stunSnapshot?.player1_is_stunned ? "stunned" : undefined);
+        const p2Move = (p2RawPlan.move && isValidMove(p2RawPlan.move))
+            ? p2RawPlan.move
+            : (stunSnapshot?.player2_is_stunned ? "stunned" : undefined);
+
+        const p1Plan = {
+            ...p1RawPlan,
+            move: p1Move,
+        };
+        const p2Plan = {
+            ...p2RawPlan,
+            move: p2Move,
+        };
+
         const p1Revealed = !!(p1Plan.move && isValidMove(p1Plan.move));
         const p2Revealed = !!(p2Plan.move && isValidMove(p2Plan.move));
         const bothRevealed = p1Revealed && p2Revealed;
-        const alreadyResolved = (revealRows || []).some((row: any) => !!row.resolved_at);
 
         await broadcastGameEvent(matchId, "round_plan_revealed", {
             matchId,
@@ -340,11 +500,13 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             });
         }
 
-        if (alreadyResolved) {
+        const resolveLockKey = `${matchId}:${roundNumber}`;
+        if (privateRoundResolveLocks.has(resolveLockKey)) {
             return Response.json({
                 success: true,
                 roundNumber,
-                alreadyResolved: true,
+                awaitingResolver: true,
+                resolver: "in_progress",
                 zkVerification: {
                     backend: verification.backend,
                     command: verification.command,
@@ -352,59 +514,70 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             });
         }
 
-        await supabase
-            .from("power_surges")
-            .upsert(
-                {
-                    match_id: matchId,
-                    round_number: roundNumber,
-                    player1_card_id: p1Plan.surgeCardId || null,
-                    player2_card_id: p2Plan.surgeCardId || null,
+        privateRoundResolveLocks.add(resolveLockKey);
+
+        try {
+
+            await supabase
+                .from("power_surges")
+                .upsert(
+                    {
+                        match_id: matchId,
+                        round_number: roundNumber,
+                        player1_card_id: p1Plan.surgeCardId || null,
+                        player2_card_id: p2Plan.surgeCardId || null,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "match_id,round_number" },
+                );
+
+            const round = await getOrCreateRound(matchId, roundNumber);
+
+            const p1FirstMove = p1Plan.move;
+            const p2FirstMove = p2Plan.move;
+
+            await supabase
+                .from("rounds")
+                .update({
+                    player1_move: p1FirstMove,
+                    player2_move: p2FirstMove,
+                })
+                .eq("id", round.id);
+
+            await supabase
+                .from("fight_state_snapshots")
+                .update({
+                    player1_has_submitted_move: true,
+                    player2_has_submitted_move: true,
                     updated_at: new Date().toISOString(),
+                })
+                .eq("match_id", matchId);
+
+            const resolution = await resolveTurn(matchId, round.id);
+
+            await supabase
+                .from("round_private_commits")
+                .update({
+                    resolved_at: new Date().toISOString(),
+                    resolved_round_id: round.id,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("match_id", matchId)
+                .eq("round_number", roundNumber)
+                .is("resolved_round_id", null);
+
+            return Response.json({
+                success: true,
+                roundNumber,
+                resolution,
+                zkVerification: {
+                    backend: verification.backend,
+                    command: verification.command,
                 },
-                { onConflict: "match_id,round_number" },
-            );
-
-        const round = await getOrCreateRound(matchId, roundNumber);
-
-        await supabase
-            .from("rounds")
-            .update({
-                player1_move: p1Plan.move,
-                player2_move: p2Plan.move,
-            })
-            .eq("id", round.id);
-
-        await supabase
-            .from("fight_state_snapshots")
-            .update({
-                player1_has_submitted_move: true,
-                player2_has_submitted_move: true,
-                updated_at: new Date().toISOString(),
-            })
-            .eq("match_id", matchId);
-
-        const resolution = await resolveTurn(matchId, round.id);
-
-        await supabase
-            .from("round_private_commits")
-            .update({
-                resolved_at: new Date().toISOString(),
-                resolved_round_id: round.id,
-                updated_at: new Date().toISOString(),
-            })
-            .eq("match_id", matchId)
-            .eq("round_number", roundNumber);
-
-        return Response.json({
-            success: true,
-            roundNumber,
-            resolution,
-            zkVerification: {
-                backend: verification.backend,
-                command: verification.command,
-            },
-        });
+            });
+        } finally {
+            privateRoundResolveLocks.delete(resolveLockKey);
+        }
     } catch (err) {
         console.error("[ZK Round Resolve] Error:", err);
         return Response.json(

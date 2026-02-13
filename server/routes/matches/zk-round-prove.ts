@@ -7,9 +7,9 @@ const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "t
 interface ProveRoundBody {
     address?: string;
     roundNumber?: number;
+    turnNumber?: number;
     move?: MoveType;
     surgeCardId?: string;
-    plannedMoves?: MoveType[];
     nonce?: string;
 }
 
@@ -29,9 +29,10 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
         const body = await req.json() as ProveRoundBody;
         const address = body.address?.trim();
         const roundNumber = Number(body.roundNumber ?? 1);
+        const turnNumber = Number(body.turnNumber ?? 1);
 
-        if (!address || !Number.isInteger(roundNumber) || roundNumber < 1) {
-            return Response.json({ error: "Missing/invalid address or roundNumber" }, { status: 400 });
+        if (!address || !Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+            return Response.json({ error: "Missing/invalid address, roundNumber, or turnNumber" }, { status: 400 });
         }
 
         if (!isMoveType(body.move)) {
@@ -42,17 +43,13 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             return Response.json({ error: "Missing/invalid surgeCardId" }, { status: 400 });
         }
 
-        const plannedMoves = Array.isArray(body.plannedMoves)
-            ? body.plannedMoves.filter(isMoveType).slice(0, 10)
-            : undefined;
-
         const proof = await provePrivateRoundPlan({
             matchId,
             playerAddress: address,
             roundNumber,
+            turnNumber,
             move: body.move,
             surgeCardId: body.surgeCardId,
-            plannedMoves,
             nonce: body.nonce,
         });
 

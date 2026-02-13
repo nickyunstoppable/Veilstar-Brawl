@@ -16,6 +16,9 @@ const MOVE_TO_CODE: Record<MoveType, number> = {
     special: 4,
 };
 
+const compiledCircuitKeys = new Set<string>();
+const compilingCircuitPromises = new Map<string, Promise<void>>();
+
 function parseCommandLine(input: string): string[] {
     const args: string[] = [];
     let current = "";
@@ -76,6 +79,29 @@ async function runCommand(cmd: string[], cwd: string): Promise<{ stdout: string;
     return { stdout, stderr };
 }
 
+async function ensureCircuitCompiled(circuitDir: string, circuitName: string): Promise<void> {
+    const cacheKey = `${circuitDir}::${circuitName}`;
+    if (compiledCircuitKeys.has(cacheKey)) return;
+
+    const existing = compilingCircuitPromises.get(cacheKey);
+    if (existing) {
+        await existing;
+        return;
+    }
+
+    const compilePromise = (async () => {
+        await runCommand(["nargo", "compile"], circuitDir);
+        compiledCircuitKeys.add(cacheKey);
+    })();
+
+    compilingCircuitPromises.set(cacheKey, compilePromise);
+    try {
+        await compilePromise;
+    } finally {
+        compilingCircuitPromises.delete(cacheKey);
+    }
+}
+
 function toFieldDecimal(input: string): string {
     const digestHex = createHash("sha256").update(input).digest("hex");
     const value = BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
@@ -111,32 +137,13 @@ function toSurgeCode(cardId: PowerSurgeCardId): number {
     return idx + 1;
 }
 
-function normalizePlannedMoves(primaryMove: MoveType, plannedMoves?: MoveType[]): MoveType[] {
-    const source = (plannedMoves || []).filter((move): move is MoveType => move in MOVE_TO_CODE);
-    const normalized: MoveType[] = [];
-
-    if (source.length > 0) {
-        normalized.push(...source.slice(0, 10));
-    }
-
-    if (normalized.length === 0) {
-        normalized.push(primaryMove);
-    }
-
-    while (normalized.length < 10) {
-        normalized.push(normalized[0] || primaryMove || "block");
-    }
-
-    return normalized.slice(0, 10);
-}
-
 export interface ProvePrivateRoundPlanParams {
     matchId: string;
     playerAddress: string;
     roundNumber: number;
+    turnNumber: number;
     move: MoveType;
     surgeCardId: PowerSurgeCardId;
-    plannedMoves?: MoveType[];
     nonce?: string;
 }
 
@@ -171,28 +178,19 @@ export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams)
     const proofPath = join(outputDir, "proof");
     const publicInputsPath = join(outputDir, "public_inputs");
 
-    const plannedMoves = normalizePlannedMoves(params.move, params.plannedMoves);
-    const moveCodes = plannedMoves.map((move) => MOVE_TO_CODE[move]);
+    const moveCode = MOVE_TO_CODE[params.move] ?? MOVE_TO_CODE.block;
 
     const nonce = (params.nonce && params.nonce.trim().length > 0)
         ? params.nonce.trim()
-        : toFieldDecimal(`${params.matchId}|${params.playerAddress}|${params.roundNumber}|${Date.now()}|${requestId}`);
+        : toFieldDecimal(`${params.matchId}|${params.playerAddress}|${params.roundNumber}|${params.turnNumber}|${Date.now()}|${requestId}`);
 
     const tomlLines = [
         `match_id = ${toTomlString(toFieldDecimal(params.matchId))}`,
         `round_number = ${toTomlString(String(params.roundNumber))}`,
+        `turn_number = ${toTomlString(String(params.turnNumber))}`,
         `player_address = ${toTomlString(toFieldDecimal(params.playerAddress))}`,
         `surge_card = ${toTomlString(String(toSurgeCode(params.surgeCardId)))}`,
-        `move_0 = ${toTomlString(String(moveCodes[0]))}`,
-        `move_1 = ${toTomlString(String(moveCodes[1]))}`,
-        `move_2 = ${toTomlString(String(moveCodes[2]))}`,
-        `move_3 = ${toTomlString(String(moveCodes[3]))}`,
-        `move_4 = ${toTomlString(String(moveCodes[4]))}`,
-        `move_5 = ${toTomlString(String(moveCodes[5]))}`,
-        `move_6 = ${toTomlString(String(moveCodes[6]))}`,
-        `move_7 = ${toTomlString(String(moveCodes[7]))}`,
-        `move_8 = ${toTomlString(String(moveCodes[8]))}`,
-        `move_9 = ${toTomlString(String(moveCodes[9]))}`,
+        `selected_move = ${toTomlString(String(moveCode))}`,
         `nonce = ${toTomlString(nonce)}`,
     ];
 
@@ -217,7 +215,7 @@ export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams)
     try {
         await writeFile(proverTomlPath, `${tomlLines.join("\n")}\n`, "utf8");
 
-        await runCommand(["nargo", "compile"], circuitDir);
+        await ensureCircuitCompiled(circuitDir, circuitName);
         const nargoRun = await runCommand(nargoCommand, circuitDir);
 
         const commitment = parseCommitmentFromNargoOutput(`${nargoRun.stdout}\n${nargoRun.stderr}`);

@@ -266,8 +266,8 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
       onChainSkippedReason: null,
     });
 
-    // Compute stun flags and sync fight_state_snapshot immediately.
-    // This makes mempool-congest authoritative even if only one player has selected so far.
+    // Compute legacy stun flags and sync fight_state_snapshot immediately.
+    // Current surge deck has no stun card, so these remain false.
     const { player1Stunned, player2Stunned } = computeStunFlags(round.player1Selection, round.player2Selection);
 
     await supabase

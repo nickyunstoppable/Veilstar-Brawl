@@ -78,8 +78,8 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "mempool-congest": {
     id: "mempool-congest",
-    effectType: "opponent_stun",
-    effectParams: { hpCost: 6 },
+    effectType: "energy_drain",
+    effectParams: { energyDrain: 35 },
   },
   "blue-set-heal": {
     id: "blue-set-heal",
@@ -113,8 +113,8 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "ghost-dag": {
     id: "ghost-dag",
-    effectType: "energy_drain",
-    effectParams: { energyDrain: 30 },
+    effectType: "invisible_move",
+    effectParams: {},
   },
   "finality-fist": {
     id: "finality-fist",

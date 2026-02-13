@@ -33,7 +33,6 @@ const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "false
 interface PrivateRoundPlanState {
     moveType?: string;
     surgeCardId?: string;
-    plannedMoves?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
     sharedRoundProof?: string;
     commitment?: string;
     proofPublicInputs?: string;
@@ -42,6 +41,10 @@ interface PrivateRoundPlanState {
     commitSubmitted?: boolean;
     revealSubmitted?: boolean;
     inFlight?: boolean;
+    walletSignedMessage?: string;
+    walletSignature?: string;
+    moveSigned?: boolean;
+    surgeSigned?: boolean;
 }
 
 async function waitForSubscribed(channel: RealtimeChannel, timeoutMs: number = 2500): Promise<boolean> {
@@ -110,6 +113,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const syncedOpponentBanRef = useRef<string | null>(null);
     const moveSubmittedRef = useRef(false);
     const currentRoundRef = useRef(1);
+    const currentTurnRef = useRef(1);
     const privateRoundPlansRef = useRef<Record<number, PrivateRoundPlanState>>({});
 
 
@@ -602,12 +606,21 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             onMatchEndRef.current?.(payload);
         };
 
-        const signActionMessage = async (message: string, address: string): Promise<{ signature?: string; signedMessage?: string }> => {
-            if (USE_OFFCHAIN_ACTIONS) {
+        const signActionMessage = async (
+            message: string,
+            address: string,
+            options?: { forceWalletSignature?: boolean }
+        ): Promise<{ signature?: string; signedMessage?: string }> => {
+            const forceWalletSignature = options?.forceWalletSignature === true;
+
+            if (USE_OFFCHAIN_ACTIONS && !forceWalletSignature) {
                 return {};
             }
 
             if (walletType !== "wallet") {
+                if (forceWalletSignature) {
+                    throw new Error("Wallet signature required for private ZK commit. Connect a supported wallet.");
+                }
                 return {};
             }
 
@@ -684,6 +697,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             playerRole: string;
             address: string;
             roundNumber: number;
+            turnNumber: number;
         }) => {
             if (!PRIVATE_ROUNDS_ENABLED) return;
 
@@ -695,7 +709,18 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 EventBus.emit("game:moveError", { error: roundPlan.fatalError });
                 return;
             }
-            if (!roundPlan.moveType || !roundPlan.surgeCardId) return;
+            if (!roundPlan.moveType || !roundPlan.surgeCardId) {
+                EventBus.emit("game:moveInFlight", {
+                    player: params.playerRole,
+                    cancelled: true,
+                });
+                EventBus.emit("game:moveError", {
+                    error: !roundPlan.surgeCardId
+                        ? "Power Surge selection is required before submitting a move"
+                        : "Move selection is missing",
+                });
+                return;
+            }
 
             roundPlan.inFlight = true;
 
@@ -709,9 +734,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const proveRes = await provePrivateRoundPlan(params.matchId, {
                         address: params.address,
                         roundNumber: params.roundNumber,
+                        turnNumber: params.turnNumber,
                         move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
                         surgeCardId: roundPlan.surgeCardId,
-                        plannedMoves: roundPlan.plannedMoves,
                         nonce,
                     });
 
@@ -729,6 +754,23 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     move: roundPlan.moveType,
                     surgeCardId: roundPlan.surgeCardId,
                 }));
+
+                if (!roundPlan.walletSignature || !roundPlan.walletSignedMessage) {
+                    const signPayload = JSON.stringify({
+                        type: "zk_private_round_commit",
+                        matchId: params.matchId,
+                        roundNumber: params.roundNumber,
+                        turnNumber: params.turnNumber,
+                        move: roundPlan.moveType,
+                        surgeCardId: roundPlan.surgeCardId,
+                        commitment,
+                        timestamp: Date.now(),
+                    });
+
+                    const signed = await signActionMessage(signPayload, params.address);
+                    roundPlan.walletSignature = signed.signature;
+                    roundPlan.walletSignedMessage = signed.signedMessage;
+                }
 
                 if (!roundPlan.commitSubmitted) {
                     const commitRes = await commitPrivateRoundPlan(params.matchId, {
@@ -887,7 +929,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 matchId: string;
                 moveType: string;
                 playerRole: string;
-                plannedMoves?: string[];
             };
 
             try {
@@ -898,11 +939,26 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                 if (PRIVATE_ROUNDS_ENABLED) {
                     const roundNumber = currentRoundRef.current || 1;
+                    const turnNumber = currentTurnRef.current || 1;
                     const plan = privateRoundPlansRef.current[roundNumber] || {};
-                    plan.moveType = payload.moveType;
-                    if (Array.isArray(payload.plannedMoves) && payload.plannedMoves.length > 0) {
-                        plan.plannedMoves = payload.plannedMoves as Array<"punch" | "kick" | "block" | "special" | "stunned">;
+
+                    if (!plan.moveSigned) {
+                        await signActionMessage(
+                            JSON.stringify({
+                                type: "zk_private_move_select",
+                                matchId: payload.matchId,
+                                roundNumber,
+                                move: payload.moveType,
+                                playerAddress: address,
+                                timestamp: Date.now(),
+                            }),
+                            address,
+                            { forceWalletSignature: walletType === "wallet" },
+                        );
+                        plan.moveSigned = true;
                     }
+
+                    plan.moveType = payload.moveType;
                     privateRoundPlansRef.current[roundNumber] = plan;
 
                     await maybeCommitAndRevealPrivateRound({
@@ -910,6 +966,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         playerRole: payload.playerRole,
                         address,
                         roundNumber,
+                        turnNumber,
                     });
 
                     return;
@@ -1060,13 +1117,29 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         };
 
         const handlePrivateRoundStarting = (data: unknown) => {
-            const payload = data as { roundNumber?: number };
+            const payload = data as { roundNumber?: number; turnNumber?: number };
             const roundNumber = Number(payload?.roundNumber ?? 1);
+            const turnNumber = Number(payload?.turnNumber ?? 1);
             if (Number.isInteger(roundNumber) && roundNumber > 0) {
                 currentRoundRef.current = roundNumber;
-                if (!privateRoundPlansRef.current[roundNumber]) {
-                    privateRoundPlansRef.current[roundNumber] = {};
-                }
+                currentTurnRef.current = Number.isInteger(turnNumber) && turnNumber > 0 ? turnNumber : 1;
+                const existing = privateRoundPlansRef.current[roundNumber] || {};
+                privateRoundPlansRef.current[roundNumber] = {
+                    surgeCardId: existing.surgeCardId,
+                    surgeSigned: existing.surgeSigned,
+                    moveType: undefined,
+                    sharedRoundProof: undefined,
+                    commitment: undefined,
+                    proofPublicInputs: undefined,
+                    nonce: undefined,
+                    commitSubmitted: false,
+                    revealSubmitted: false,
+                    inFlight: false,
+                    walletSignedMessage: undefined,
+                    walletSignature: undefined,
+                    moveSigned: false,
+                    fatalError: existing.fatalError,
+                };
             }
             handleRoundStarting();
         };
@@ -1096,6 +1169,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 playerRole: sceneConfig.isHost ? "player1" : "player2",
                 address: publicKey,
                 roundNumber,
+                turnNumber: currentTurnRef.current || 1,
             });
         };
 
@@ -1187,7 +1261,23 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 if (!res.ok) return;
                 const json = await res.json();
                 const row = json?.fightState;
-                if (!row) return;
+                if (!row) {
+                    EventBus.emit("game:roundStarting", {
+                        roundNumber: 1,
+                        turnNumber: 1,
+                        player1Health: 100,
+                        player2Health: 100,
+                        player1Energy: 0,
+                        player2Energy: 0,
+                        player1GuardMeter: 0,
+                        player2GuardMeter: 0,
+                        player1IsStunned: false,
+                        player2IsStunned: false,
+                        moveDeadlineAt: Date.now() + 20000,
+                        countdownEndsAt: Date.now() + 3000,
+                    });
+                    return;
+                }
 
                 EventBus.emit("game:roundStarting", {
                     roundNumber: row.current_round ?? 1,
@@ -1237,6 +1327,23 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 if (PRIVATE_ROUNDS_ENABLED) {
                     const roundNumber = Number(payload.roundNumber || currentRoundRef.current || 1);
                     const plan = privateRoundPlansRef.current[roundNumber] || {};
+
+                    if (!plan.surgeSigned) {
+                        await signActionMessage(
+                            JSON.stringify({
+                                type: "zk_private_surge_select",
+                                matchId: payload.matchId,
+                                roundNumber,
+                                cardId: payload.cardId,
+                                playerAddress: payload.playerAddress,
+                                timestamp: Date.now(),
+                            }),
+                            payload.playerAddress,
+                            { forceWalletSignature: walletType === "wallet" },
+                        );
+                        plan.surgeSigned = true;
+                    }
+
                     plan.surgeCardId = payload.cardId;
                     privateRoundPlansRef.current[roundNumber] = plan;
 
@@ -1267,6 +1374,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         playerRole: payload.playerRole,
                         address: payload.playerAddress,
                         roundNumber,
+                        turnNumber: currentTurnRef.current || 1,
                     });
 
                     return;

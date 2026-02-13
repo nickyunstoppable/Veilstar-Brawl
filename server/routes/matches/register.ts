@@ -71,6 +71,19 @@ export async function handlePrepareRegistration(
 
         // Allow preparation during character_select (both chars locked) or in_progress
         if (!["character_select", "in_progress"].includes(match.status)) {
+            // For cancelled/abandoned matches, return a skip response instead of an error
+            // so the frontend can proceed gracefully (this happens when a race condition
+            // cancels the match between matchmaking and registration).
+            if (match.status === "cancelled" || match.status === "abandoned") {
+                console.warn(`[Register/prepare] Match ${matchId} is ${match.status}, returning skip`);
+                return Response.json({
+                    skipped: true,
+                    reason: `Match was ${match.status}`,
+                    sessionId: 0,
+                    authEntries: {},
+                    requiredAuthAddresses: [],
+                });
+            }
             return Response.json(
                 { error: `Match is in wrong phase: ${match.status}` },
                 { status: 400 },
@@ -220,6 +233,14 @@ export async function handleSubmitAuth(
             }
 
             if (!["character_select", "in_progress"].includes(match.status)) {
+                if (match.status === "cancelled" || match.status === "abandoned") {
+                    console.warn(`[Register/auth] Match ${matchId} is ${match.status}, returning skip`);
+                    return Response.json({
+                        success: true,
+                        skipped: true,
+                        reason: `Match was ${match.status}`,
+                    });
+                }
                 return Response.json(
                     { error: `Match is in wrong phase: ${match.status}` },
                     { status: 400 },

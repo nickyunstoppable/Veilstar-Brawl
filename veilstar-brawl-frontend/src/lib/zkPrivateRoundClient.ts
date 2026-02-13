@@ -26,9 +26,9 @@ export interface ResolvePrivateRoundRequest {
 export interface ProvePrivateRoundPlanRequest {
     address: string;
     roundNumber: number;
+    turnNumber: number;
     move: "punch" | "kick" | "block" | "special" | "stunned";
     surgeCardId: string;
-    plannedMoves?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
     nonce?: string;
 }
 

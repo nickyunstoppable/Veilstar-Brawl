@@ -7,6 +7,7 @@ interface ProveFinalizeBody {
 
 export async function handleProveAndFinalize(matchId: string, req: Request): Promise<Response> {
     try {
+        console.log(`[ZK Prove+Finalize] Request received for match ${matchId}`);
         const body = await req.json() as ProveFinalizeBody;
 
         let winnerAddress = body.winnerAddress?.trim();
@@ -32,9 +33,16 @@ export async function handleProveAndFinalize(matchId: string, req: Request): Pro
             );
         }
 
+        console.log(`[ZK Prove+Finalize] Starting proof/finalize for match ${matchId} winner ${winnerAddress}`);
         const result = await proveAndFinalizeMatch({
             matchId,
             winnerAddress,
+            allowRemoteDelegation: false,
+        });
+
+        console.log(`[ZK Prove+Finalize] Completed for match ${matchId}`, {
+            success: result.success,
+            proofCommand: result.proofCommand,
         });
 
         return Response.json(result);

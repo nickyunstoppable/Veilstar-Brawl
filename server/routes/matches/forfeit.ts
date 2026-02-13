@@ -7,7 +7,7 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { calculateEloChange } from "../../lib/game-types";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
-import { shouldAutoProveFinalize, triggerAutoProveFinalize } from "../../lib/zk-finalizer-client";
+import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
 interface ForfeitBody {
     address: string;
@@ -138,7 +138,11 @@ export async function handleForfeit(
 
         // Report result on-chain
         let onChainTxHash: string | undefined;
-        if (!shouldAutoProveFinalize() && isStellarConfigured()) {
+        let onChainSkippedReason: string | undefined;
+        const autoFinalize = getAutoProveFinalizeStatus();
+        const stellarReady = isStellarConfigured();
+
+        if (!autoFinalize.enabled && stellarReady) {
             try {
                 const onChainResult = await reportMatchResultOnChain(
                     matchId,
@@ -157,8 +161,11 @@ export async function handleForfeit(
             }
         }
 
-        if (shouldAutoProveFinalize()) {
+        if (autoFinalize.enabled) {
             triggerAutoProveFinalize(matchId, winnerAddress, "forfeit");
+        } else if (!stellarReady) {
+            onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
+            console.warn(`[Forfeit] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
         }
 
         // Broadcast
@@ -171,11 +178,16 @@ export async function handleForfeit(
             winnerAddress,
             reason: "forfeit",
             forfeitedBy: body.address,
+            finalScore: {
+                player1RoundsWon: p1RoundsWon,
+                player2RoundsWon: p2RoundsWon,
+            },
             player1RoundsWon: p1RoundsWon,
             player2RoundsWon: p2RoundsWon,
             ratingChanges,
             onChainSessionId: matchIdToSessionId(matchId),
             onChainTxHash,
+            onChainSkippedReason,
             contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
         });
 

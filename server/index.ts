@@ -136,12 +136,12 @@ async function handleRequest(req: Request): Promise<Response> {
     if (matchId) {
         // GET /api/matches/:matchId
         if (pathname === `/api/matches/${matchId}` && method === "GET") {
-            return corsResponse(await handleGetMatch(matchId), req);
+            return corsResponse(await handleGetMatch(matchId, req), req);
         }
 
         // GET /api/matches/:matchId/verify
         if (pathname === `/api/matches/${matchId}/verify` && method === "GET") {
-            return corsResponse(await handleGetMatch(matchId), req);
+            return corsResponse(await handleGetMatch(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/move

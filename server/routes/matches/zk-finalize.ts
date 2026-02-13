@@ -23,6 +23,7 @@ interface FinalizeBody {
 
 export async function handleFinalizeWithZkProof(matchId: string, req: Request): Promise<Response> {
     try {
+        console.log(`[ZK Finalize] Request received for match ${matchId}`);
         const body = await req.json() as FinalizeBody;
         const winnerAddress = body.winnerAddress?.trim();
         const proof = body.proof?.trim();
@@ -48,6 +49,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 { status: 400 },
             );
         }
+
+        console.log(`[ZK Finalize] Proof verified for match ${matchId} via ${verification.backend}`);
 
         const supabase = getSupabase();
         const { data: match, error } = await supabase
@@ -85,6 +88,7 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
 
         let onChainTxHash: string | null = null;
         if (isStellarConfigured()) {
+            console.log(`[ZK Finalize] Reporting on-chain result for match ${matchId}`);
             const onChainResult = await reportMatchResultOnChain(
                 matchId,
                 match.player1_address,
@@ -103,6 +107,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             }
 
             onChainTxHash = onChainResult.txHash || null;
+
+            console.log(`[ZK Finalize] On-chain finalize complete for match ${matchId}, tx=${onChainTxHash || "n/a"}`);
 
             if (onChainTxHash) {
                 await supabase

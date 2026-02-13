@@ -167,12 +167,13 @@ const walletSecrets: Record<string, string> = {};
 
 // Load existing secrets from .env if available
 let existingSecrets: Record<string, string | null> = {
+  admin: null,
   player1: null,
   player2: null,
 };
 
 const existingEnv = await readEnvFile('.env');
-for (const identity of ['player1', 'player2']) {
+for (const identity of ['admin', 'player1', 'player2']) {
   const key = `VITE_DEV_${identity.toUpperCase()}_SECRET`;
   const v = getEnvValue(existingEnv, key);
   if (v && v !== 'NOT_AVAILABLE') existingSecrets[identity] = v;
@@ -205,10 +206,17 @@ for (const contract of allContracts) {
 
 // Handle admin identity (needs to be in Stellar CLI for deployment)
 console.log('Setting up admin identity...');
-console.log('📝 Generating new admin identity...');
-const adminKeypair = Keypair.random();
+let adminKeypair: StellarKeypair;
+if (existingSecrets.admin) {
+  console.log('✅ Using existing admin from .env');
+  adminKeypair = Keypair.fromSecret(existingSecrets.admin);
+} else {
+  console.log('📝 Generating new admin identity...');
+  adminKeypair = Keypair.random();
+}
 
 walletAddresses.admin = adminKeypair.publicKey();
+walletSecrets.admin = adminKeypair.secret();
 
 try {
   await ensureTestnetFunded(walletAddresses.admin);
@@ -374,6 +382,7 @@ const envUpdates: Record<string, string> = {
   VITE_SOROBAN_RPC_URL: RPC_URL,
   VITE_NETWORK_PASSPHRASE: NETWORK_PASSPHRASE,
   VITE_DEV_ADMIN_ADDRESS: walletAddresses.admin,
+  VITE_DEV_ADMIN_SECRET: walletSecrets.admin,
   VITE_DEV_PLAYER1_ADDRESS: walletAddresses.player1,
   VITE_DEV_PLAYER2_ADDRESS: walletAddresses.player2,
   VITE_DEV_PLAYER1_SECRET: walletSecrets.player1,

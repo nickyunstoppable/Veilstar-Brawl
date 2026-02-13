@@ -167,12 +167,12 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   },
   {
     id: "mempool-congest",
-    name: "Mempool Congest",
-    description: "Stun opponent (Costs 6 HP)",
+    name: "Mempool Siphon",
+    description: "Drain 35 energy from opponent each turn",
     glowColor: 0xff4400,
     iconKey: "surge_mempool-burn",
-    effectType: "opponent_stun",
-    effectParams: { hpCost: 6 },
+    effectType: "energy_drain",
+    effectParams: { energyDrain: 35 },
   },
   {
     id: "blue-set-heal",
@@ -231,11 +231,11 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "ghost-dag",
     name: "GhostDAG",
-    description: "Opponent loses 30 Energy every turn",
+    description: "Your attacks can't be countered",
     glowColor: 0x666699,
     iconKey: "surge_ghost-dag",
-    effectType: "energy_drain",
-    effectParams: { energyDrain: 30 },
+    effectType: "invisible_move",
+    effectParams: {},
   },
   {
     id: "finality-fist",

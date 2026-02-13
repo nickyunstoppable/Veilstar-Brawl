@@ -6,14 +6,17 @@
 
 import {
     type MoveType,
+    type MoveOutcome,
     type RoundWinner,
     type RoundResolutionInput,
     type RoundResolutionResult,
     type PlayerMoveResult,
     MOVE_PROPERTIES,
     MOVE_ADVANTAGE,
+    RESOLUTION_MATRIX,
     DAMAGE_MULTIPLIERS,
     GAME_CONSTANTS,
+    COMBAT_CONSTANTS,
 } from "./game-types";
 export type { MoveType } from "./game-types";
 import type { PowerSurgeCardId } from "./power-surge";
@@ -59,40 +62,32 @@ export function calculateDamage(
     defenderHealth: number = 100,
     defenderGuard: number = 0
 ): number {
-    const attackProps = MOVE_PROPERTIES[attackerMove];
+    const outcome = RESOLUTION_MATRIX[attackerMove][defenderMove];
 
-    // No-damage moves
     if (attackerMove === "block" || attackerMove === "stunned") return 0;
 
-    // Base damage
-    let damage = attackProps.damage;
-
-    // Block interactions
-    if (defenderMove === "block") {
-        if (attackerMove === "special") {
-            // Special vs block: reduced but still hits
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.SPECIAL_VS_BLOCK * DAMAGE_MULTIPLIERS.BLOCKED);
-        } else if (attackerMove === "kick") {
-            // Kick beats block — full damage
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.NORMAL);
-        } else {
-            // Punch vs block — chip damage only
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.CHIP_DAMAGE);
+    let damage = 0;
+    if (outcome === "hit") {
+        damage = MOVE_PROPERTIES[attackerMove].damage;
+        if (defenderMove === "block") {
+            damage = Math.round(damage * COMBAT_CONSTANTS.SHATTER_DAMAGE_MULTIPLIER);
         }
-    } else if (doesMoveBeat(attackerMove, defenderMove)) {
-        // Attacker wins matchup — full damage
-        damage = Math.round(damage * DAMAGE_MULTIPLIERS.NORMAL);
-    } else if (doesMoveBeat(defenderMove, attackerMove)) {
-        // Defender wins matchup — reduced damage
-        damage = Math.round(damage * DAMAGE_MULTIPLIERS.BLOCKED);
     }
 
     // Guard break bonus
-    if (defenderGuard >= GAME_CONSTANTS.MAX_GUARD) {
+    if (damage > 0 && defenderGuard >= GAME_CONSTANTS.MAX_GUARD) {
         damage = Math.round(damage * DAMAGE_MULTIPLIERS.GUARD_BREAK);
     }
 
     return Math.max(0, damage);
+}
+
+function isCounterHit(attackerMove: MoveType, defenderMove: MoveType): boolean {
+    return (
+        (attackerMove === "punch" && defenderMove === "special") ||
+        (attackerMove === "kick" && defenderMove === "punch") ||
+        (attackerMove === "special" && defenderMove === "block")
+    );
 }
 
 function calculateDamageWithSurges(params: {
@@ -119,32 +114,20 @@ function calculateDamageWithSurges(params: {
     const blockDisabled = defenderMove === "block" && isBlockDisabled(defenderMods, attackerMods);
     const effectiveDefenderMove = blockDisabled ? "stunned" : defenderMove;
 
-    // Base damage (server canonical)
+    const attackerInvisible = isInvisibleMove(attackerMods);
     const baseDamage = MOVE_PROPERTIES[attackerMove].damage;
 
-    // Determine matchup multiplier (mirrors existing calculateDamage with two surge additions:
-    // - Invisible move: cannot be countered (never reduced by defender advantage)
-    // - Chainbreaker bypass: if defender blocks and attacker bypasses, ignore block reductions
-    let damage = baseDamage;
+    let outcome: MoveOutcome = RESOLUTION_MATRIX[attackerMove][effectiveDefenderMove];
+    if (attackerInvisible) {
+        outcome = "hit";
+    }
 
-    const attackerInvisible = isInvisibleMove(attackerMods);
-    const bypassBlock = shouldBypassBlock(attackerMods);
-
-    if (effectiveDefenderMove === "block") {
-        if (bypassBlock) {
-            // Block provides no reduction at all
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.NORMAL);
-        } else if (attackerMove === "special") {
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.SPECIAL_VS_BLOCK * DAMAGE_MULTIPLIERS.BLOCKED);
-        } else if (attackerMove === "kick") {
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.NORMAL);
-        } else {
-            damage = Math.round(damage * DAMAGE_MULTIPLIERS.CHIP_DAMAGE);
+    let damage = 0;
+    if (outcome === "hit") {
+        damage = baseDamage;
+        if (effectiveDefenderMove === "block") {
+            damage = Math.round(damage * COMBAT_CONSTANTS.SHATTER_DAMAGE_MULTIPLIER);
         }
-    } else if (doesMoveBeat(attackerMove, effectiveDefenderMove)) {
-        damage = Math.round(damage * DAMAGE_MULTIPLIERS.NORMAL);
-    } else if (doesMoveBeat(effectiveDefenderMove, attackerMove)) {
-        damage = Math.round(damage * (attackerInvisible ? DAMAGE_MULTIPLIERS.NORMAL : DAMAGE_MULTIPLIERS.BLOCKED));
     }
 
     // Guard break bonus
@@ -186,18 +169,20 @@ export function hasEnoughEnergy(energy: number, move: MoveType): boolean {
 export function calculateGuardAfter(
     currentGuard: number,
     myMove: MoveType,
-    opponentMove: MoveType
+    opponentMove: MoveType,
+    myOutcome: MoveOutcome
 ): number {
     let guard = currentGuard;
 
-    // Build guard when blocking
     if (myMove === "block") {
-        guard += MOVE_PROPERTIES["block"].guardBuild;
-    }
-
-    // Take guard damage when opponent attacks and I'm blocking
-    if (myMove === "block" && opponentMove !== "block" && opponentMove !== "stunned") {
-        guard -= MOVE_PROPERTIES[opponentMove].guardDamage;
+        if (myOutcome === "guarding") {
+            guard += COMBAT_CONSTANTS.GUARD_BUILDUP_ON_BLOCK;
+            if (opponentMove !== "block" && opponentMove !== "stunned") {
+                guard += COMBAT_CONSTANTS.GUARD_BUILDUP_ON_HIT;
+            }
+        } else if (myOutcome === "shattered") {
+            guard = 0;
+        }
     }
 
     // Guard breaks at max — reset to 0
@@ -244,43 +229,101 @@ export function resolveRound(
             ? "stunned"
             : player2Move;
 
-    // Counter-hit definition (server-side): attacker has move advantage
-    const p1CounterHit = doesMoveBeat(player1Move, player2Move);
-    const p2CounterHit = doesMoveBeat(player2Move, player1Move);
+    const p1Outcome: MoveOutcome = RESOLUTION_MATRIX[p1EffectiveMove][p2EffectiveMove];
+    const p2Outcome: MoveOutcome = RESOLUTION_MATRIX[p2EffectiveMove][p1EffectiveMove];
 
-    // Calculate damage
+    const p1CounterHit = isCounterHit(p1EffectiveMove, p2EffectiveMove);
+    const p2CounterHit = isCounterHit(p2EffectiveMove, p1EffectiveMove);
+
     const p1DamageBase = surges
         ? calculateDamageWithSurges({
-            attackerMove: player1Move,
+            attackerMove: p1EffectiveMove,
             defenderMove: p2EffectiveMove,
             defenderGuard: player2Guard,
             attackerMods: p1Mods!,
             defenderMods: p2Mods!,
             isCounterHit: p1CounterHit,
         })
-        : calculateDamage(player1Move, player2Move, player2Health, player2Guard);
+        : calculateDamage(p1EffectiveMove, p2EffectiveMove, player2Health, player2Guard);
 
     const p2DamageBase = surges
         ? calculateDamageWithSurges({
-            attackerMove: player2Move,
+            attackerMove: p2EffectiveMove,
             defenderMove: p1EffectiveMove,
             defenderGuard: player1Guard,
             attackerMods: p2Mods!,
             defenderMods: p1Mods!,
             isCounterHit: p2CounterHit,
         })
-        : calculateDamage(player2Move, player1Move, player1Health, player1Guard);
+        : calculateDamage(p2EffectiveMove, p1EffectiveMove, player1Health, player1Guard);
 
-    // Defensive surge modifiers (reduction, reflection, immunity)
-    // NOTE: reflection uses incoming damage BEFORE reduction.
-    const p1IsBlocking = p1EffectiveMove === "block";
-    const p2IsBlocking = p2EffectiveMove === "block";
+    const computeBaseDamageTaken = (
+        myMove: MoveType,
+        myOutcome: MoveOutcome,
+        opponentMove: MoveType,
+        opponentOutcome: MoveOutcome,
+        opponentDamageBase: number,
+        opponentMods: ReturnType<typeof calculateSurgeEffects>["player1Modifiers"] | null,
+    ): number => {
+        if (myOutcome === "guarding") {
+            if (opponentMove === "block" || opponentMove === "stunned") {
+                return 0;
+            }
 
-    const p1Def = surges ? applyDefensiveModifiers(p2DamageBase, p1Mods!, p1IsBlocking) : { actualDamage: p2DamageBase, reflectedDamage: 0 };
-    const p2Def = surges ? applyDefensiveModifiers(p1DamageBase, p2Mods!, p2IsBlocking) : { actualDamage: p1DamageBase, reflectedDamage: 0 };
+            let incoming = MOVE_PROPERTIES[opponentMove].damage;
+            if (opponentMods) {
+                incoming = applyDamageModifiers(
+                    incoming,
+                    opponentMods,
+                    opponentMove,
+                    isCounterHit(opponentMove, myMove)
+                );
+            }
 
-    let p1DamageTaken = p1Def.actualDamage;
-    let p2DamageTaken = p2Def.actualDamage;
+            if (opponentMods && shouldBypassBlock(opponentMods)) {
+                return Math.max(0, Math.round(incoming));
+            }
+            return Math.max(0, Math.round(incoming * DAMAGE_MULTIPLIERS.BLOCKED));
+        }
+
+        let damageTaken = 0;
+        if (opponentOutcome === "hit") {
+            damageTaken = Math.max(0, Math.round(opponentDamageBase));
+        }
+
+        if (myOutcome === "reflected" && myMove === "kick") {
+            const reflectBase = MOVE_PROPERTIES.kick.damage;
+            damageTaken += Math.floor(reflectBase * COMBAT_CONSTANTS.KICK_REFLECT_PERCENT);
+        }
+
+        return Math.max(0, damageTaken);
+    };
+
+    const p1IncomingBase = computeBaseDamageTaken(
+        p1EffectiveMove,
+        p1Outcome,
+        p2EffectiveMove,
+        p2Outcome,
+        p2DamageBase,
+        p2Mods ?? null,
+    );
+    const p2IncomingBase = computeBaseDamageTaken(
+        p2EffectiveMove,
+        p2Outcome,
+        p1EffectiveMove,
+        p1Outcome,
+        p1DamageBase,
+        p1Mods ?? null,
+    );
+
+    const p1IsBlocking = p1EffectiveMove === "block" && p1Outcome === "guarding";
+    const p2IsBlocking = p2EffectiveMove === "block" && p2Outcome === "guarding";
+
+    const p1Def = surges ? applyDefensiveModifiers(p1IncomingBase, p1Mods!, p1IsBlocking) : { actualDamage: p1IncomingBase, reflectedDamage: 0 };
+    const p2Def = surges ? applyDefensiveModifiers(p2IncomingBase, p2Mods!, p2IsBlocking) : { actualDamage: p2IncomingBase, reflectedDamage: 0 };
+
+    let p1DamageTaken = Math.max(0, Math.round(p1Def.actualDamage));
+    let p2DamageTaken = Math.max(0, Math.round(p2Def.actualDamage));
 
     // Apply reflected damage back to attackers
     p2DamageTaken += p1Def.reflectedDamage;
@@ -294,9 +337,8 @@ export function resolveRound(
         if (p2Dodged) p2DamageTaken = 0;
     }
 
-    // Final damage dealt numbers for reporting
-    const p1Damage = Math.max(0, p1DamageBase);
-    const p2Damage = Math.max(0, p2DamageBase);
+    const p1Damage = Math.max(0, Math.round(p1DamageBase));
+    const p2Damage = Math.max(0, Math.round(p2DamageBase));
 
     // Apply damage
     let p1HealthAfter = Math.max(0, player1Health - p1DamageTaken);
@@ -363,8 +405,8 @@ export function resolveRound(
     }
 
     // Guard after moves
-    const p1GuardAfter = calculateGuardAfter(player1Guard, p1EffectiveMove, p2EffectiveMove);
-    const p2GuardAfter = calculateGuardAfter(player2Guard, p2EffectiveMove, p1EffectiveMove);
+    const p1GuardAfter = calculateGuardAfter(player1Guard, p1EffectiveMove, p2EffectiveMove, p1Outcome);
+    const p2GuardAfter = calculateGuardAfter(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
 
     // Determine advantage
     const advantage = getMoveAdvantage(player1Move, player2Move);
@@ -387,12 +429,16 @@ export function resolveRound(
     // Generate narrative
     const narrative = generateNarrative(player1Move, player2Move, p1Damage, p2Damage, advantage);
 
+    const player1IsStunnedNext = p1Outcome === "missed";
+    const player2IsStunnedNext = p2Outcome === "missed";
+
     return {
         player1: {
             move: player1Move,
             damageDealt: p1Damage,
             damageTaken: p1DamageTaken,
             moveSuccess: advantage >= 0,
+            outcome: p1Outcome,
             hpRegen: p1HpRegen,
             lifesteal: p1Lifesteal,
             energyDrained: p1EnergyDrained,
@@ -402,6 +448,7 @@ export function resolveRound(
             damageDealt: p2Damage,
             damageTaken: p2DamageTaken,
             moveSuccess: advantage <= 0,
+            outcome: p2Outcome,
             hpRegen: p2HpRegen,
             lifesteal: p2Lifesteal,
             energyDrained: p2EnergyDrained,
@@ -414,6 +461,8 @@ export function resolveRound(
         player2EnergyAfter: p2EnergyAfter,
         player1GuardAfter: p1GuardAfter,
         player2GuardAfter: p2GuardAfter,
+        player1IsStunnedNext,
+        player2IsStunnedNext,
         narrative,
     };
 }

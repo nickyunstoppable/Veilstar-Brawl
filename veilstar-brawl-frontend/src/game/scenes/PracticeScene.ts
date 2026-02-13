@@ -1925,7 +1925,7 @@ export class PracticeScene extends Phaser.Scene {
               });
             }
 
-            // Show energy drain effect from surge (e.g., GhostDAG, Vaultbreaker)
+            // Show energy drain effect from surge (e.g., Mempool Siphon, Vaultbreaker)
             if (turnResult.player2.energyDrained && turnResult.player2.energyDrained > 0) {
               this.time.delayedCall(500, () => {
                 this.showFloatingText(
@@ -2010,7 +2010,7 @@ export class PracticeScene extends Phaser.Scene {
               });
             }
 
-            // Show energy drain effect from surge (e.g., GhostDAG, Vaultbreaker)
+            // Show energy drain effect from surge (e.g., Mempool Siphon, Vaultbreaker)
             if (turnResult.player1.energyDrained && turnResult.player1.energyDrained > 0) {
               this.time.delayedCall(500, () => {
                 this.showFloatingText(
