@@ -13,7 +13,9 @@
     "dev:catalog": "bun --cwd=sgs_frontend run dev",
     "dev:game": "bun run scripts/dev-game.ts",
     "dev:server": "bun --watch run server/index.ts",
-    "server": "bun --watch server/index.ts"
+    "server": "bun --watch server/index.ts",
+    "dev:zk": "bun --watch run zk_service/index.ts",
+    "zk": "bun run zk_service/index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

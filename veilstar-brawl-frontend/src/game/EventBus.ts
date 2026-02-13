@@ -50,7 +50,30 @@ export interface GameEvents {
   "error:game": { message: string; code?: string };
 
   // Game Engine events
-  "game:submitMove": { matchId: string; moveType: string; playerRole: string };
+  "game:submitMove": {
+    matchId: string;
+    moveType: string;
+    playerRole: string;
+    plannedMoves?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
+  };
+  "game:submitPrivateRoundPlan": {
+    matchId: string;
+    roundNumber: number;
+    playerRole: "player1" | "player2";
+    commitment: string;
+    proof: string;
+    publicInputs?: unknown;
+    transcriptHash?: string;
+    encryptedPlan?: string;
+    onChainCommitTxHash?: string;
+  };
+  "game:privateRoundCommitted": {
+    matchId: string;
+    roundNumber: number;
+    player1Committed: boolean;
+    player2Committed: boolean;
+    bothCommitted: boolean;
+  };
   "game:moveError": { error: string };
   "game:moveInFlight": { player: string };
   "game:roundStarting": any;

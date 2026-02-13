@@ -51,6 +51,7 @@ export interface PowerSurgeCardsConfig {
   cardIds: PowerSurgeCardId[];
   playerAddress: string;
   deadline: number;
+  waitForOpponent?: boolean;
   onCardSelected: (cardId: PowerSurgeCardId) => Promise<void>;
   onTimeout: () => void;
   onClose: () => void;
@@ -666,6 +667,17 @@ export class PowerSurgeCards {
     // Play confirmation sound
     this.playSFX("sfx_powerup");
 
+    if (this.config.waitForOpponent === false) {
+      this.instructionText.setText("Phase 1 complete!");
+      this.instructionText.setColor("#22c55e");
+      this.scene.time.delayedCall(500, () => {
+        if (!this.isDestroyed) {
+          this.animateExit();
+        }
+      });
+      return;
+    }
+
     // Wait for opponent to also complete their selection
     this.waitForBothPlayersReady();
   }
@@ -718,10 +730,14 @@ export class PowerSurgeCards {
           .select("player1_card_id, player2_card_id")
           .eq("match_id", this.config.matchId)
           .eq("round_number", this.config.roundNumber)
-          .single();
+          .maybeSingle();
 
-        if (error || !surge) {
+        if (error) {
           console.error("[PowerSurgeCards] Error checking both ready:", error);
+          return false;
+        }
+
+        if (!surge) {
           return false;
         }
 

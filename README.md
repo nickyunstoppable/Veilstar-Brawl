@@ -11,6 +11,10 @@ Server-side Noir verification bridge is controlled by env vars:
  - `ZK_VERIFY_ENABLED` (default: `true`)
  - `ZK_VK_PATH` (required when verification enabled)
  - `ZK_VERIFY_CMD` (optional command template)
+ - `ZK_AUTO_PROVE_FINALIZE` (default: `true`, only active when proving is configured)
+ - `ZK_PROVE_ENABLED` (default: `true`)
+ - `ZK_PROVE_CMD` (required for auto-prove finalize)
+ - `ZK_PRIVATE_ROUNDS` (default: `false`, enables hidden per-round commit + proof flow)
 
 Default verifier command template:
 
@@ -31,6 +35,101 @@ To avoid per-action wallet popups during gameplay, keep:
 
  - Server: `ZK_OFFCHAIN_ACTIONS=true` (default)
  - Frontend: `VITE_ZK_OFFCHAIN_ACTIONS=true` (default)
+
+Private round strategy flow (full-privacy target backend scaffold):
+
+ - `POST /api/matches/:matchId/zk/round/commit`
+ - `POST /api/matches/:matchId/zk/round/resolve`
+
+When `ZK_PRIVATE_ROUNDS=true`, legacy move/surge routes are intentionally blocked to prevent mixed game modes.
+
+### Fly.io deployment (recommended for Windows developers)
+
+You can run the Bun server + ZK verification on Fly Linux VMs to avoid local Windows toolchain issues.
+
+1. Deploy from `server/`:
+
+```bash
+cd server
+fly launch --config fly.toml --no-deploy
+fly deploy
+```
+
+2. Set required secrets/env on Fly:
+
+```bash
+fly secrets set SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
+fly secrets set CORS_ORIGIN=https://<your-frontend-domain>
+fly secrets set ZK_VERIFY_ENABLED=true ZK_PRIVATE_ROUNDS=true
+```
+
+3. Provide verification key in one of two ways:
+
+- Preferred: base64-encoded key via secret (auto-materialized to `ZK_VK_PATH` at startup)
+
+```bash
+fly secrets set ZK_VK_BASE64=<base64-of-verification-key-file>
+```
+
+- Or explicit path if you bake/mount the key in container:
+
+```bash
+fly secrets set ZK_VK_PATH=/app/keys/verification.key
+```
+
+4. Set verifier command (if different from default):
+
+```bash
+fly secrets set ZK_VERIFY_CMD='bb verify -k {VK_PATH} -p {PROOF_PATH} -i {PUBLIC_INPUTS_PATH}'
+```
+
+If you are bringing up infrastructure first and want gameplay unblocked temporarily, set:
+
+```bash
+fly secrets set ZK_VERIFY_ENABLED=false
+```
+
+then re-enable after `bb` + verification key are configured.
+
+### Split deployment: Vercel frontend + Heroku backend + Fly ZK
+
+Use two frontend env vars:
+
+- `VITE_API_BASE_URL=https://<your-heroku-backend>.herokuapp.com`
+- `VITE_ZK_API_BASE_URL=https://<your-fly-zk-app>.fly.dev`
+
+`VITE_ZK_API_BASE_URL` is used only for:
+
+- `POST /api/matches/:matchId/zk/round/commit`
+- `POST /api/matches/:matchId/zk/round/resolve`
+
+All other gameplay/matchmaking routes continue to use `VITE_API_BASE_URL`.
+
+For a fully separate ZK service, use the dedicated folder:
+
+- ZK service entrypoint: `zk_service/index.ts`
+- Fly config: `zk_service/fly.toml`
+- Dockerfile: `zk_service/Dockerfile`
+
+Noir circuit workspace for round-plan proofs:
+
+- `zk_circuits/veilstar_round_plan/`
+
+Run locally:
+
+```bash
+bun run dev:zk
+```
+
+Deploy only ZK service to Fly:
+
+```bash
+cd <repo-root>
+fly launch --config fly.zk.toml --no-deploy
+fly deploy --config fly.zk.toml
+```
+
+Important: run these from repo root so Docker build context includes `package.json`, `bun.lock`, and `server/`.
 # Stellar Game Studio
 
 Development Tools For Web3 Game Builders On Stellar.

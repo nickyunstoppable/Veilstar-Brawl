@@ -1,8 +1,29 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
 let envLoaded = false;
+
+function materializeZkVkFromEnv(): void {
+    const alreadyConfiguredPath = process.env.ZK_VK_PATH?.trim();
+    if (alreadyConfiguredPath) return;
+
+    const rawBase64 = process.env.ZK_VK_BASE64?.trim();
+    if (!rawBase64) return;
+
+    try {
+        const outDir = resolve(tmpdir(), "veilstar-zk");
+        mkdirSync(outDir, { recursive: true });
+        const outPath = resolve(outDir, "verification.key");
+        const content = Buffer.from(rawBase64, "base64");
+        writeFileSync(outPath, content);
+        process.env.ZK_VK_PATH = outPath;
+        console.log("[env] ZK verification key materialized from ZK_VK_BASE64");
+    } catch (error) {
+        console.error("[env] Failed to materialize ZK_VK_BASE64:", error);
+    }
+}
 
 function loadEnvFile(envPath: string): void {
     if (!existsSync(envPath)) return;
@@ -36,6 +57,8 @@ export function ensureEnvLoaded(): void {
     if (repoRootEnv !== cwdEnv) {
         loadEnvFile(repoRootEnv);
     }
+
+    materializeZkVkFromEnv();
 
     envLoaded = true;
 }

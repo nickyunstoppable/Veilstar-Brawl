@@ -16,7 +16,18 @@ interface ProveAndFinalizeResult {
 }
 
 export function shouldAutoProveFinalize(): boolean {
-    return (process.env.ZK_AUTO_PROVE_FINALIZE ?? "true") !== "false";
+    const autoEnabled = (process.env.ZK_AUTO_PROVE_FINALIZE ?? "true") !== "false";
+    if (!autoEnabled) {
+        return false;
+    }
+
+    const proveEnabled = (process.env.ZK_PROVE_ENABLED ?? "true") !== "false";
+    if (!proveEnabled) {
+        return false;
+    }
+
+    const proveCommand = process.env.ZK_PROVE_CMD?.trim();
+    return Boolean(proveCommand);
 }
 
 export function triggerAutoProveFinalize(matchId: string, winnerAddress: string, context: string): void {

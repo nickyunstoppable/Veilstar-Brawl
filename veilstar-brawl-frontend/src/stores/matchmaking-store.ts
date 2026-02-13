@@ -78,6 +78,7 @@ interface MatchmakingStore {
     setQueued: (queuedAt: number) => void;
     setMatching: () => void;
     setMatched: (result: MatchmakingResult) => void;
+    clearMatchResult: () => void;
     leaveQueue: () => void;
     setQueueError: (error: string) => void;
     setQueuePosition: (position: number) => void;
@@ -133,12 +134,16 @@ export const useMatchmakingStore = create<MatchmakingStore>()(
         setMatched: (result) =>
             set({ queueStatus: "matched", matchResult: result }),
 
+        clearMatchResult: () =>
+            set({ matchResult: null }),
+
         leaveQueue: () =>
             set({
                 queueStatus: "idle",
                 queuedAt: null,
                 queuePosition: null,
                 error: null,
+                matchResult: null,
             }),
 
         setQueueError: (error) =>

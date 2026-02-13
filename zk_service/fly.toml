@@ -1,0 +1,38 @@
+# fly.toml app configuration file generated for veilstar-brawl-zk on 2026-02-13T13:15:45+07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'veilstar-brawl-zk'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  NODE_ENV = 'production'
+  PORT = '3011'
+  ZK_PRIVATE_ROUNDS = 'true'
+  ZK_SERVER_PORT = '3011'
+  ZK_VERIFY_ENABLED = 'false'
+
+[http_service]
+  internal_port = 3011
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024

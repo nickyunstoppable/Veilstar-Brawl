@@ -1,0 +1,20 @@
+# Exclude everything by default, then whitelist only what zk_service image needs
+**
+
+!package.json
+!bun.lock
+!server/**
+!zk_service/**
+!zk_circuits/**
+
+# Never include VCS / editor junk
+.git/
+.github/
+.vscode/
+
+# Never include dependency/build outputs
+node_modules/
+target/
+dist/
+docs/
+**/*.log

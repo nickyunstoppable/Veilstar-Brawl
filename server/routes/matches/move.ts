@@ -15,6 +15,7 @@ import {
 } from "../../lib/stellar-contract";
 
 const USE_OFFCHAIN_ACTIONS = (process.env.ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 
 interface SubmitMoveBody {
     address: string;
@@ -82,6 +83,13 @@ export async function handlePrepareMoveOnChain(
     req: Request,
 ): Promise<Response> {
     try {
+        if (PRIVATE_ROUNDS_ENABLED) {
+            return Response.json(
+                { error: "Legacy move prepare is disabled when ZK_PRIVATE_ROUNDS=true. Use /api/matches/:matchId/zk/round/commit." },
+                { status: 409 },
+            );
+        }
+
         if (USE_OFFCHAIN_ACTIONS) {
             return Response.json(
                 { error: "Off-chain action mode enabled; move prepare is disabled" },
@@ -173,6 +181,13 @@ export async function handleSubmitMove(
     req: Request
 ): Promise<Response> {
     try {
+        if (PRIVATE_ROUNDS_ENABLED) {
+            return Response.json(
+                { error: "Legacy move submission is disabled when ZK_PRIVATE_ROUNDS=true. Use /api/matches/:matchId/zk/round/resolve." },
+                { status: 409 },
+            );
+        }
+
         const body = await req.json() as SubmitMoveBody;
 
         if (!body.address || !body.move) {

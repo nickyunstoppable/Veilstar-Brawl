@@ -1,0 +1,8 @@
+[package]
+name = "veilstar_round_plan"
+type = "bin"
+authors = ["Veilstar Brawl"]
+compiler_version = ">=0.33.0"
+
+[dependencies]
+poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.1.1" }

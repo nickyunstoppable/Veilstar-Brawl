@@ -293,6 +293,37 @@ export function getRandomPowerSurgeCards(count: number = 3, excludeIds: PowerSur
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
+/**
+ * Deterministic card selection for synchronized private rounds.
+ * Produces the same card deck for all clients given the same match + round.
+ */
+export function getDeterministicPowerSurgeCards(
+  matchId: string,
+  roundNumber: number,
+  count: number = 3,
+): PowerSurgeCard[] {
+  const normalized = `${matchId}:${roundNumber}`;
+  let hash = 2166136261;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  const available = [...POWER_SURGE_CARDS];
+  const selected: PowerSurgeCard[] = [];
+  const targetCount = Math.min(count, available.length);
+
+  for (let pick = 0; pick < targetCount; pick += 1) {
+    const seed = Math.abs(hash + pick * 1013904223);
+    const nextIndex = seed % available.length;
+    selected.push(available[nextIndex]);
+    available.splice(nextIndex, 1);
+  }
+
+  return selected;
+}
+
 // =============================================================================
 // MATCH STATE TYPES
 // =============================================================================

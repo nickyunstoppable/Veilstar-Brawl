@@ -23,13 +23,15 @@ import { handleTimeoutVictory } from "./routes/matches/timeout";
 import { handleDisconnect } from "./routes/matches/disconnect";
 import { handleFinalizeWithZkProof } from "./routes/matches/zk-finalize";
 import { handleProveAndFinalize } from "./routes/matches/zk-prove-finalize";
+import { handleCommitPrivateRoundPlan, handleResolvePrivateRound } from "./routes/matches/zk-round-commit";
+import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 import { ensureEnvLoaded } from "./lib/env";
 
 ensureEnvLoaded();
 
-const PORT = parseInt(process.env.SERVER_PORT || "3001", 10);
+const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT || "3001", 10);
 
 // =============================================================================
 // CORS
@@ -225,6 +227,21 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/zk/prove-finalize
         if (pathname === `/api/matches/${matchId}/zk/prove-finalize` && method === "POST") {
             return corsResponse(await handleProveAndFinalize(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/zk/round/commit
+        if (pathname === `/api/matches/${matchId}/zk/round/commit` && method === "POST") {
+            return corsResponse(await handleCommitPrivateRoundPlan(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/zk/round/prove
+        if (pathname === `/api/matches/${matchId}/zk/round/prove` && method === "POST") {
+            return corsResponse(await handleProvePrivateRoundPlan(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/zk/round/resolve
+        if (pathname === `/api/matches/${matchId}/zk/round/resolve` && method === "POST") {
+            return corsResponse(await handleResolvePrivateRound(matchId, req), req);
         }
     }
 

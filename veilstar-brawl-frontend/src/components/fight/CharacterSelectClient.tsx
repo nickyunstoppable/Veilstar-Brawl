@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { PhaserGame } from "@/game/PhaserGame";
 import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
+import { commitPrivateRoundPlan, provePrivateRoundPlan, resolvePrivateRound } from "@/lib/zkPrivateRoundClient";
 
 import { getSupabaseClient } from "@/lib/supabase/client";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -27,6 +28,21 @@ interface CharacterSelectClientProps {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const USE_OFFCHAIN_ACTIONS = (import.meta.env.VITE_ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "false") === "true";
+
+interface PrivateRoundPlanState {
+    moveType?: string;
+    surgeCardId?: string;
+    plannedMoves?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
+    sharedRoundProof?: string;
+    commitment?: string;
+    proofPublicInputs?: string;
+    nonce?: string;
+    fatalError?: string;
+    commitSubmitted?: boolean;
+    revealSubmitted?: boolean;
+    inFlight?: boolean;
+}
 
 async function waitForSubscribed(channel: RealtimeChannel, timeoutMs: number = 2500): Promise<boolean> {
     return new Promise((resolve) => {
@@ -93,6 +109,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const syncedOpponentCharacterRef = useRef<string | null>(null);
     const syncedOpponentBanRef = useRef<string | null>(null);
     const moveSubmittedRef = useRef(false);
+    const currentRoundRef = useRef(1);
+    const privateRoundPlansRef = useRef<Record<number, PrivateRoundPlanState>>({});
 
 
 
@@ -249,6 +267,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 })
                 .on("broadcast", { event: "round_resolved" }, (payload) => {
                     EventBus.emit("game:roundResolved", payload.payload);
+                })
+                .on("broadcast", { event: "round_plan_committed" }, (payload) => {
+                    EventBus.emit("game:privateRoundCommitted", payload.payload);
+                })
+                .on("broadcast", { event: "round_plan_revealed" }, (payload) => {
+                    EventBus.emit("game:privateRoundCommitted", payload.payload);
                 })
                 .on("broadcast", { event: "match_ended" }, (payload) => {
                     EventBus.emit("game:matchEnded", payload.payload);
@@ -655,6 +679,125 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             return /txBadSeq|TRY_AGAIN_LATER/i.test(raw);
         };
 
+        const maybeCommitAndRevealPrivateRound = async (params: {
+            matchId: string;
+            playerRole: string;
+            address: string;
+            roundNumber: number;
+        }) => {
+            if (!PRIVATE_ROUNDS_ENABLED) return;
+
+            const roundPlan = privateRoundPlansRef.current[params.roundNumber] || {};
+            privateRoundPlansRef.current[params.roundNumber] = roundPlan;
+
+            if (roundPlan.inFlight) return;
+            if (roundPlan.fatalError) {
+                EventBus.emit("game:moveError", { error: roundPlan.fatalError });
+                return;
+            }
+            if (!roundPlan.moveType || !roundPlan.surgeCardId) return;
+
+            roundPlan.inFlight = true;
+
+            try {
+                let sharedRoundProof = roundPlan.sharedRoundProof;
+                let commitment = roundPlan.commitment;
+                let proofPublicInputs = roundPlan.proofPublicInputs;
+                let nonce = roundPlan.nonce;
+
+                if (!sharedRoundProof || !commitment) {
+                    const proveRes = await provePrivateRoundPlan(params.matchId, {
+                        address: params.address,
+                        roundNumber: params.roundNumber,
+                        move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
+                        surgeCardId: roundPlan.surgeCardId,
+                        plannedMoves: roundPlan.plannedMoves,
+                        nonce,
+                    });
+
+                    commitment = proveRes.commitment;
+                    sharedRoundProof = proveRes.proof;
+                    proofPublicInputs = proveRes.publicInputs;
+                    nonce = proveRes.nonce;
+                    roundPlan.commitment = commitment;
+                    roundPlan.sharedRoundProof = sharedRoundProof;
+                    roundPlan.proofPublicInputs = proofPublicInputs;
+                    roundPlan.nonce = nonce;
+                }
+
+                const encryptedPlan = btoa(JSON.stringify({
+                    move: roundPlan.moveType,
+                    surgeCardId: roundPlan.surgeCardId,
+                }));
+
+                if (!roundPlan.commitSubmitted) {
+                    const commitRes = await commitPrivateRoundPlan(params.matchId, {
+                        address: params.address,
+                        roundNumber: params.roundNumber,
+                        commitment,
+                        proof: sharedRoundProof,
+                        publicInputs: proofPublicInputs,
+                        transcriptHash: nonce,
+                        encryptedPlan,
+                    });
+
+                    roundPlan.commitSubmitted = true;
+
+                    EventBus.emit("game:privateRoundCommitted", {
+                        matchId: params.matchId,
+                        roundNumber: params.roundNumber,
+                        player1Committed: !!commitRes?.player1Committed,
+                        player2Committed: !!commitRes?.player2Committed,
+                        bothCommitted: !!commitRes?.bothCommitted,
+                    });
+
+                    moveSubmittedRef.current = true;
+                    EventBus.emit("game:moveConfirmed", {
+                        player: params.playerRole,
+                        txId: commitRes?.onChainCommitTxHash,
+                        onChainTxHash: commitRes?.onChainCommitTxHash,
+                    });
+                }
+
+                if (!roundPlan.revealSubmitted) {
+                    try {
+                        await resolvePrivateRound(params.matchId, {
+                            address: params.address,
+                            roundNumber: params.roundNumber,
+                            move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
+                            surgeCardId: roundPlan.surgeCardId,
+                            proof: sharedRoundProof,
+                            publicInputs: proofPublicInputs,
+                            transcriptHash: nonce,
+                        });
+                        roundPlan.revealSubmitted = true;
+                    } catch (revealErr) {
+                        const revealMessage = revealErr instanceof Error ? revealErr.message : String(revealErr);
+                        if (/both players have not committed yet/i.test(revealMessage)) {
+                            console.log("[CharacterSelectClient] Private reveal deferred until both commits are present");
+                        } else {
+                            throw revealErr;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("[CharacterSelectClient] Private round commit/reveal failed:", err);
+                const errorMessage = err instanceof Error ? err.message : "Private round commit failed";
+                if (/ZK verification is enabled|ZK_VK_PATH|ZK_VERIFY_CMD/i.test(errorMessage)) {
+                    roundPlan.fatalError = "Backend ZK is not configured. Set ZK_VK_PATH or ZK_VK_BASE64 on the server.";
+                }
+                EventBus.emit("game:moveInFlight", {
+                    player: params.playerRole,
+                    cancelled: true,
+                });
+                EventBus.emit("game:moveError", {
+                    error: roundPlan.fatalError || errorMessage,
+                });
+            } finally {
+                roundPlan.inFlight = false;
+            }
+        };
+
         const handleSubmitMove = async (data: unknown) => {
             const payload = data as {
                 matchId: string;
@@ -744,6 +887,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 matchId: string;
                 moveType: string;
                 playerRole: string;
+                plannedMoves?: string[];
             };
 
             try {
@@ -751,6 +895,25 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 if (!address) return;
 
                 EventBus.emit("game:moveInFlight", { player: payload.playerRole });
+
+                if (PRIVATE_ROUNDS_ENABLED) {
+                    const roundNumber = currentRoundRef.current || 1;
+                    const plan = privateRoundPlansRef.current[roundNumber] || {};
+                    plan.moveType = payload.moveType;
+                    if (Array.isArray(payload.plannedMoves) && payload.plannedMoves.length > 0) {
+                        plan.plannedMoves = payload.plannedMoves as Array<"punch" | "kick" | "block" | "special" | "stunned">;
+                    }
+                    privateRoundPlansRef.current[roundNumber] = plan;
+
+                    await maybeCommitAndRevealPrivateRound({
+                        matchId: payload.matchId,
+                        playerRole: payload.playerRole,
+                        address,
+                        roundNumber,
+                    });
+
+                    return;
+                }
 
                 const signPayload = JSON.stringify({
                     type: "move",
@@ -896,7 +1059,51 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             moveSubmittedRef.current = false;
         };
 
+        const handlePrivateRoundStarting = (data: unknown) => {
+            const payload = data as { roundNumber?: number };
+            const roundNumber = Number(payload?.roundNumber ?? 1);
+            if (Number.isInteger(roundNumber) && roundNumber > 0) {
+                currentRoundRef.current = roundNumber;
+                if (!privateRoundPlansRef.current[roundNumber]) {
+                    privateRoundPlansRef.current[roundNumber] = {};
+                }
+            }
+            handleRoundStarting();
+        };
+
+        const handlePrivateRoundCommitEvent = async (data: unknown) => {
+            if (!PRIVATE_ROUNDS_ENABLED || !publicKey) return;
+
+            const payload = data as {
+                matchId?: string;
+                roundNumber?: number;
+                player1Committed?: boolean;
+                player2Committed?: boolean;
+                bothCommitted?: boolean;
+            };
+
+            const bothCommitted = !!payload?.bothCommitted
+                || (!!payload?.player1Committed && !!payload?.player2Committed);
+
+            if (!bothCommitted) return;
+
+            const roundNumber = Number(payload?.roundNumber ?? currentRoundRef.current ?? 1);
+            const plan = privateRoundPlansRef.current[roundNumber];
+            if (!plan?.commitSubmitted || plan.revealSubmitted || plan.inFlight) return;
+
+            await maybeCommitAndRevealPrivateRound({
+                matchId: payload?.matchId || matchId,
+                playerRole: sceneConfig.isHost ? "player1" : "player2",
+                address: publicKey,
+                roundNumber,
+            });
+        };
+
         const handleTimerExpired = async () => {
+            if (PRIVATE_ROUNDS_ENABLED) {
+                return;
+            }
+
             if (!publicKey) return;
 
             try {
@@ -1027,6 +1234,44 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             };
 
             try {
+                if (PRIVATE_ROUNDS_ENABLED) {
+                    const roundNumber = Number(payload.roundNumber || currentRoundRef.current || 1);
+                    const plan = privateRoundPlansRef.current[roundNumber] || {};
+                    plan.surgeCardId = payload.cardId;
+                    privateRoundPlansRef.current[roundNumber] = plan;
+
+                    const selectedPayload = {
+                        player: payload.playerRole,
+                        cardId: payload.cardId,
+                        roundNumber,
+                    };
+
+                    try {
+                        if (channelRef.current) {
+                            await channelRef.current.send({
+                                type: "broadcast",
+                                event: "power_surge_selected",
+                                payload: selectedPayload,
+                            });
+                        }
+                    } catch (broadcastErr) {
+                        console.warn("[CharacterSelectClient] Failed private power_surge_selected broadcast:", broadcastErr);
+                    }
+
+                    EventBus.emit("game:powerSurgeSelected", {
+                        ...selectedPayload,
+                    });
+
+                    await maybeCommitAndRevealPrivateRound({
+                        matchId: payload.matchId,
+                        playerRole: payload.playerRole,
+                        address: payload.playerAddress,
+                        roundNumber,
+                    });
+
+                    return;
+                }
+
                 const signPayload = JSON.stringify({
                     type: "power_surge",
                     matchId: payload.matchId,
@@ -1167,7 +1412,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         EventBus.on("request-cancel", handleCancelRequest);
         EventBus.on("game:timerExpired", handleTimerExpired);
         EventBus.on("game:claimTimeoutVictory", handleClaimTimeoutVictory);
-        EventBus.on("game:roundStarting", handleRoundStarting);
+        EventBus.on("game:roundStarting", handlePrivateRoundStarting);
+        EventBus.on("game:privateRoundCommitted", handlePrivateRoundCommitEvent);
         EventBus.on("character_select_ready", handleSceneReady);
 
         return () => {
@@ -1185,7 +1431,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             EventBus.off("request-cancel", handleCancelRequest);
             EventBus.off("game:timerExpired", handleTimerExpired);
             EventBus.off("game:claimTimeoutVictory", handleClaimTimeoutVictory);
-            EventBus.off("game:roundStarting", handleRoundStarting);
+            EventBus.off("game:roundStarting", handlePrivateRoundStarting);
+            EventBus.off("game:privateRoundCommitted", handlePrivateRoundCommitEvent);
             EventBus.off("character_select_ready", handleSceneReady);
         };
     }, [sceneConfig, matchId, publicKey]);

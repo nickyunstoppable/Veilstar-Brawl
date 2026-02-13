@@ -15,6 +15,7 @@ import {
     DAMAGE_MULTIPLIERS,
     GAME_CONSTANTS,
 } from "./game-types";
+export type { MoveType } from "./game-types";
 import type { PowerSurgeCardId } from "./power-surge";
 import {
     calculateSurgeEffects,

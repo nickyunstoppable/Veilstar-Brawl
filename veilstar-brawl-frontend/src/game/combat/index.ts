@@ -1,7 +1,24 @@
+/**
+ * Combat Module Exports
+ */
+
 export { CombatEngine } from "./CombatEngine";
 export { getCharacterCombatStats, CHARACTER_COMBAT_STATS } from "./CharacterStats";
-export { BASE_MOVE_STATS, COMBAT_CONSTANTS, RESOLUTION_MATRIX } from "./types";
-export type { CombatState, PlayerCombatState, TurnResult, PlayerTurnResult, MoveOutcome, TurnEffect, CharacterCombatStats } from "./types";
+export {
+    type CharacterCombatStats,
+    type CombatState,
+    type PlayerCombatState,
+    type TurnResult,
+    type PlayerTurnResult,
+    type MoveOutcome,
+    type TurnEffect,
+    type MoveStats,
+    BASE_MOVE_STATS,
+    COMBAT_CONSTANTS,
+    RESOLUTION_MATRIX,
+} from "./types";
+
+// Power Surge combat effects
 export {
     calculateSurgeEffects,
     applyDamageModifiers,
@@ -13,5 +30,7 @@ export {
     shouldStunOpponent,
     shouldBypassBlock,
     isBlockDisabled,
+    comparePriority,
+    type SurgeModifiers,
+    type SurgeEffectResult,
 } from "./SurgeEffects";
-export type { SurgeModifiers } from "./SurgeEffects";

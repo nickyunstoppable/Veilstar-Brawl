@@ -131,3 +131,24 @@ CREATE TABLE public.rounds (
   CONSTRAINT rounds_pkey PRIMARY KEY (id),
   CONSTRAINT rounds_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id)
 );
+
+CREATE TABLE public.round_private_commits (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL,
+  round_number integer NOT NULL CHECK (round_number >= 1),
+  player_address text NOT NULL,
+  commitment text NOT NULL,
+  encrypted_plan text,
+  proof_public_inputs jsonb,
+  transcript_hash text,
+  onchain_commit_tx_hash text,
+  verified_at timestamp with time zone,
+  resolved_at timestamp with time zone,
+  resolved_round_id uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT round_private_commits_pkey PRIMARY KEY (id),
+  CONSTRAINT round_private_commits_match_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
+  CONSTRAINT round_private_commits_resolved_round_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id),
+  CONSTRAINT round_private_commits_unique_player_round UNIQUE (match_id, round_number, player_address)
+);

@@ -14,6 +14,7 @@ import {
 } from "../../lib/stellar-contract";
 
 const USE_OFFCHAIN_ACTIONS = (process.env.ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 import {
   computeStunFlags,
   getOrCreateRoundDeck,
@@ -23,6 +24,13 @@ import {
 
 export async function handleGetPowerSurgeCards(matchId: string, req: Request): Promise<Response> {
   try {
+    if (PRIVATE_ROUNDS_ENABLED) {
+      return Response.json(
+        { error: "Legacy power surge cards endpoint is disabled when ZK_PRIVATE_ROUNDS=true." },
+        { status: 409 },
+      );
+    }
+
     const url = new URL(req.url);
     const address = url.searchParams.get("address") || "";
     const roundParam = url.searchParams.get("roundNumber") || url.searchParams.get("round") || "1";
@@ -103,6 +111,13 @@ export async function handleGetPowerSurgeCards(matchId: string, req: Request): P
 
 export async function handleSelectPowerSurge(matchId: string, req: Request): Promise<Response> {
   try {
+    if (PRIVATE_ROUNDS_ENABLED) {
+      return Response.json(
+        { error: "Legacy power surge selection is disabled when ZK_PRIVATE_ROUNDS=true. Include surge choice inside /zk/round/resolve." },
+        { status: 409 },
+      );
+    }
+
     const body = (await req.json()) as {
       address?: string;
       roundNumber?: number;
@@ -282,6 +297,13 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
 
 export async function handlePreparePowerSurge(matchId: string, req: Request): Promise<Response> {
   try {
+    if (PRIVATE_ROUNDS_ENABLED) {
+      return Response.json(
+        { error: "Legacy power surge prepare is disabled when ZK_PRIVATE_ROUNDS=true." },
+        { status: 409 },
+      );
+    }
+
     if (USE_OFFCHAIN_ACTIONS) {
       return Response.json(
         { error: "Off-chain action mode enabled; power-surge prepare is disabled" },

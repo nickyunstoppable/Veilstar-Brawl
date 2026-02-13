@@ -41,6 +41,16 @@ interface QueueStatusResponse {
     matchFound?: MatchFoundEvent;
 }
 
+interface MatchVerifyResponse {
+    match?: {
+        id: string;
+        status: string;
+        created_at?: string;
+    };
+}
+
+const ACTIVE_MATCH_STATUSES = new Set(["waiting", "character_select", "in_progress"]);
+
 async function parseJsonSafe<T>(response: Response): Promise<T | null> {
     const raw = await response.text();
     if (!raw) return null;
@@ -100,6 +110,7 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
     const matchHandledRef = useRef<string | null>(null);
     const navigationPendingRef = useRef(false);
     const isInQueueRef = useRef(false);
+    const joinAttemptStartedAtRef = useRef<number>(0);
 
     // Derived state
     const isInQueue = useMatchmakingStore(selectIsInQueue);
@@ -169,6 +180,38 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
                     console.warn(
                         "Match verification failed, will retry on next poll"
                     );
+                    matchHandledRef.current = null;
+                    navigationPendingRef.current = false;
+                    return;
+                }
+
+                const verifyData = await parseJsonSafe<MatchVerifyResponse>(verifyResponse);
+                const verifiedMatch = verifyData?.match;
+                const verifiedStatus = verifiedMatch?.status;
+                const verifiedCreatedAtMs = verifiedMatch?.created_at
+                    ? new Date(verifiedMatch.created_at).getTime()
+                    : null;
+
+                if (!verifiedMatch || !verifiedStatus || !ACTIVE_MATCH_STATUSES.has(verifiedStatus)) {
+                    console.warn("Verified match is not active, ignoring:", {
+                        matchId,
+                        status: verifiedStatus,
+                    });
+                    matchHandledRef.current = null;
+                    navigationPendingRef.current = false;
+                    return;
+                }
+
+                if (
+                    joinAttemptStartedAtRef.current > 0 &&
+                    verifiedCreatedAtMs !== null &&
+                    verifiedCreatedAtMs < joinAttemptStartedAtRef.current
+                ) {
+                    console.warn("Ignoring stale match created before this quick-match attempt:", {
+                        matchId,
+                        createdAt: verifiedMatch.created_at,
+                        joinedAt: new Date(joinAttemptStartedAtRef.current).toISOString(),
+                    });
                     matchHandledRef.current = null;
                     navigationPendingRef.current = false;
                     return;
@@ -297,6 +340,8 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
             // Reset stale guards from previous matchmaking attempts
             matchHandledRef.current = null;
             navigationPendingRef.current = false;
+            joinAttemptStartedAtRef.current = Date.now();
+            store.clearMatchResult();
 
             store.joinQueue();
 
@@ -365,6 +410,7 @@ export function useMatchmakingQueue(): UseMatchmakingQueueReturn {
 
         matchHandledRef.current = null;
         navigationPendingRef.current = false;
+        joinAttemptStartedAtRef.current = 0;
 
         try {
             const channel = channelRef.current;

@@ -79,6 +79,13 @@ function stringifyPublicInputs(publicInputs: unknown): string {
     return JSON.stringify(publicInputs);
 }
 
+function decodeMaybeBase64(value: unknown): Buffer | null {
+    if (typeof value !== "string") return null;
+    if (!value.startsWith("base64:")) return null;
+    const raw = value.slice("base64:".length);
+    return Buffer.from(raw, "base64");
+}
+
 export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerificationResult> {
     const verifyEnabled = (process.env.ZK_VERIFY_ENABLED ?? "true") !== "false";
     if (!verifyEnabled) {
@@ -105,8 +112,19 @@ export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerifi
     const publicInputsPath = join(workingDir, "public_inputs.json");
 
     try {
-        await writeFile(proofPath, payload.proof, "utf8");
-        await writeFile(publicInputsPath, stringifyPublicInputs(payload.publicInputs), "utf8");
+        const proofBytes = decodeMaybeBase64(payload.proof);
+        if (proofBytes) {
+            await writeFile(proofPath, proofBytes);
+        } else {
+            await writeFile(proofPath, payload.proof, "utf8");
+        }
+
+        const publicInputBytes = decodeMaybeBase64(payload.publicInputs);
+        if (publicInputBytes) {
+            await writeFile(publicInputsPath, publicInputBytes);
+        } else {
+            await writeFile(publicInputsPath, stringifyPublicInputs(payload.publicInputs), "utf8");
+        }
 
         const parsed = parseCommandLine(commandTemplate);
         if (parsed.length === 0) {
