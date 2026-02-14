@@ -25,7 +25,7 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id, status, format, player1_address, player2_address, player1_disconnected_at, player2_disconnected_at")
+            .select("id, status, format, player1_address, player2_address, player1_disconnected_at, player2_disconnected_at, onchain_session_id, onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -134,6 +134,10 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
                     match.player1_address,
                     match.player2_address,
                     winnerAddress,
+                    {
+                        sessionId: match.onchain_session_id ?? undefined,
+                        contractId: match.onchain_contract_id || undefined,
+                    },
                 );
                 onChainTxHash = onChainResult.txHash;
                 if (onChainResult.txHash) {
@@ -163,10 +167,10 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             },
             player1RoundsWon,
             player2RoundsWon,
-            onChainSessionId: matchIdToSessionId(matchId),
+            onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
             onChainTxHash,
             onChainSkippedReason,
-            contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "",
+            contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "",
         };
 
         await broadcastGameEvent(matchId, "match_ended", matchEndedPayload);

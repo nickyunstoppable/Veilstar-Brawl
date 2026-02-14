@@ -40,6 +40,7 @@ interface StakeGateState {
     opponentConfirmed: boolean;
     bothConfirmed: boolean;
     pendingRegistration: boolean;
+    stakeDeadlineAtMs?: number;
     isSubmitting: boolean;
     error: string | null;
 }
@@ -78,6 +79,28 @@ function toXlmDisplay(stroops: bigint): string {
     const xlm = Number(stroops) / STROOPS_PER_XLM;
     if (!Number.isFinite(xlm)) return "0";
     return xlm.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function getStakeFailureMessage(rawError: unknown): string {
+    const raw = String(rawError || "");
+
+    if (/txBadSeq|TRY_AGAIN_LATER|temporar|timeout|network failed|Sending the transaction to the network failed/i.test(raw)) {
+        return "Your transaction was not confirmed yet due to a network sequencing race. It is safe to retry: duplicate stake deposits are rejected on-chain, so you cannot be charged twice for the same player stake.";
+    }
+
+    if (/StakeAlreadyPaid|Contract,\s*#9/i.test(raw)) {
+        return "Your stake is already recorded on-chain. Waiting for the status to sync.";
+    }
+
+    if (/StakeNotConfigured|Contract,\s*#8/i.test(raw)) {
+        return "Stake setup is still syncing on-chain. Please retry in a moment.";
+    }
+
+    if (/MatchNotFound|Contract,\s*#1|registration not complete/i.test(raw)) {
+        return "Match registration is still finalizing on-chain. Please wait a few seconds and retry.";
+    }
+
+    return raw || "Stake transaction failed. It is safe to retry; duplicate deposits are blocked on-chain.";
 }
 
 async function waitForSubscribed(channel: RealtimeChannel, timeoutMs: number = 2500): Promise<boolean> {
@@ -131,6 +154,10 @@ function navigateTo(path: string) {
     window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+function localStakeConfirmedStorageKey(matchId: string, address: string): string {
+    return `vbb:stake_confirmed:${matchId}:${address}`;
+}
+
 export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: CharacterSelectClientProps) {
     const { publicKey, walletType, networkPassphrase } = useWallet();
     const {
@@ -140,6 +167,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     } = useOnChainRegistration();
     const [sceneConfig, setSceneConfig] = useState<CharacterSelectSceneConfig | null>(null);
     const [stakeGate, setStakeGate] = useState<StakeGateState | null>(null);
+    const [stakeClockNowMs, setStakeClockNowMs] = useState<number>(Date.now());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const channelRef = useRef<RealtimeChannel | null>(null);
@@ -161,6 +189,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const onExitRef = useRef(onExit);
     const registrationTriggeredRef = useRef(false);
     const registrationCompleteRef = useRef(false);
+    const localStakeConfirmedRef = useRef(false);
+    const stakeExpireTriggeredRef = useRef(false);
+    const stakeErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     useEffect(() => {
         onMatchEndRef.current = onMatchEnd;
         onExitRef.current = onExit;
@@ -169,7 +200,58 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     useEffect(() => {
         registrationTriggeredRef.current = false;
         registrationCompleteRef.current = false;
+        localStakeConfirmedRef.current = false;
+        stakeExpireTriggeredRef.current = false;
+
+        if (stakeErrorTimerRef.current) {
+            clearTimeout(stakeErrorTimerRef.current);
+            stakeErrorTimerRef.current = null;
+        }
     }, [matchId]);
+
+    useEffect(() => {
+        if (!stakeGate?.required || stakeGate.bothConfirmed) return;
+
+        const timer = setInterval(() => {
+            setStakeClockNowMs(Date.now());
+        }, 1000);
+
+        return () => clearInterval(timer);
+    }, [stakeGate?.bothConfirmed, stakeGate?.required]);
+
+    useEffect(() => {
+        if (!publicKey || !matchId) return;
+        try {
+            const raw = sessionStorage.getItem(localStakeConfirmedStorageKey(matchId, publicKey));
+            if (raw === "1") {
+                localStakeConfirmedRef.current = true;
+                setStakeGate((prev) => prev ? { ...prev, myConfirmed: true } : prev);
+            }
+        } catch {
+            // ignore sessionStorage access issues
+        }
+    }, [matchId, publicKey]);
+
+    useEffect(() => {
+        const stakeError = stakeGate?.error;
+        if (!stakeError) return;
+
+        if (stakeErrorTimerRef.current) {
+            clearTimeout(stakeErrorTimerRef.current);
+        }
+
+        stakeErrorTimerRef.current = setTimeout(() => {
+            setStakeGate((prev) => prev ? { ...prev, error: null } : prev);
+            stakeErrorTimerRef.current = null;
+        }, 10000);
+
+        return () => {
+            if (stakeErrorTimerRef.current) {
+                clearTimeout(stakeErrorTimerRef.current);
+                stakeErrorTimerRef.current = null;
+            }
+        };
+    }, [stakeGate?.error]);
 
     useEffect(() => {
         if (!publicKey || !stakeGate?.required || !stakeGate.pendingRegistration) return;
@@ -263,10 +345,16 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             const prepareJson = await prepareRes.json().catch(() => ({}));
 
             if (!prepareRes.ok) {
-                throw new Error(prepareJson?.error || "Failed to prepare stake deposit");
+                throw new Error(getStakeFailureMessage(prepareJson?.details || prepareJson?.error || "Failed to prepare stake deposit"));
             }
 
             if (prepareJson?.alreadyConfirmed) {
+                localStakeConfirmedRef.current = true;
+                try {
+                    sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+                } catch {
+                    // ignore
+                }
                 setStakeGate((prev) => prev
                     ? {
                         ...prev,
@@ -301,9 +389,15 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             const submitJson = await submitRes.json().catch(() => ({}));
 
             if (!submitRes.ok) {
-                throw new Error(submitJson?.details || submitJson?.error || "Failed to submit stake deposit");
+                throw new Error(getStakeFailureMessage(submitJson?.details || submitJson?.error || "Failed to submit stake deposit"));
             }
 
+            localStakeConfirmedRef.current = true;
+            try {
+                sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+            } catch {
+                // ignore
+            }
             setStakeGate((prev) => prev
                 ? {
                     ...prev,
@@ -328,6 +422,36 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         }
     }, [matchId, publicKey, signStakeAuthEntry, stakeGate]);
 
+    useEffect(() => {
+        if (!publicKey || !stakeGate?.required || stakeGate.bothConfirmed) return;
+
+        const deadlineAtMs = stakeGate.stakeDeadlineAtMs;
+        if (!deadlineAtMs || stakeClockNowMs < deadlineAtMs || stakeExpireTriggeredRef.current) return;
+
+        stakeExpireTriggeredRef.current = true;
+
+        fetch(`${API_BASE}/api/matches/${matchId}/stake/expire`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address: publicKey }),
+        })
+            .then((res) => res.json().catch(() => ({})))
+            .then((json) => {
+                if (json?.cancelled) {
+                    navigateTo("/play");
+                    return;
+                }
+
+                // If backend says deadline not reached yet (clock skew), allow retry trigger.
+                if (json?.reason === "deadline_not_reached") {
+                    stakeExpireTriggeredRef.current = false;
+                }
+            })
+            .catch(() => {
+                stakeExpireTriggeredRef.current = false;
+            });
+    }, [matchId, publicKey, stakeClockNowMs, stakeGate?.bothConfirmed, stakeGate?.required, stakeGate?.stakeDeadlineAtMs]);
+
     // Fetch match data and build scene config
     useEffect(() => {
         if (!matchId || !publicKey) return;
@@ -351,17 +475,30 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const opponentConfirmed = isHost
                     ? !!match.player2_stake_confirmed_at
                     : !!match.player1_stake_confirmed_at;
-                const bothConfirmed = myConfirmed && opponentConfirmed;
+                const effectiveMyConfirmed = localStakeConfirmedRef.current || myConfirmed;
+                const bothConfirmed = effectiveMyConfirmed && opponentConfirmed;
+                if (effectiveMyConfirmed) {
+                    localStakeConfirmedRef.current = true;
+                    try {
+                        sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+                    } catch {
+                        // ignore
+                    }
+                }
 
                 if (hasStake) {
+                    const deadlineAtMs = match.stake_deadline_at
+                        ? new Date(match.stake_deadline_at).getTime()
+                        : undefined;
                     setStakeGate({
                         required: true,
                         stakeAmountStroops: String(match.stake_amount_stroops),
                         feeBps: Number(match.stake_fee_bps || 10),
-                        myConfirmed,
+                        myConfirmed: effectiveMyConfirmed,
                         opponentConfirmed,
                         bothConfirmed,
                         pendingRegistration: !match.onchain_session_id,
+                        stakeDeadlineAtMs: deadlineAtMs,
                         isSubmitting: false,
                         error: null,
                     });
@@ -470,6 +607,17 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const myRole = sceneConfig.isHost ? "player1" : "player2";
                     const confirmedRole = data?.player;
 
+                    if (confirmedRole === myRole || !!data?.bothConfirmed) {
+                        localStakeConfirmedRef.current = true;
+                        if (publicKey) {
+                            try {
+                                sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    }
+
                     setStakeGate((prev) => {
                         if (!prev?.required) return prev;
                         const myConfirmed = prev.myConfirmed || confirmedRole === myRole;
@@ -487,6 +635,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     });
                 })
                 .on("broadcast", { event: "stake_ready" }, () => {
+                    localStakeConfirmedRef.current = true;
+                    if (publicKey) {
+                        try {
+                            sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+                        } catch {
+                            // ignore
+                        }
+                    }
                     setStakeGate((prev) => prev
                         ? {
                             ...prev,
@@ -674,24 +830,39 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const opponentConfirmed = myRole === "player1"
                         ? !!match.player2_stake_confirmed_at
                         : !!match.player1_stake_confirmed_at;
-                    const bothConfirmed = myConfirmed && opponentConfirmed;
+                    const effectiveMyConfirmed = localStakeConfirmedRef.current || myConfirmed;
+                    const bothConfirmed = effectiveMyConfirmed && opponentConfirmed;
+                    if (effectiveMyConfirmed) {
+                        localStakeConfirmedRef.current = true;
+                        try {
+                            sessionStorage.setItem(localStakeConfirmedStorageKey(matchId, publicKey), "1");
+                        } catch {
+                            // ignore
+                        }
+                    }
 
                     setStakeGate((prev) => prev
                         ? {
                             ...prev,
-                            myConfirmed,
+                            myConfirmed: prev.myConfirmed || effectiveMyConfirmed,
                             opponentConfirmed,
                             bothConfirmed,
                             pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
+                            stakeDeadlineAtMs: match.stake_deadline_at
+                                ? new Date(match.stake_deadline_at).getTime()
+                                : prev.stakeDeadlineAtMs,
                         }
                         : {
                             required: true,
                             stakeAmountStroops: String(match.stake_amount_stroops),
                             feeBps: Number(match.stake_fee_bps || 10),
-                            myConfirmed,
+                            myConfirmed: effectiveMyConfirmed,
                             opponentConfirmed,
                             bothConfirmed,
                             pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
+                            stakeDeadlineAtMs: match.stake_deadline_at
+                                ? new Date(match.stake_deadline_at).getTime()
+                                : undefined,
                             isSubmitting: false,
                             error: null,
                         },
@@ -1883,7 +2054,11 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const stakeAmountStroops = stakeGate?.required ? parseStroops(stakeGate.stakeAmountStroops) : 0n;
     const stakeFeeStroops = stakeGate?.required ? calcStakeFee(stakeAmountStroops, stakeGate.feeBps) : 0n;
     const requiredDepositStroops = stakeAmountStroops + stakeFeeStroops;
+    const myStakeConfirmed = !!stakeGate?.myConfirmed || localStakeConfirmedRef.current;
     const shouldBlockForStake = !!stakeGate?.required && !stakeGate.bothConfirmed;
+    const stakeTimeLeftSeconds = stakeGate?.stakeDeadlineAtMs
+        ? Math.max(0, Math.ceil((stakeGate.stakeDeadlineAtMs - stakeClockNowMs) / 1000))
+        : null;
 
     if (shouldBlockForStake) {
         return (
@@ -1907,8 +2082,13 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     </div>
 
                     <div className="space-y-2 mb-5 text-sm">
-                        <p className={stakeGate.myConfirmed ? "text-green-400" : "text-cyber-gray"}>
-                            {stakeGate.myConfirmed ? "✓" : "○"} Your stake confirmed
+                        {stakeTimeLeftSeconds !== null && (
+                            <p className="text-cyber-gray text-xs">
+                                Deposit window: <span className={stakeTimeLeftSeconds <= 10 ? "text-red-400" : "text-cyber-gold"}>{stakeTimeLeftSeconds}s</span>
+                            </p>
+                        )}
+                        <p className={myStakeConfirmed ? "text-green-400" : "text-cyber-gray"}>
+                            {myStakeConfirmed ? "✓" : "○"} Your stake confirmed
                         </p>
                         <p className={stakeGate.opponentConfirmed ? "text-green-400" : "text-cyber-gray"}>
                             {stakeGate.opponentConfirmed ? "✓" : "○"} Opponent stake confirmed
@@ -1929,16 +2109,35 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                     {stakeGate.error && (
                         <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 mb-4">
-                            <p className="text-red-400 text-sm">{stakeGate.error}</p>
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <p className="text-red-400 text-sm font-orbitron">TRANSACTION ERROR</p>
+                                    <p className="text-red-300 text-xs mt-1 break-words">{stakeGate.error}</p>
+                                    <p className="text-cyber-gray text-[11px] mt-2">This message auto-hides in ~10s.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setStakeGate((prev) => prev ? { ...prev, error: null } : prev)}
+                                    className="text-cyber-gray hover:text-white text-xs border border-white/10 rounded-md px-2 py-1"
+                                >
+                                    DISMISS
+                                </button>
+                            </div>
                         </div>
                     )}
 
+                    <div className="bg-cyber-blue/10 border border-cyber-blue/30 rounded-xl p-3 mb-4">
+                        <p className="text-cyber-blue text-xs">
+                            If a stake transaction fails or times out, retrying is safe. The contract blocks duplicate stake deposits for the same player, so you cannot pay twice for one match.
+                        </p>
+                    </div>
+
                     <button
                         onClick={handleSubmitStakeDeposit}
-                        disabled={stakeGate.isSubmitting || stakeGate.myConfirmed || stakeGate.pendingRegistration}
+                        disabled={stakeGate.isSubmitting || myStakeConfirmed || stakeGate.pendingRegistration}
                         className="w-full bg-gradient-cyber text-white border-0 font-orbitron hover:opacity-90 py-3 rounded-xl text-sm disabled:opacity-50"
                     >
-                        {stakeGate.myConfirmed
+                        {myStakeConfirmed
                             ? (stakeGate.opponentConfirmed ? "WAITING FOR MATCH..." : "WAITING FOR OPPONENT...")
                             : stakeGate.isSubmitting
                                 ? "AWAITING WALLET CONFIRMATION..."

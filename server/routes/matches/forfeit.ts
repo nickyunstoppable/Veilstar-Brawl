@@ -149,6 +149,10 @@ export async function handleForfeit(
                     match.player1_address,
                     match.player2_address,
                     winnerAddress,
+                    {
+                        sessionId: match.onchain_session_id ?? undefined,
+                        contractId: match.onchain_contract_id || undefined,
+                    },
                 );
                 onChainTxHash = onChainResult.txHash;
                 if (onChainResult.txHash) {
@@ -185,10 +189,10 @@ export async function handleForfeit(
             player1RoundsWon: p1RoundsWon,
             player2RoundsWon: p2RoundsWon,
             ratingChanges,
-            onChainSessionId: matchIdToSessionId(matchId),
+            onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
             onChainTxHash,
             onChainSkippedReason,
-            contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
+            contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
         });
 
         return Response.json({ success: true, forfeited: true });

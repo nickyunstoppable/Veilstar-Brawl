@@ -71,6 +71,7 @@ CREATE TABLE public.matches (
   protocol_fee_stroops text,
   onchain_session_id integer,
   onchain_tx_hash text,
+  onchain_contract_id text,
   CONSTRAINT matches_pkey PRIMARY KEY (id),
   CONSTRAINT matches_player1_fkey FOREIGN KEY (player1_address) REFERENCES public.players(address),
   CONSTRAINT matches_winner_fkey FOREIGN KEY (winner_address) REFERENCES public.players(address)

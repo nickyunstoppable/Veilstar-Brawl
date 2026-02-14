@@ -62,6 +62,9 @@ pub enum Error {
     StakeAlreadyPaid = 9,
     StakeNotPaid = 10,
     SweepTooEarly = 11,
+    StakeDepositExpired = 12,
+    DeadlineNotReached = 13,
+    MatchCancelled = 14,
 }
 
 // ==========================================================================
@@ -94,9 +97,11 @@ pub struct Match {
     pub total_xlm_collected: i128,
     pub stake_amount_stroops: i128,
     pub stake_fee_bps: u32,
+    pub stake_deadline_ts: u64,
     pub player1_stake_paid: bool,
     pub player2_stake_paid: bool,
     pub fee_accrued_stroops: i128,
+    pub is_cancelled: bool,
     pub winner: Option<Address>,
 }
 
@@ -130,6 +135,9 @@ const STAKE_FEE_BPS: u32 = 10;
 
 /// 24h sweep interval.
 const FEE_SWEEP_INTERVAL_SECONDS: u64 = 86_400;
+
+/// 60s stake deposit window after stake is configured.
+const STAKE_DEPOSIT_WINDOW_SECONDS: u64 = 60;
 
 // ==========================================================================
 // Contract
@@ -221,9 +229,11 @@ impl VeilstarBrawlContract {
             total_xlm_collected: 0,
             stake_amount_stroops: 0,
             stake_fee_bps: STAKE_FEE_BPS,
+            stake_deadline_ts: 0,
             player1_stake_paid: false,
             player2_stake_paid: false,
             fee_accrued_stroops: 0,
+            is_cancelled: false,
             winner: None,
         };
 
@@ -255,6 +265,10 @@ impl VeilstarBrawlContract {
 
         if m.winner.is_some() {
             return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
         }
 
         // Verify caller is a participant
@@ -316,6 +330,10 @@ impl VeilstarBrawlContract {
             return Err(Error::MatchAlreadyEnded);
         }
 
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
         // Verify caller is a participant
         let is_p1 = player == m.player1;
         let is_p2 = player == m.player2;
@@ -372,6 +390,10 @@ impl VeilstarBrawlContract {
 
         if m.winner.is_some() {
             return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
         }
 
         let winner = if player1_won {
@@ -456,6 +478,7 @@ impl VeilstarBrawlContract {
 
         m.stake_amount_stroops = stake_amount_stroops;
         m.stake_fee_bps = STAKE_FEE_BPS;
+        m.stake_deadline_ts = env.ledger().timestamp().saturating_add(STAKE_DEPOSIT_WINDOW_SECONDS);
 
         env.storage().temporary().set(&key, &m);
         env.storage()
@@ -479,6 +502,14 @@ impl VeilstarBrawlContract {
 
         if m.stake_amount_stroops <= 0 {
             return Err(Error::StakeNotConfigured);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        if m.stake_deadline_ts > 0 && env.ledger().timestamp() > m.stake_deadline_ts {
+            return Err(Error::StakeDepositExpired);
         }
 
         let is_p1 = player == m.player1;
@@ -512,6 +543,143 @@ impl VeilstarBrawlContract {
         env.storage()
             .temporary()
             .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        Ok(())
+    }
+
+    /// Expire stake deposit window and cancel the match.
+    /// - If both deposits are missing: cancel without transfers.
+    /// - If exactly one player deposited: refund full deposited amount (stake + fee) to that player.
+    pub fn expire_stake(env: Env, session_id: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        if m.stake_amount_stroops <= 0 {
+            return Err(Error::StakeNotConfigured);
+        }
+
+        if m.stake_deadline_ts == 0 || env.ledger().timestamp() < m.stake_deadline_ts {
+            return Err(Error::DeadlineNotReached);
+        }
+
+        if m.player1_stake_paid ^ m.player2_stake_paid {
+            let xlm_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::XlmToken)
+                .expect("XLM token not set");
+            let xlm = token::Client::new(&env, &xlm_addr);
+
+            let refund_fee = Self::calc_fee(m.stake_amount_stroops, m.stake_fee_bps);
+            let refund_amount = m.stake_amount_stroops + refund_fee;
+            let refund_to = if m.player1_stake_paid {
+                m.player1.clone()
+            } else {
+                m.player2.clone()
+            };
+
+            xlm.transfer(&env.current_contract_address(), &refund_to, &refund_amount);
+        }
+
+        m.player1_stake_paid = false;
+        m.player2_stake_paid = false;
+        m.is_cancelled = true;
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        let hub_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GameHubAddress)
+            .expect("GameHub not set");
+        let hub = GameHubClient::new(&env, &hub_addr);
+        hub.end_game(&session_id, &false);
+
+        Ok(())
+    }
+
+    /// Cancel an active match and refund any paid stakes.
+    /// Intended for abandonment/disconnect cancellation.
+    pub fn cancel_match(env: Env, session_id: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        if m.stake_amount_stroops > 0 {
+            let xlm_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::XlmToken)
+                .expect("XLM token not set");
+            let xlm = token::Client::new(&env, &xlm_addr);
+
+            let refund_fee = Self::calc_fee(m.stake_amount_stroops, m.stake_fee_bps);
+            let refund_amount = m.stake_amount_stroops + refund_fee;
+
+            if m.player1_stake_paid {
+                xlm.transfer(&env.current_contract_address(), &m.player1, &refund_amount);
+            }
+            if m.player2_stake_paid {
+                xlm.transfer(&env.current_contract_address(), &m.player2, &refund_amount);
+            }
+        }
+
+        m.player1_stake_paid = false;
+        m.player2_stake_paid = false;
+        m.is_cancelled = true;
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        let hub_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GameHubAddress)
+            .expect("GameHub not set");
+        let hub = GameHubClient::new(&env, &hub_addr);
+        hub.end_game(&session_id, &false);
 
         Ok(())
     }

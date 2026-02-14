@@ -432,6 +432,10 @@ export async function resolveTurn(
                         match.player1_address,
                         match.player2_address,
                         winnerAddr,
+                        {
+                            sessionId: match.onchain_session_id ?? undefined,
+                            contractId: match.onchain_contract_id || undefined,
+                        },
                     );
                     onChainTxHash = onChainResult.txHash;
                     console.log(`[CombatResolver] On-chain result reported: ${onChainResult.success ? 'OK' : 'FAILED'}`, onChainResult.txHash || onChainResult.error || '');
@@ -466,10 +470,10 @@ export async function resolveTurn(
                 player2RoundsWon: p2RoundsWon,
                 reason: "knockout",
                 ratingChanges: eloChanges ?? undefined,
-                onChainSessionId: matchIdToSessionId(matchId),
+                onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
                 onChainTxHash,
                 onChainSkippedReason,
-                contractId: process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
+                contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
         } else if (roundOver) {
             // Broadcast round end, then next round start after delay

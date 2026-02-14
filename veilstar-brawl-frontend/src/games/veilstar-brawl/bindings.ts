@@ -21,19 +21,7 @@ import type {
   Timepoint,
   Duration,
 } from "@stellar/stellar-sdk/contract";
-export {
-  Address,
-  Asset,
-  Keypair,
-  Networks,
-  Operation,
-  StrKey,
-  Transaction,
-  TransactionBuilder,
-  nativeToScVal,
-  scValToNative,
-  xdr,
-} from "@stellar/stellar-sdk";
+export * from "@stellar/stellar-sdk";
 export * as contract from "@stellar/stellar-sdk/contract";
 export * as rpc from "@stellar/stellar-sdk/rpc";
 
@@ -46,7 +34,7 @@ if (typeof window !== "undefined") {
 export const networks = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
-    contractId: "CDPVFSIY2GIU2MIJFJLNASJPCG4UMSYDJEQSSCMKGCHBH2GYHZS5KYOM",
+    contractId: "CDVWJMGCR5B3MFVDN6UBYAVRDX7PPL7POLDIZ2PTNYDNH6LYZG5LTCLB",
   }
 } as const
 
@@ -61,12 +49,16 @@ export const Errors = {
   8: {message:"StakeNotConfigured"},
   9: {message:"StakeAlreadyPaid"},
   10: {message:"StakeNotPaid"},
-  11: {message:"SweepTooEarly"}
+  11: {message:"SweepTooEarly"},
+  12: {message:"StakeDepositExpired"},
+  13: {message:"DeadlineNotReached"},
+  14: {message:"MatchCancelled"}
 }
 
 
 export interface Match {
   fee_accrued_stroops: i128;
+  is_cancelled: boolean;
   player1: string;
   player1_moves: u32;
   player1_points: i128;
@@ -76,6 +68,7 @@ export interface Match {
   player2_points: i128;
   player2_stake_paid: boolean;
   stake_amount_stroops: i128;
+  stake_deadline_ts: u64;
   stake_fee_bps: u32;
   total_xlm_collected: i128;
   winner: Option<string>;
@@ -140,6 +133,21 @@ export interface Client {
    * Record a combat move on-chain and collect 0.0001 XLM from the player.
    */
   submit_move: ({session_id, player, move_type, turn}: {session_id: u32, player: string, move_type: MoveType, turn: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a cancel_match transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Cancel an active match and refund any paid stakes.
+   * Intended for abandonment/disconnect cancellation.
+   */
+  cancel_match: ({session_id}: {session_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a expire_stake transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Expire stake deposit window and cancel the match.
+   * - If both deposits are missing: cancel without transfers.
+   * - If exactly one player deposited: refund full deposited amount (stake + fee) to that player.
+   */
+  expire_stake: ({session_id}: {session_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
    * Construct and simulate a get_treasury transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -207,8 +215,8 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACwAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAGAAAAAAAAAAxJbnZhbGlkU3Rha2UAAAAHAAAAAAAAABJTdGFrZU5vdENvbmZpZ3VyZWQAAAAAAAgAAAAAAAAAEFN0YWtlQWxyZWFkeVBhaWQAAAAJAAAAAAAAAAxTdGFrZU5vdFBhaWQAAAAKAAAAAAAAAA1Td2VlcFRvb0Vhcmx5AAAAAAAACw==",
-        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAADQAAAAAAAAATZmVlX2FjY3J1ZWRfc3Ryb29wcwAAAAALAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADXBsYXllcjFfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMV9zdGFrZV9wYWlkAAAAAAABAAAAAAAAAAdwbGF5ZXIyAAAAABMAAAAAAAAADXBsYXllcjJfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIyX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMl9zdGFrZV9wYWlkAAAAAAABAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAAAAAAADXN0YWtlX2ZlZV9icHMAAAAAAAAEAAAAAAAAABN0b3RhbF94bG1fY29sbGVjdGVkAAAAAAsAAAAAAAAABndpbm5lcgAAAAAD6AAAABM=",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAADgAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAGAAAAAAAAAAxJbnZhbGlkU3Rha2UAAAAHAAAAAAAAABJTdGFrZU5vdENvbmZpZ3VyZWQAAAAAAAgAAAAAAAAAEFN0YWtlQWxyZWFkeVBhaWQAAAAJAAAAAAAAAAxTdGFrZU5vdFBhaWQAAAAKAAAAAAAAAA1Td2VlcFRvb0Vhcmx5AAAAAAAACwAAAAAAAAATU3Rha2VEZXBvc2l0RXhwaXJlZAAAAAAMAAAAAAAAABJEZWFkbGluZU5vdFJlYWNoZWQAAAAAAA0AAAAAAAAADk1hdGNoQ2FuY2VsbGVkAAAAAAAO",
+        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAADwAAAAAAAAATZmVlX2FjY3J1ZWRfc3Ryb29wcwAAAAALAAAAAAAAAAxpc19jYW5jZWxsZWQAAAABAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADXBsYXllcjFfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMV9zdGFrZV9wYWlkAAAAAAABAAAAAAAAAAdwbGF5ZXIyAAAAABMAAAAAAAAADXBsYXllcjJfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIyX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMl9zdGFrZV9wYWlkAAAAAAABAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAAAAAAAEXN0YWtlX2RlYWRsaW5lX3RzAAAAAAAABgAAAAAAAAANc3Rha2VfZmVlX2JwcwAAAAAAAAQAAAAAAAAAE3RvdGFsX3hsbV9jb2xsZWN0ZWQAAAAACwAAAAAAAAAGd2lubmVyAAAAAAPoAAAAEw==",
         "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAABwAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAA9UcmVhc3VyeUFkZHJlc3MAAAAAAAAAAAAAAAAIWGxtVG9rZW4AAAAAAAAAAAAAAApGZWVBY2NydWVkAAAAAAAAAAAAAAAAAAtMYXN0U3dlZXBUcwA=",
         "AAAAAwAAAAAAAAAAAAAACE1vdmVUeXBlAAAABAAAAAAAAAAFUHVuY2gAAAAAAAAAAAAAAAAAAARLaWNrAAAAAQAAAAAAAAAFQmxvY2sAAAAAAAACAAAAAAAAAAdTcGVjaWFsAAAAAAM=",
         "AAAAAAAAAAAAAAAHZ2V0X2h1YgAAAAAAAAAAAQAAABM=",
@@ -220,6 +228,8 @@ export class Client extends ContractClient {
         "AAAAAAAAAAAAAAAJc2V0X2FkbWluAAAAAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
         "AAAAAAAAADFTdGFydCBhIG5ldyBnYW1lIOKAkyBjYWxscyBHYW1lIEh1YiBgc3RhcnRfZ2FtZWAuAAAAAAAACnN0YXJ0X2dhbWUAAAAAAAUAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAAB3BsYXllcjEAAAAAEwAAAAAAAAAHcGxheWVyMgAAAAATAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAOcGxheWVyMl9wb2ludHMAAAAAAAsAAAABAAAD6QAAAAIAAAAD",
         "AAAAAAAAAEVSZWNvcmQgYSBjb21iYXQgbW92ZSBvbi1jaGFpbiBhbmQgY29sbGVjdCAwLjAwMDEgWExNIGZyb20gdGhlIHBsYXllci4AAAAAAAALc3VibWl0X21vdmUAAAAABAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAltb3ZlX3R5cGUAAAAAAAfQAAAACE1vdmVUeXBlAAAAAAAAAAR0dXJuAAAABAAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAGRDYW5jZWwgYW4gYWN0aXZlIG1hdGNoIGFuZCByZWZ1bmQgYW55IHBhaWQgc3Rha2VzLgpJbnRlbmRlZCBmb3IgYWJhbmRvbm1lbnQvZGlzY29ubmVjdCBjYW5jZWxsYXRpb24uAAAADGNhbmNlbF9tYXRjaAAAAAEAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAMlFeHBpcmUgc3Rha2UgZGVwb3NpdCB3aW5kb3cgYW5kIGNhbmNlbCB0aGUgbWF0Y2guCi0gSWYgYm90aCBkZXBvc2l0cyBhcmUgbWlzc2luZzogY2FuY2VsIHdpdGhvdXQgdHJhbnNmZXJzLgotIElmIGV4YWN0bHkgb25lIHBsYXllciBkZXBvc2l0ZWQ6IHJlZnVuZCBmdWxsIGRlcG9zaXRlZCBhbW91bnQgKHN0YWtlICsgZmVlKSB0byB0aGF0IHBsYXllci4AAAAAAAAMZXhwaXJlX3N0YWtlAAAAAQAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAEAAAPpAAAAAgAAAAM=",
         "AAAAAAAAAAAAAAAMZ2V0X3RyZWFzdXJ5AAAAAAAAAAEAAAAT",
         "AAAAAAAAAAAAAAAMc2V0X3RyZWFzdXJ5AAAAAQAAAAAAAAAMbmV3X3RyZWFzdXJ5AAAAEwAAAAA=",
         "AAAAAAAAAPJJbml0aWFsaXNlIHRoZSBjb250cmFjdC4KCiMgQXJndW1lbnRzCiogYGFkbWluYCAgICAg4oCTIGFkbWluIHdhbGxldCAoY2FuIHN3ZWVwLCB1cGdyYWRlLCBldGMuKQoqIGBnYW1lX2h1YmAgIOKAkyBHYW1lIEh1YiBjb250cmFjdCBhZGRyZXNzCiogYHRyZWFzdXJ5YCAg4oCTIHdhbGxldCB0aGF0IHJlY2VpdmVzIHN3ZXB0IFhMTQoqIGB4bG1fdG9rZW5gIOKAkyBTQUMgY29udHJhY3QgYWRkcmVzcyBmb3IgbmF0aXZlIFhMTQAAAAAADV9fY29uc3RydWN0b3IAAAAAAAAEAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAACGdhbWVfaHViAAAAEwAAAAAAAAAIdHJlYXN1cnkAAAATAAAAAAAAAAl4bG1fdG9rZW4AAAAAAAATAAAAAA==",
@@ -242,6 +252,8 @@ export class Client extends ContractClient {
         set_admin: this.txFromJSON<null>,
         start_game: this.txFromJSON<Result<void>>,
         submit_move: this.txFromJSON<Result<void>>,
+        cancel_match: this.txFromJSON<Result<void>>,
+        expire_stake: this.txFromJSON<Result<void>>,
         get_treasury: this.txFromJSON<string>,
         set_treasury: this.txFromJSON<null>,
         deposit_stake: this.txFromJSON<Result<void>>,

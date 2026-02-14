@@ -9,7 +9,7 @@ import { handleJoinQueue, handleQueueStatus, handleLeaveQueue } from "./routes/m
 import { handleCreateRoom, handleJoinRoom } from "./routes/matchmaking/rooms";
 import { handleGetMatch } from "./routes/matches/match";
 import { handlePrepareMoveOnChain, handleSubmitMove } from "./routes/matches/move";
-import { handlePrepareStakeDeposit, handleSubmitStakeDeposit } from "./routes/matches/stake";
+import { handleExpireStakeDepositWindow, handlePrepareStakeDeposit, handleSubmitStakeDeposit } from "./routes/matches/stake";
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleSubmitBan } from "./routes/matches/ban";
 import { handleForfeit } from "./routes/matches/forfeit";
@@ -30,6 +30,7 @@ import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 import { handleSweepFeesCron } from "./routes/cron/sweep-fees";
+import { startAbandonmentMonitor } from "./lib/abandonment-monitor";
 import { ensureEnvLoaded } from "./lib/env";
 
 ensureEnvLoaded();
@@ -174,6 +175,11 @@ async function handleRequest(req: Request): Promise<Response> {
             return corsResponse(await handleSubmitStakeDeposit(matchId, req), req);
         }
 
+        // POST /api/matches/:matchId/stake/expire
+        if (pathname === `/api/matches/${matchId}/stake/expire` && method === "POST") {
+            return corsResponse(await handleExpireStakeDepositWindow(matchId, req), req);
+        }
+
         // POST /api/matches/:matchId/move/prepare
         if (pathname === `/api/matches/${matchId}/move/prepare` && method === "POST") {
             return corsResponse(await handlePrepareMoveOnChain(matchId, req), req);
@@ -305,3 +311,5 @@ const server = Bun.serve({
 });
 
 console.log(`Server running on http://localhost:${server.port}`);
+
+startAbandonmentMonitor();

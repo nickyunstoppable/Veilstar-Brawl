@@ -13,6 +13,7 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
 import {
+    getConfiguredContractId,
     isOnChainRegistrationConfigured,
     matchIdToSessionId,
     prepareRegistration,
@@ -171,6 +172,7 @@ export async function handlePrepareRegistration(
                     .update({
                         onchain_session_id: result.sessionId,
                         onchain_tx_hash: result.txHash || null,
+                        onchain_contract_id: getConfiguredContractId() || null,
                     })
                     .eq("id", matchId);
             }
@@ -371,6 +373,7 @@ export async function handleSubmitAuth(
                 .update({
                     onchain_session_id: result.sessionId,
                     onchain_tx_hash: result.txHash || null,
+                    onchain_contract_id: getConfiguredContractId() || null,
                 })
                 .eq("id", matchId);
         }
