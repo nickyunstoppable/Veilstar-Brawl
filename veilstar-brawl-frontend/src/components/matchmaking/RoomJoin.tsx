@@ -76,62 +76,93 @@ export default function RoomJoin({ onJoined, onCancel }: RoomJoinProps) {
   };
 
   return (
-    <div className="w-full max-w-md bg-black/60 border border-cyber-orange/30 rounded-[20px] p-8">
-      <h2 className="text-2xl font-bold text-white font-orbitron mb-2">JOIN PRIVATE ROOM</h2>
-      <p className="text-cyber-gray text-sm mb-6">Enter the room code shared by your opponent.</p>
-
-      <div className="space-y-2 mb-5">
-        <label className="block text-cyber-gray text-xs font-orbitron">ROOM CODE</label>
-        <input
-          type="text"
-          value={roomCode}
-          onChange={(e) => handleCodeChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && roomCode.length === 6) {
-              handleJoinRoom();
-            }
-          }}
-          className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-white font-mono uppercase tracking-widest text-center text-lg focus:border-cyber-orange/50 focus:outline-none transition-colors"
-          placeholder="XXXXXX"
-          autoComplete="off"
-          maxLength={6}
-          autoFocus
-        />
-        <p className="text-cyber-gray text-xs text-right">{roomCode.length}/6</p>
+    <div className="w-full max-w-md bg-[#050505]/95 border border-cyber-gold/20 backdrop-blur-md rounded-2xl shadow-2xl flex flex-col gap-6 py-8">
+      <div className="text-center px-8 border-b border-white/5 pb-6">
+        <h2 className="text-xl sm:text-2xl font-bold font-orbitron text-cyber-gold tracking-wide">
+          JOIN PRIVATE ROOM
+        </h2>
+        <p className="text-gray-400 text-sm mt-2 font-medium">
+          Enter the room code shared by your opponent
+        </p>
       </div>
 
-      {stakePreview && (
-        <div className="bg-cyber-gold/10 border border-cyber-gold/30 rounded-xl p-3 mb-4 text-center">
-          <p className="text-cyber-gold font-orbitron font-bold">Stake required: {stakePreview.toFixed(3).replace(/\.000$/, "")} XLM</p>
-          <p className="text-green-400 text-xs mt-1">Winner payout: {(stakePreview * 2).toFixed(3).replace(/\.000$/, "")} XLM</p>
+      <div className="px-8">
+        {/* Room Code Input */}
+        <div>
+          <label className="text-xs text-gray-500 block mb-2 ml-1 uppercase tracking-widest font-bold font-orbitron">
+            Room Code
+          </label>
+          <input
+            type="text"
+            value={roomCode}
+            onChange={(e) => handleCodeChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && roomCode.length === 6) {
+                handleJoinRoom();
+              }
+            }}
+            className="w-full bg-[#0A0A0A] border-2 border-gray-800 focus:border-cyber-gold rounded-xl px-4 py-5 text-center text-4xl font-bold font-orbitron text-white tracking-[0.3em] placeholder:text-gray-800 focus:outline-none transition-all duration-300 shadow-inner"
+            placeholder="XXXXXX"
+            autoComplete="off"
+            maxLength={6}
+            autoFocus
+          />
+          <p className="text-xs text-gray-600 text-center font-mono mt-2">
+            {roomCode.length}/6 characters
+          </p>
         </div>
-      )}
 
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 mb-4">
-          <p className="text-red-400 text-sm">{error}</p>
+        {/* Stake Preview (shown when joining a staked room) */}
+        {stakePreview && (
+          <div className="mt-8 bg-[#051105] border border-green-900/50 rounded-md p-4 text-center animate-in fade-in slide-in-from-top-4">
+            <span className="text-gray-400 text-sm">Total Prize Pool: </span>
+            <span className="text-lg font-bold text-green-500 font-orbitron">
+              {(stakePreview * 2).toFixed(3).replace(/\.000$/, "")} XLM
+            </span>
+            <p className="text-xs text-gray-500 mt-1">
+              Requires {stakePreview.toFixed(3).replace(/\.000$/, "")} XLM Stake
+            </p>
+          </div>
+        )}
+
+        {/* Error Display */}
+        {error && (
+          <div className="mt-6 bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-center">
+            <p className="text-red-400 text-sm font-medium">{error}</p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="pt-8">
+          <button
+            onClick={handleJoinRoom}
+            disabled={!isConnected || isJoining || roomCode.length !== 6}
+            className="w-full bg-gradient-to-r from-[#FFB800] to-[#E03609] text-black font-black tracking-widest font-orbitron hover:brightness-110 py-4 rounded-md text-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(255,184,0,0.2)] hover:shadow-[0_0_30px_rgba(255,184,0,0.4)] transition-all duration-300"
+          >
+            {isJoining ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin"></span>
+                JOINING...
+              </span>
+            ) : (
+              "JOIN ROOM"
+            )}
+          </button>
+
+          <button
+            onClick={onCancel}
+            className="w-full mt-6 bg-black text-white hover:bg-emerald-600 hover:text-white border border-gray-800 hover:border-emerald-500 py-3 rounded-md transition-all duration-200 text-sm font-orbitron tracking-wider uppercase font-bold"
+          >
+            Back
+          </button>
         </div>
-      )}
 
-      <div className="space-y-3">
-        <button
-          onClick={handleJoinRoom}
-          disabled={!isConnected || isJoining || roomCode.length !== 6}
-          className="w-full bg-gradient-cyber text-white border-0 font-orbitron hover:opacity-90 py-3 rounded-xl text-sm disabled:opacity-50"
-        >
-          {isJoining ? "JOINING..." : "JOIN ROOM"}
-        </button>
-        <button
-          onClick={onCancel}
-          className="w-full bg-transparent border border-white/10 text-cyber-gray font-orbitron hover:bg-white/5 py-3 rounded-xl transition-all text-sm"
-        >
-          BACK
-        </button>
+        {!isConnected && (
+          <p className="text-center text-xs text-yellow-500/80 font-medium mt-6">
+            Connect your wallet to join a room
+          </p>
+        )}
       </div>
-
-      {!isConnected && (
-        <p className="text-center text-yellow-400 text-xs mt-4">Connect your wallet to join a room.</p>
-      )}
     </div>
   );
 }
