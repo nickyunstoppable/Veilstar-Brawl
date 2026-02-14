@@ -61,7 +61,7 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
         const supabase = getSupabase();
         const { data: match, error } = await supabase
             .from("matches")
-            .select("id, status, player1_address, player2_address, player1_rounds_won, player2_rounds_won, onchain_session_id, onchain_contract_id")
+            .select("id, status, room_code, player1_address, player2_address, player1_rounds_won, player2_rounds_won, onchain_session_id, onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -198,6 +198,7 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 reason: "zk_proof",
                 player1RoundsWon: match.player1_rounds_won,
                 player2RoundsWon: match.player2_rounds_won,
+                isPrivateRoom: !!match.room_code,
                 onChainSessionId: onChainSessionId ?? matchIdToSessionId(matchId),
                 onChainTxHash,
                 zkProofSubmitted: true,

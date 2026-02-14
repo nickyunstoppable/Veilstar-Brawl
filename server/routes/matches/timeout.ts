@@ -27,7 +27,7 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id, status, format, player1_address, player2_address, player1_disconnected_at, player2_disconnected_at, onchain_session_id, onchain_contract_id")
+            .select("id, status, format, room_code, player1_address, player2_address, player1_disconnected_at, player2_disconnected_at, onchain_session_id, onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -176,6 +176,7 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             },
             player1RoundsWon,
             player2RoundsWon,
+            isPrivateRoom: !!match.room_code,
             onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
             onChainTxHash,
             onChainSkippedReason,

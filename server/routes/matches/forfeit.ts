@@ -91,6 +91,8 @@ export async function handleForfeit(
             })
             .eq("id", matchId);
 
+        const isPrivateRoom = !!match.room_code;
+
         // Update Elo
         let ratingChanges: {
             winner: { before: number; after: number; change: number };
@@ -109,7 +111,9 @@ export async function handleForfeit(
             .eq("address", winnerAddress)
             .single();
 
-        if (forfeitingPlayer && winningPlayer) {
+        if (isPrivateRoom) {
+            console.log(`[Forfeit] Skipping Elo update for private room match=${matchId}`);
+        } else if (forfeitingPlayer && winningPlayer) {
             const { winnerChange, loserChange } = calculateEloChange(
                 winningPlayer.rating,
                 forfeitingPlayer.rating
@@ -195,6 +199,7 @@ export async function handleForfeit(
             player1RoundsWon: p1RoundsWon,
             player2RoundsWon: p2RoundsWon,
             ratingChanges,
+            isPrivateRoom,
             onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
             onChainTxHash,
             onChainSkippedReason,

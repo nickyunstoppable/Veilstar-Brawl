@@ -22,6 +22,7 @@ export interface ResultsSceneData {
         winner: { before: number; after: number; change: number };
         loser: { before: number; after: number; change: number };
     };
+    isPrivateRoom?: boolean;
     onChainSessionId?: number;
     onChainTxHash?: string;
     contractId?: string;
@@ -37,6 +38,10 @@ export class ResultsScene extends Scene {
 
     constructor() {
         super("ResultsScene");
+    }
+
+    private shouldShowRatingChanges(): boolean {
+        return !!this.resultsData.ratingChanges && !this.resultsData.isPrivateRoom;
     }
 
     create(data: ResultsSceneData) {
@@ -143,9 +148,10 @@ export class ResultsScene extends Scene {
     // =========================================================================
     private createStatsPanel(isWinner: boolean) {
         const container = this.add.container(GAME_DIMENSIONS.CENTER_X, 410);
+        const showRatingChanges = this.shouldShowRatingChanges();
 
         // Panel background
-        const panelH = this.resultsData.ratingChanges ? 230 : 140;
+        const panelH = showRatingChanges ? 230 : this.resultsData.isPrivateRoom ? 180 : 140;
         const panel = this.add.rectangle(0, 0, 580, panelH, 0x111111, 0.9)
             .setStrokeStyle(2, 0x333333);
         container.add(panel);
@@ -182,7 +188,7 @@ export class ResultsScene extends Scene {
         }).setOrigin(0.5));
 
         // Animated ELO
-        const rc = this.resultsData.ratingChanges;
+        const rc = showRatingChanges ? this.resultsData.ratingChanges : undefined;
         if (rc) {
             const ratingY = scoreY + 70;
             container.add(this.add.text(0, ratingY - 25, "RATING", {
@@ -262,6 +268,15 @@ export class ResultsScene extends Scene {
             });
         }
 
+        if (this.resultsData.isPrivateRoom) {
+            container.add(this.add.text(0, scoreY + 58, "NO ELO CHANGED!", {
+                fontFamily: "Orbitron, monospace",
+                fontSize: "24px",
+                color: "#fbbf24",
+                fontStyle: "bold",
+            }).setOrigin(0.5));
+        }
+
         // Animate container in
         container.setScale(0);
         this.tweens.add({
@@ -278,7 +293,7 @@ export class ResultsScene extends Scene {
     private createOnChainStatus() {
         if (!this.resultsData.onChainSessionId) return;
 
-        const y = this.resultsData.ratingChanges ? 570 : 520;
+        const y = this.shouldShowRatingChanges() ? 570 : 520;
         const container = this.add.container(GAME_DIMENSIONS.CENTER_X, y);
 
         const hasHash = !!this.resultsData.onChainTxHash;
@@ -415,7 +430,7 @@ export class ResultsScene extends Scene {
     // Navigation buttons
     // =========================================================================
     private createButtons() {
-        const y = this.resultsData.ratingChanges
+        const y = this.shouldShowRatingChanges()
             ? (this.resultsData.onChainSessionId ? 640 : 590)
             : (this.resultsData.onChainSessionId ? 590 : 540);
 

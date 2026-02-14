@@ -134,7 +134,14 @@ async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player
     const player1RoundsWon = winner === "player1" ? roundsToWin : 0;
     const player2RoundsWon = winner === "player2" ? roundsToWin : 0;
 
-    const ratingChanges = await applyEloForTimeoutWin(winnerAddress, loserAddress);
+    const isPrivateRoom = !!match.room_code;
+    const ratingChanges = isPrivateRoom
+        ? undefined
+        : await applyEloForTimeoutWin(winnerAddress, loserAddress);
+
+    if (isPrivateRoom) {
+        console.log(`[AbandonmentMonitor] Skipping Elo update for private room timeout match=${match.id}`);
+    }
 
     console.log(
         `[AbandonmentMonitor] Timeout winner resolved match=${match.id} winner=${winnerAddress.slice(0, 6)}…${winnerAddress.slice(-4)} loser=${loserAddress.slice(0, 6)}…${loserAddress.slice(-4)} disconnected=${disconnectedPlayer}`,
@@ -201,6 +208,7 @@ async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player
         player1RoundsWon,
         player2RoundsWon,
         ratingChanges,
+        isPrivateRoom,
         onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(match.id),
         onChainTxHash,
         onChainSkippedReason,
@@ -216,7 +224,7 @@ export async function runAbandonmentSweep(): Promise<void> {
         const supabase = getSupabase();
         const { data: matches, error } = await supabase
             .from("matches")
-            .select("id,status,format,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,player1_stake_confirmed_at,player2_stake_confirmed_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id")
+            .select("id,status,format,room_code,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,player1_stake_confirmed_at,player2_stake_confirmed_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id")
             .in("status", ["character_select", "in_progress"])
             .or("player1_disconnected_at.not.is.null,player2_disconnected_at.not.is.null")
             .limit(200);

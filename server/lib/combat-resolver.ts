@@ -470,6 +470,7 @@ export async function resolveTurn(
                 player2RoundsWon: p2RoundsWon,
                 reason: "knockout",
                 ratingChanges: eloChanges ?? undefined,
+                isPrivateRoom: !!match.room_code,
                 onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
                 onChainTxHash,
                 onChainSkippedReason,
@@ -735,6 +736,11 @@ interface EloChanges {
 }
 
 async function updateElo(match: any, winnerAddress: string): Promise<EloChanges | null> {
+    if (match?.room_code) {
+        console.log("[CombatResolver] Skipping Elo update for private room match");
+        return null;
+    }
+
     // Skip Elo for bot matches — bots don't have player records
     if (match.is_bot_match) {
         console.log("[CombatResolver] Skipping Elo update for bot match");

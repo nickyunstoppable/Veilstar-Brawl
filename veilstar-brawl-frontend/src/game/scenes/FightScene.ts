@@ -4616,6 +4616,7 @@ export class FightScene extends Phaser.Scene {
       EventBus.emit("fight:matchResult", {
         isWinner,
         ratingChanges: payload.ratingChanges,
+        isPrivateRoom: payload.isPrivateRoom,
         onChainSessionId: payload.onChainSessionId,
         onChainTxHash: payload.onChainTxHash,
         contractId: payload.contractId,
@@ -4629,6 +4630,7 @@ export class FightScene extends Phaser.Scene {
         player2RoundsWon,
         reason: normalizedReason,
         ratingChanges: payload.ratingChanges,
+        isPrivateRoom: payload.isPrivateRoom,
         onChainSessionId: payload.onChainSessionId,
         onChainTxHash: payload.onChainTxHash,
         contractId: payload.contractId,
