@@ -317,3 +317,32 @@ fn test_all_move_types() {
     let m = client.get_match(&1u32);
     assert_eq!(m.player1_moves, 4);
 }
+
+#[test]
+fn test_set_match_stake_is_idempotent_for_same_amount() {
+    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+
+    client.start_game(&55u32, &p1, &p2, &100_000, &100_000);
+
+    client.set_match_stake(&55u32, &10_000_000i128);
+    client.set_match_stake(&55u32, &10_000_000i128);
+
+    let m = client.get_match(&55u32);
+    assert_eq!(m.stake_amount_stroops, 10_000_000i128);
+}
+
+#[test]
+fn test_deposit_stake_is_idempotent_per_player() {
+    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+
+    client.start_game(&77u32, &p1, &p2, &100_000, &100_000);
+    client.set_match_stake(&77u32, &10_000_000i128);
+
+    client.deposit_stake(&77u32, &p1);
+    client.deposit_stake(&77u32, &p1);
+    client.deposit_stake(&77u32, &p2);
+
+    let m = client.get_match(&77u32);
+    assert!(m.player1_stake_paid);
+    assert!(m.player2_stake_paid);
+}

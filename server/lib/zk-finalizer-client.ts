@@ -63,6 +63,11 @@ export function shouldAutoProveFinalize(): boolean {
 export function triggerAutoProveFinalize(matchId: string, winnerAddress: string, context: string): void {
     if (!shouldAutoProveFinalize()) return;
 
+    console.log(`[ZK AutoFinalize][${context}] queued`, {
+        matchId,
+        winnerAddress,
+    });
+
     void proveAndFinalizeMatch({ matchId, winnerAddress })
         .then((result) => {
             console.log(`[ZK AutoFinalize][${context}] success`, {
@@ -205,6 +210,7 @@ export async function proveAndFinalizeMatch(
     const remoteZkBaseUrl = getRemoteZkBaseUrl();
     if (allowRemoteDelegation && remoteZkBaseUrl && !isSelfDelegationUrl(remoteZkBaseUrl)) {
         const remoteUrl = `${remoteZkBaseUrl}/api/matches/${params.matchId}/zk/prove-finalize`;
+        console.log(`[ZK Finalizer] Delegating prove+finalize remotely match=${params.matchId} url=${remoteUrl}`);
         const finalizeRes = await fetch(remoteUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -217,6 +223,8 @@ export async function proveAndFinalizeMatch(
                 `Remote ZK prove+finalize failed (${finalizeRes.status}): ${JSON.stringify(finalizeJson)}`,
             );
         }
+
+        console.log(`[ZK Finalizer] Remote prove+finalize succeeded match=${params.matchId}`);
 
         return {
             success: true,
@@ -242,6 +250,7 @@ export async function proveAndFinalizeMatch(
     const publicInputsPath = join(workingDir, "public_inputs.json");
 
     try {
+        console.log(`[ZK Finalizer] Local prove+finalize start match=${params.matchId}`);
         const transcript = await loadMatchTranscript(params.matchId);
         await writeFile(inputPath, JSON.stringify(transcript), "utf8");
 
@@ -259,6 +268,8 @@ export async function proveAndFinalizeMatch(
             "{WINNER_ADDRESS}": params.winnerAddress,
         });
 
+        console.log(`[ZK Finalizer] Executing prove command match=${params.matchId} cmd=${command}`);
+
         const proc = Bun.spawn({
             cmd: [command, ...args],
             stdout: "pipe",
@@ -275,6 +286,8 @@ export async function proveAndFinalizeMatch(
                 `ZK proof generation failed (exit=${exitCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
             );
         }
+
+        console.log(`[ZK Finalizer] Proof generated match=${params.matchId}, submitting finalize request`);
 
         const [proofBytes, publicInputsBytes] = await Promise.all([
             readFile(proofPath),
@@ -301,6 +314,8 @@ export async function proveAndFinalizeMatch(
                 `ZK finalize failed (${finalizeRes.status}): ${JSON.stringify(finalizeJson)}`,
             );
         }
+
+        console.log(`[ZK Finalizer] Finalize endpoint accepted proof match=${params.matchId}`);
 
         return {
             success: true,

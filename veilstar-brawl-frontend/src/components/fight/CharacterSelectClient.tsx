@@ -192,6 +192,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const localStakeConfirmedRef = useRef(false);
     const stakeExpireTriggeredRef = useRef(false);
     const stakeErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const stakeSubmitInFlightRef = useRef(false);
+    const [stakeSubmitLocked, setStakeSubmitLocked] = useState(false);
     useEffect(() => {
         onMatchEndRef.current = onMatchEnd;
         onExitRef.current = onExit;
@@ -202,6 +204,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         registrationCompleteRef.current = false;
         localStakeConfirmedRef.current = false;
         stakeExpireTriggeredRef.current = false;
+        stakeSubmitInFlightRef.current = false;
+        setStakeSubmitLocked(false);
 
         if (stakeErrorTimerRef.current) {
             clearTimeout(stakeErrorTimerRef.current);
@@ -332,7 +336,10 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
     const handleSubmitStakeDeposit = useCallback(async () => {
         if (!publicKey || !stakeGate?.required || stakeGate.myConfirmed) return;
+        if (stakeSubmitInFlightRef.current) return;
 
+        stakeSubmitInFlightRef.current = true;
+        setStakeSubmitLocked(true);
         setStakeGate((prev) => prev ? { ...prev, isSubmitting: true, error: null } : prev);
 
         try {
@@ -419,8 +426,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 }
                 : prev,
             );
+        } finally {
+            stakeSubmitInFlightRef.current = false;
+            setStakeSubmitLocked(false);
+            setStakeGate((prev) => prev ? { ...prev, isSubmitting: false } : prev);
         }
-    }, [matchId, publicKey, signStakeAuthEntry, stakeGate]);
+    }, [matchId, publicKey, signStakeAuthEntry, stakeGate?.myConfirmed, stakeGate?.required]);
 
     useEffect(() => {
         if (!publicKey || !stakeGate?.required || stakeGate.bothConfirmed) return;
@@ -486,25 +497,33 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     }
                 }
 
-                if (hasStake) {
-                    const deadlineAtMs = match.stake_deadline_at
-                        ? new Date(match.stake_deadline_at).getTime()
-                        : undefined;
-                    setStakeGate({
+                const deadlineAtMs = match.stake_deadline_at
+                    ? new Date(match.stake_deadline_at).getTime()
+                    : undefined;
+                setStakeGate((prev) => {
+                    const shouldRequireStake = hasStake || !!prev?.required;
+                    if (!shouldRequireStake) return null;
+
+                    const nextStakeAmount = hasStake
+                        ? String(match.stake_amount_stroops)
+                        : (prev?.stakeAmountStroops ?? "0");
+                    const nextFeeBps = hasStake
+                        ? Number(match.stake_fee_bps || 10)
+                        : (prev?.feeBps ?? 10);
+
+                    return {
                         required: true,
-                        stakeAmountStroops: String(match.stake_amount_stroops),
-                        feeBps: Number(match.stake_fee_bps || 10),
-                        myConfirmed: effectiveMyConfirmed,
+                        stakeAmountStroops: nextStakeAmount,
+                        feeBps: nextFeeBps,
+                        myConfirmed: prev?.myConfirmed || effectiveMyConfirmed || localStakeConfirmedRef.current,
                         opponentConfirmed,
                         bothConfirmed,
                         pendingRegistration: !match.onchain_session_id,
-                        stakeDeadlineAtMs: deadlineAtMs,
-                        isSubmitting: false,
-                        error: null,
-                    });
-                } else {
-                    setStakeGate(null);
-                }
+                        stakeDeadlineAtMs: deadlineAtMs ?? prev?.stakeDeadlineAtMs,
+                        isSubmitting: prev?.isSubmitting ?? false,
+                        error: prev?.error ?? null,
+                    };
+                });
 
                 const playerBanId = isHost
                     ? (match.player1_ban_id ?? match.player1_ban_character_id ?? null)
@@ -823,7 +842,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 if (!match) return;
 
                 const hasStake = parseStroops(match.stake_amount_stroops) > 0n;
-                if (hasStake) {
+                if (hasStake || stakeGate?.required) {
                     const myConfirmed = myRole === "player1"
                         ? !!match.player1_stake_confirmed_at
                         : !!match.player2_stake_confirmed_at;
@@ -841,32 +860,29 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         }
                     }
 
-                    setStakeGate((prev) => prev
-                        ? {
-                            ...prev,
-                            myConfirmed: prev.myConfirmed || effectiveMyConfirmed,
-                            opponentConfirmed,
-                            bothConfirmed,
-                            pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
-                            stakeDeadlineAtMs: match.stake_deadline_at
-                                ? new Date(match.stake_deadline_at).getTime()
-                                : prev.stakeDeadlineAtMs,
-                        }
-                        : {
+                    setStakeGate((prev) => {
+                        const previous = prev?.required ? prev : null;
+                        const stakeAmount = hasStake
+                            ? String(match.stake_amount_stroops)
+                            : (previous?.stakeAmountStroops ?? "0");
+                        const feeBps = hasStake
+                            ? Number(match.stake_fee_bps || 10)
+                            : (previous?.feeBps ?? 10);
+                        return {
                             required: true,
-                            stakeAmountStroops: String(match.stake_amount_stroops),
-                            feeBps: Number(match.stake_fee_bps || 10),
-                            myConfirmed: effectiveMyConfirmed,
+                            stakeAmountStroops: stakeAmount,
+                            feeBps,
+                            myConfirmed: previous?.myConfirmed || effectiveMyConfirmed || localStakeConfirmedRef.current,
                             opponentConfirmed,
                             bothConfirmed,
                             pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
                             stakeDeadlineAtMs: match.stake_deadline_at
                                 ? new Date(match.stake_deadline_at).getTime()
-                                : undefined,
-                            isSubmitting: false,
-                            error: null,
-                        },
-                    );
+                                : previous?.stakeDeadlineAtMs,
+                            isSubmitting: previous?.isSubmitting ?? false,
+                            error: previous?.error ?? null,
+                        };
+                    });
                 } else {
                     setStakeGate(null);
                 }
@@ -902,7 +918,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             mounted = false;
             clearInterval(interval);
         };
-    }, [sceneConfig, publicKey, matchId]);
+    }, [sceneConfig, publicKey, matchId, stakeGate?.required]);
 
     // Listen for EventBus events to send selections to server
     useEffect(() => {
@@ -2056,6 +2072,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const requiredDepositStroops = stakeAmountStroops + stakeFeeStroops;
     const myStakeConfirmed = !!stakeGate?.myConfirmed || localStakeConfirmedRef.current;
     const shouldBlockForStake = !!stakeGate?.required && !stakeGate.bothConfirmed;
+    const stakeSubmitBusy = stakeGate?.isSubmitting || stakeSubmitLocked;
     const stakeTimeLeftSeconds = stakeGate?.stakeDeadlineAtMs
         ? Math.max(0, Math.ceil((stakeGate.stakeDeadlineAtMs - stakeClockNowMs) / 1000))
         : null;
@@ -2134,12 +2151,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                     <button
                         onClick={handleSubmitStakeDeposit}
-                        disabled={stakeGate.isSubmitting || myStakeConfirmed || stakeGate.pendingRegistration}
+                        disabled={stakeSubmitBusy || myStakeConfirmed || stakeGate.pendingRegistration}
                         className="w-full bg-gradient-cyber text-white border-0 font-orbitron hover:opacity-90 py-3 rounded-xl text-sm disabled:opacity-50"
                     >
                         {myStakeConfirmed
                             ? (stakeGate.opponentConfirmed ? "WAITING FOR MATCH..." : "WAITING FOR OPPONENT...")
-                            : stakeGate.isSubmitting
+                            : stakeSubmitBusy
                                 ? "AWAITING WALLET CONFIRMATION..."
                                 : `CONFIRM ${toXlmDisplay(requiredDepositStroops)} XLM STAKE`}
                     </button>

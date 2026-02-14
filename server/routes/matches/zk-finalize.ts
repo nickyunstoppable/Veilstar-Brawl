@@ -79,6 +79,10 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             );
         }
 
+        console.log(
+            `[ZK Finalize] Winner accepted for match ${matchId}: ${winnerAddress.slice(0, 6)}…${winnerAddress.slice(-4)}`,
+        );
+
         if (match.status !== "completed") {
             await supabase
                 .from("matches")
@@ -200,6 +204,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 transcriptHash: body.transcriptHash || null,
                 proofPublicInputs: body.publicInputs || null,
             });
+
+            console.log(`[ZK Finalize] Broadcasted match_ended for ${matchId} (reason=zk_proof)`);
         }
 
         return Response.json({

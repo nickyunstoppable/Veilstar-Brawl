@@ -27,6 +27,8 @@ export async function handleForfeit(
             );
         }
 
+        console.log(`[Forfeit] Request match=${matchId} by=${body.address.slice(0, 6)}…${body.address.slice(-4)}`);
+
         const supabase = getSupabase();
 
         const { data: match, error } = await supabase
@@ -60,6 +62,8 @@ export async function handleForfeit(
         const winnerAddress = isPlayer1
             ? match.player2_address
             : match.player1_address;
+
+        console.log(`[Forfeit] Winner determined match=${matchId} winner=${winnerAddress?.slice(0, 6)}…${winnerAddress?.slice(-4) || "n/a"}`);
 
         // If no opponent yet (waiting state), just cancel
         if (!winnerAddress) {
@@ -160,6 +164,7 @@ export async function handleForfeit(
                         onchain_result_tx_hash: onChainResult.txHash,
                     }).eq('id', matchId);
                 }
+                console.log(`[Forfeit] On-chain finalize success match=${matchId} tx=${onChainTxHash || "n/a"}`);
             } catch (err) {
                 console.error('[Forfeit] On-chain report error:', err);
             }
@@ -167,6 +172,7 @@ export async function handleForfeit(
 
         if (autoFinalize.enabled) {
             triggerAutoProveFinalize(matchId, winnerAddress, "forfeit");
+            console.log(`[Forfeit] Triggered auto ZK prove+finalize match=${matchId}`);
         } else if (!stellarReady) {
             onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
             console.warn(`[Forfeit] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
@@ -194,6 +200,10 @@ export async function handleForfeit(
             onChainSkippedReason,
             contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
         });
+
+        console.log(
+            `[Forfeit] Match ended broadcast match=${matchId} winner=${winnerAddress.slice(0, 6)}…${winnerAddress.slice(-4)} reason=forfeit`,
+        );
 
         return Response.json({ success: true, forfeited: true });
     } catch (err) {

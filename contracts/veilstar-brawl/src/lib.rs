@@ -472,8 +472,16 @@ impl VeilstarBrawlContract {
             return Err(Error::InvalidStake);
         }
 
-        if m.player1_stake_paid || m.player2_stake_paid {
-            return Err(Error::StakeAlreadyPaid);
+        if m.stake_amount_stroops > 0 {
+            if m.stake_amount_stroops != stake_amount_stroops {
+                return Err(Error::InvalidStake);
+            }
+
+            env.storage().temporary().set(&key, &m);
+            env.storage()
+                .temporary()
+                .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+            return Ok(());
         }
 
         m.stake_amount_stroops = stake_amount_stroops;
@@ -519,7 +527,11 @@ impl VeilstarBrawlContract {
         }
 
         if (is_p1 && m.player1_stake_paid) || (is_p2 && m.player2_stake_paid) {
-            return Err(Error::StakeAlreadyPaid);
+            env.storage().temporary().set(&key, &m);
+            env.storage()
+                .temporary()
+                .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+            return Ok(());
         }
 
         let fee = Self::calc_fee(m.stake_amount_stroops, m.stake_fee_bps);

@@ -22,6 +22,8 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             return Response.json({ error: "Missing 'address'" }, { status: 400 });
         }
 
+        console.log(`[Timeout POST] Request match=${matchId} claimer=${address.slice(0, 6)}…${address.slice(-4)}`);
+
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
@@ -92,6 +94,8 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
 
             await broadcastGameEvent(matchId, "match_cancelled", payload);
 
+            console.log(`[Timeout POST] Both players disconnected match=${matchId}; cancelled`);
+
             return Response.json({
                 success: true,
                 data: {
@@ -122,6 +126,10 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             .eq("id", matchId)
             .in("status", ["in_progress", "character_select"]);
 
+        console.log(
+            `[Timeout POST] Winner resolved match=${matchId} winner=${winnerAddress.slice(0, 6)}…${winnerAddress.slice(-4)} score=${player1RoundsWon}-${player2RoundsWon}`,
+        );
+
         let onChainTxHash: string | undefined;
         let onChainSkippedReason: string | undefined;
         const autoFinalize = getAutoProveFinalizeStatus();
@@ -151,6 +159,7 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
             }
         } else if (autoFinalize.enabled) {
             triggerAutoProveFinalize(matchId, winnerAddress, "timeout");
+            console.log(`[Timeout POST] Triggered auto ZK prove+finalize match=${matchId}`);
         } else {
             onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
             console.warn(`[Timeout POST] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
@@ -174,6 +183,8 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
         };
 
         await broadcastGameEvent(matchId, "match_ended", matchEndedPayload);
+
+        console.log(`[Timeout POST] Match ended broadcast match=${matchId} reason=timeout`);
 
         return Response.json({
             success: true,

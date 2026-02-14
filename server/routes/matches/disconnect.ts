@@ -21,6 +21,8 @@ export async function handleDisconnect(matchId: string, req: Request): Promise<R
             return Response.json({ error: "Missing/invalid 'address' or 'action'" }, { status: 400 });
         }
 
+        console.log(`[Disconnect] Request match=${matchId} action=${action} by=${address.slice(0, 6)}…${address.slice(-4)}`);
+
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
@@ -58,6 +60,8 @@ export async function handleDisconnect(matchId: string, req: Request): Promise<R
                 timeoutSeconds,
             });
 
+            console.log(`[Disconnect] Marked disconnected match=${matchId} player=${player} timeout=${timeoutSeconds}s`);
+
             return Response.json({ success: true, action: "disconnect" });
         }
 
@@ -75,6 +79,8 @@ export async function handleDisconnect(matchId: string, req: Request): Promise<R
             address,
             reconnectedAt: Date.now(),
         });
+
+        console.log(`[Disconnect] Marked reconnected match=${matchId} player=${player}`);
 
         const { data: snapshot } = await supabase
             .from("fight_state_snapshots")

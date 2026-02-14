@@ -31,6 +31,10 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
         const roundNumber = Number(body.roundNumber ?? 1);
         const turnNumber = Number(body.turnNumber ?? 1);
 
+        console.log(
+            `[ZK Round Prove] Request match=${matchId} round=${roundNumber} turn=${turnNumber} player=${address?.slice(0, 6) || "n/a"}…${address?.slice(-4) || "n/a"}`,
+        );
+
         if (!address || !Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
             return Response.json({ error: "Missing/invalid address, roundNumber, or turnNumber" }, { status: 400 });
         }
@@ -52,6 +56,10 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             surgeCardId: body.surgeCardId,
             nonce: body.nonce,
         });
+
+        console.log(
+            `[ZK Round Prove] Proof generated match=${matchId} round=${roundNumber} turn=${turnNumber} prover=${proof.prover}`,
+        );
 
         return Response.json({
             success: true,

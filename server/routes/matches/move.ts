@@ -119,6 +119,10 @@ export async function handlePrepareMoveOnChain(
             );
         }
 
+        console.log(
+            `[Move Prepare] Request match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)} move=${body.move}`,
+        );
+
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
@@ -157,6 +161,10 @@ export async function handlePrepareMoveOnChain(
 
         const turn = (currentRound.round_number - 1) * 10 + (currentRound.turn_number || 1);
         const prepared = await prepareMoveOnChain(matchId, body.address, body.move, turn);
+
+        console.log(
+            `[Move Prepare] Prepared match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1} session=${prepared.sessionId}`,
+        );
 
         return Response.json({
             success: true,
@@ -203,6 +211,10 @@ export async function handleSubmitMove(
                 { status: 400 }
             );
         }
+
+        console.log(
+            `[Move POST] Request match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)} move=${body.move}`,
+        );
 
         const supabase = getSupabase();
 
@@ -287,6 +299,7 @@ export async function handleSubmitMove(
             }
 
             onChainTxHash = onChainResult.txHash || null;
+            console.log(`[Move POST] On-chain move submitted match=${matchId} tx=${onChainTxHash || "n/a"}`);
         }
 
         // Submit the move (server-authoritative stun forces "stunned")
@@ -339,6 +352,10 @@ export async function handleSubmitMove(
             onChainTxHash,
         });
 
+        console.log(
+            `[Move POST] Move stored match=${matchId} role=${playerRole} resolvedMove=${resolvedMove} onChainTx=${onChainTxHash || "offchain"}`,
+        );
+
         // Re-fetch to check if both submitted and auto-assign stunned opponent if needed
         let { data: updatedRound } = await supabase
             .from("rounds")
@@ -386,8 +403,13 @@ export async function handleSubmitMove(
         let bothSubmitted = updatedRound?.player1_move && updatedRound?.player2_move;
 
         if (bothSubmitted) {
+            console.log(`[Move POST] Both moves submitted; resolving turn match=${matchId} roundId=${currentRound.id}`);
             // Resolve the turn
             const result = await resolveTurn(matchId, currentRound.id);
+
+            console.log(
+                `[Move POST] Turn resolved match=${matchId} turn=${result.turnNumber} round=${result.roundNumber} matchOver=${result.isMatchOver}`,
+            );
 
             return Response.json({
                 success: true,
@@ -396,6 +418,8 @@ export async function handleSubmitMove(
                 resolution: result,
             });
         }
+
+        console.log(`[Move POST] Waiting for opponent move match=${matchId} roundId=${currentRound.id}`);
 
         return Response.json({
             success: true,

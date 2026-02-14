@@ -187,6 +187,29 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const STAKE_SUBMISSION_LOCKS = new Map<string, Promise<void>>();
+
+async function withStakeSubmissionLock<T>(lockKey: string, fn: () => Promise<T>): Promise<T> {
+    const previous = STAKE_SUBMISSION_LOCKS.get(lockKey) || Promise.resolve();
+
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+
+    STAKE_SUBMISSION_LOCKS.set(lockKey, previous.then(() => current));
+    await previous;
+
+    try {
+        return await fn();
+    } finally {
+        release();
+        if (STAKE_SUBMISSION_LOCKS.get(lockKey) === current) {
+            STAKE_SUBMISSION_LOCKS.delete(lockKey);
+        }
+    }
+}
+
 function isTransientSubmissionError(err: any): boolean {
     const message = String(err?.message || "");
     const responseText = String(err?.response?.data || "");
@@ -1007,37 +1030,41 @@ export async function submitSignedStakeDepositOnChain(
         }
     };
 
+    const lockKey = `stake:${sessionId}`;
+
     try {
-        // First attempt with client-provided prepared transaction.
-        let candidateXdr = transactionXdr;
-        const maxAttempts = 4;
+        return await withStakeSubmissionLock(lockKey, async () => {
+            // First attempt with client-provided prepared transaction.
+            let candidateXdr = transactionXdr;
+            const maxAttempts = 4;
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const submitAttempt = await submitWithTransactionXdr(candidateXdr);
-            if (!submitAttempt.error) {
-                return { success: true, txHash: submitAttempt.txHash, sessionId };
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                const submitAttempt = await submitWithTransactionXdr(candidateXdr);
+                if (!submitAttempt.error) {
+                    return { success: true, txHash: submitAttempt.txHash, sessionId };
+                }
+
+                if (!/txBadSeq/i.test(submitAttempt.error)) {
+                    return { success: false, error: submitAttempt.error, sessionId };
+                }
+
+                if (attempt >= maxAttempts) {
+                    return { success: false, error: submitAttempt.error, sessionId };
+                }
+
+                // Sequence race on shared fee payer. Rebuild with a fresh sequence and retry.
+                try {
+                    const refreshed = await prepareStakeDepositOnChain(matchId, playerAddress);
+                    candidateXdr = refreshed.transactionXdr;
+                    await sleep(100 * attempt);
+                } catch (refreshErr: any) {
+                    const refreshMessage = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+                    return { success: false, error: `txBadSeq retry failed: ${refreshMessage}`, sessionId };
+                }
             }
 
-            if (!/txBadSeq/i.test(submitAttempt.error)) {
-                return { success: false, error: submitAttempt.error, sessionId };
-            }
-
-            if (attempt >= maxAttempts) {
-                return { success: false, error: submitAttempt.error, sessionId };
-            }
-
-            // Sequence race on shared fee payer. Rebuild with a fresh sequence and retry.
-            try {
-                const refreshed = await prepareStakeDepositOnChain(matchId, playerAddress);
-                candidateXdr = refreshed.transactionXdr;
-                await sleep(100 * attempt);
-            } catch (refreshErr: any) {
-                const refreshMessage = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
-                return { success: false, error: `txBadSeq retry failed: ${refreshMessage}`, sessionId };
-            }
-        }
-
-        return { success: false, error: "Stake submit retries exhausted", sessionId };
+            return { success: false, error: "Stake submit retries exhausted", sessionId };
+        });
     } catch (err: any) {
         const baseMessage = err instanceof Error ? err.message : String(err);
         return { success: false, error: withDecodedResult(err, baseMessage), sessionId };

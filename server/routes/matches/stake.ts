@@ -95,6 +95,12 @@ function readStakePaidFlags(rawState: any): { player1Paid: boolean; player2Paid:
     return { player1Paid, player2Paid };
 }
 
+function didPlayerStakeOnChain(match: any, paidFlags: { player1Paid: boolean; player2Paid: boolean }, address: string): boolean {
+    if (address === match?.player1_address) return paidFlags.player1Paid;
+    if (address === match?.player2_address) return paidFlags.player2Paid;
+    return false;
+}
+
 async function reconcileStakeConfirmationsFromChain(matchId: string, match: any): Promise<any> {
     const hasStake = parseStroops(match?.stake_amount_stroops) > 0n;
     if (!hasStake) return match;
@@ -338,6 +344,10 @@ export async function handleSubmitStakeDeposit(
             );
         }
 
+        console.log(
+            `[Stake Submit] Request match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)}`,
+        );
+
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
@@ -401,13 +411,16 @@ export async function handleSubmitStakeDeposit(
                 try {
                     const onChainState = await getOnChainMatchState(matchId);
                     const paidFlags = readStakePaidFlags(onChainState);
-                    reconciledPaid = stakeStatus.isPlayer1 ? paidFlags.player1Paid : paidFlags.player2Paid;
+                    reconciledPaid = didPlayerStakeOnChain(match, paidFlags, body.address);
                 } catch {
                     reconciledPaid = false;
                 }
             }
 
             if (!reconciledPaid) {
+                console.warn(
+                    `[Stake Submit] On-chain submit failed match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)} error=${onChainError || "n/a"}`,
+                );
                 return Response.json(
                     {
                         error: "On-chain stake transaction failed",
@@ -416,6 +429,10 @@ export async function handleSubmitStakeDeposit(
                     { status: 502 },
                 );
             }
+
+            console.log(
+                `[Stake Submit] Reconciled as paid from chain state after transient/already-paid error match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)}`,
+            );
         }
 
         const nowIso = new Date().toISOString();
@@ -450,6 +467,10 @@ export async function handleSubmitStakeDeposit(
         const playerRole = stakeStatus.isPlayer1 ? "player1" : "player2";
         const bothConfirmed = !!refreshed?.player1_stake_confirmed_at && !!refreshed?.player2_stake_confirmed_at;
 
+        console.log(
+            `[Stake Submit] Confirmed match=${matchId} role=${playerRole} tx=${effectiveTxHash || "n/a"} bothConfirmed=${bothConfirmed}`,
+        );
+
         let selectionDeadlineAt = refreshed?.selection_deadline_at ?? null;
         if (bothConfirmed && !selectionDeadlineAt) {
             selectionDeadlineAt = new Date(
@@ -473,6 +494,10 @@ export async function handleSubmitStakeDeposit(
             await broadcastGameEvent(matchId, "stake_ready", {
                 selectionDeadlineAt,
             });
+
+            console.log(
+                `[Stake Submit] Both players deposited successfully match=${matchId} selectionDeadlineAt=${selectionDeadlineAt || "n/a"}`,
+            );
         }
 
         return Response.json({
@@ -546,6 +571,9 @@ export async function handleExpireStakeDepositWindow(
 
         const onChainExpire = await expireStakeOnChain(matchId);
         if (!onChainExpire.success) {
+            console.warn(
+                `[Stake Expire] On-chain expire failed match=${matchId} error=${onChainExpire.error || "n/a"}`,
+            );
             return Response.json(
                 {
                     error: "Failed to expire stake window on-chain",
@@ -576,6 +604,10 @@ export async function handleExpireStakeDepositWindow(
                 : "Stake window expired. Match cancelled.",
             redirectTo: "/play",
         });
+
+        console.log(
+            `[Stake Expire] Stake window expired match=${matchId} refundedAddress=${refundedAddress || "none"} tx=${onChainExpire.txHash || "n/a"}`,
+        );
 
         return Response.json({
             success: true,

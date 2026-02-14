@@ -109,6 +109,10 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         const proof = body.proof?.trim();
         const roundNumber = Number(body.roundNumber ?? 1);
 
+        console.log(
+            `[ZK Round Commit] Request match=${matchId} round=${roundNumber} player=${address?.slice(0, 6) || "n/a"}…${address?.slice(-4) || "n/a"}`,
+        );
+
         if (!address || !commitment || !proof || !Number.isInteger(roundNumber) || roundNumber < 1) {
             return Response.json(
                 { error: "Missing/invalid address, roundNumber, commitment, or proof" },
@@ -163,6 +167,8 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         if (!verification.ok) {
             return Response.json({ error: "Commit proof verification failed" }, { status: 400 });
         }
+
+        console.log(`[ZK Round Commit] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
 
         const { error: upsertError } = await supabase
             .from("round_private_commits")
@@ -247,6 +253,8 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                 matchId,
                 roundNumber,
             });
+
+            console.log(`[ZK Round Commit] Both players committed match=${matchId} round=${roundNumber}`);
         }
 
         return Response.json({
@@ -278,6 +286,10 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         const address = body.address?.trim();
         const roundNumber = Number(body.roundNumber ?? 1);
         const proof = body.proof?.trim();
+
+        console.log(
+            `[ZK Round Resolve] Request match=${matchId} round=${roundNumber} player=${address?.slice(0, 6) || "n/a"}…${address?.slice(-4) || "n/a"}`,
+        );
 
         if (!address || !Number.isInteger(roundNumber) || roundNumber < 1 || !proof) {
             return Response.json(
@@ -401,6 +413,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             return Response.json({ error: "Round resolution proof verification failed" }, { status: 400 });
         }
 
+        console.log(`[ZK Round Resolve] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+
         const parseStoredPlan = (raw: unknown): { move?: MoveType; surgeCardId?: PowerSurgeCardId | null } => {
             if (!raw || typeof raw !== "string") return {};
 
@@ -487,6 +501,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         });
 
         if (!bothRevealed) {
+            console.log(`[ZK Round Resolve] Waiting for opponent reveal match=${matchId} round=${roundNumber}`);
             return Response.json({
                 success: true,
                 roundNumber,
@@ -502,6 +517,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
         const resolveLockKey = `${matchId}:${roundNumber}`;
         if (privateRoundResolveLocks.has(resolveLockKey)) {
+            console.log(`[ZK Round Resolve] Resolver lock active match=${matchId} round=${roundNumber}`);
             return Response.json({
                 success: true,
                 roundNumber,
@@ -554,6 +570,10 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 .eq("match_id", matchId);
 
             const resolution = await resolveTurn(matchId, round.id);
+
+            console.log(
+                `[ZK Round Resolve] Turn resolved match=${matchId} round=${roundNumber} turnId=${round.id} matchWinner=${resolution.matchWinner || "n/a"}`,
+            );
 
             await supabase
                 .from("round_private_commits")

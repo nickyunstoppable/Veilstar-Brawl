@@ -9,6 +9,7 @@
 
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
+import { cancelMatchOnChainWithOptions, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 
 interface RejectBody {
     address: string;
@@ -42,10 +43,12 @@ export async function handleRejectMove(matchId: string, req: Request): Promise<R
             return Response.json({ error: "Missing 'address'" }, { status: 400 });
         }
 
+        console.log(`[Reject] Request match=${matchId} by=${address.slice(0, 6)}…${address.slice(-4)}`);
+
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id, status, player1_address, player2_address")
+            .select("id, status, player1_address, player2_address, stake_amount_stroops, player1_stake_confirmed_at, player2_stake_confirmed_at, onchain_session_id, onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -66,6 +69,8 @@ export async function handleRejectMove(matchId: string, req: Request): Promise<R
         const player = (isPlayer1 ? "player1" : "player2") as "player1" | "player2";
         const rejectedAt = Date.now();
 
+        console.log(`[Reject] Player rejected move match=${matchId} player=${player}`);
+
         await broadcastGameEvent(matchId, "move_rejected", {
             matchId,
             player,
@@ -82,12 +87,46 @@ export async function handleRejectMove(matchId: string, req: Request): Promise<R
         rejectionStateByMatch.set(matchId, existing);
 
         if (existing.players.size >= 2) {
+            let onChainTxHash: string | null = null;
+            const hasStakePaid = !!match.player1_stake_confirmed_at || !!match.player2_stake_confirmed_at;
+
+            if (isStellarConfigured()) {
+                const onChainCancel = await cancelMatchOnChainWithOptions(matchId, {
+                    sessionId: match.onchain_session_id ?? undefined,
+                    contractId: match.onchain_contract_id || undefined,
+                });
+
+                if (!onChainCancel.success) {
+                    const cancelError = onChainCancel.error || "unknown";
+                    const isMissingSession = /Contract,\s*#1|MatchNotFound/i.test(cancelError);
+
+                    if (hasStakePaid && !isMissingSession) {
+                        return Response.json(
+                            {
+                                error: "Failed to cancel match on-chain; stake refund could not be guaranteed",
+                                details: cancelError,
+                            },
+                            { status: 502 },
+                        );
+                    }
+
+                    if (!isMissingSession) {
+                        console.warn(`[Reject] cancel_match failed for ${matchId}: ${cancelError}`);
+                    }
+                } else {
+                    onChainTxHash = onChainCancel.txHash || null;
+                    console.log(`[Reject] On-chain cancel success match=${matchId} tx=${onChainTxHash || "n/a"}`);
+                }
+            }
+
             await supabase
                 .from("matches")
                 .update({
                     status: "cancelled",
                     completed_at: new Date().toISOString(),
                     fight_phase: "match_end",
+                    player1_stake_confirmed_at: null,
+                    player2_stake_confirmed_at: null,
                 })
                 .eq("id", matchId)
                 .in("status", ["character_select", "in_progress"]);
@@ -96,11 +135,17 @@ export async function handleRejectMove(matchId: string, req: Request): Promise<R
                 matchId,
                 reason: "both_rejected",
                 message: "Both players rejected transactions.",
+                onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
+                onChainTxHash,
                 redirectTo: "/play",
             };
 
             await broadcastGameEvent(matchId, "match_cancelled", payload);
             rejectionStateByMatch.delete(matchId);
+
+            console.log(
+                `[Reject] Match cancelled after dual rejection match=${matchId} hadStakePaid=${hasStakePaid} onChainTx=${onChainTxHash || "n/a"}`,
+            );
 
             return Response.json({
                 success: true,
@@ -115,6 +160,7 @@ export async function handleRejectMove(matchId: string, req: Request): Promise<R
             message: "Waiting for opponent decision",
             rejectedAt,
         });
+
     } catch (err) {
         console.error("[Reject POST] Error:", err);
         return Response.json({ error: "Failed to record rejection" }, { status: 500 });

@@ -70,6 +70,7 @@ async function applyEloForTimeoutWin(
 
 async function resolveBothDisconnected(match: any): Promise<void> {
     const supabase = getSupabase();
+    const hadAnyStakePaid = Boolean(match.player1_stake_confirmed_at || match.player2_stake_confirmed_at);
 
     let onChainTxHash: string | null = null;
     if (isStellarConfigured()) {
@@ -88,6 +89,9 @@ async function resolveBothDisconnected(match: any): Promise<void> {
             }
         } else {
             onChainTxHash = onChainCancel.txHash || null;
+            console.log(
+                `[AbandonmentMonitor] cancel_match succeeded for ${match.id} tx=${onChainTxHash || "n/a"} hadAnyStakePaid=${hadAnyStakePaid}`,
+            );
         }
     }
 
@@ -113,6 +117,10 @@ async function resolveBothDisconnected(match: any): Promise<void> {
         onChainTxHash,
         redirectTo: "/play",
     });
+
+    console.log(
+        `[AbandonmentMonitor] Match cancelled for both-disconnect timeout: match=${match.id} refunded=${hadAnyStakePaid ? "possible" : "none"}`,
+    );
 }
 
 async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player1" | "player2"): Promise<void> {
@@ -127,6 +135,10 @@ async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player
     const player2RoundsWon = winner === "player2" ? roundsToWin : 0;
 
     const ratingChanges = await applyEloForTimeoutWin(winnerAddress, loserAddress);
+
+    console.log(
+        `[AbandonmentMonitor] Timeout winner resolved match=${match.id} winner=${winnerAddress.slice(0, 6)}…${winnerAddress.slice(-4)} loser=${loserAddress.slice(0, 6)}…${loserAddress.slice(-4)} disconnected=${disconnectedPlayer}`,
+    );
 
     await supabase
         .from("matches")
@@ -172,6 +184,7 @@ async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player
         }
     } else if (autoFinalize.enabled) {
         triggerAutoProveFinalize(match.id, winnerAddress, "disconnect-timeout");
+        console.log(`[AbandonmentMonitor] Triggered auto ZK prove+finalize for timeout match=${match.id}`);
     } else {
         onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
     }
@@ -203,14 +216,18 @@ export async function runAbandonmentSweep(): Promise<void> {
         const supabase = getSupabase();
         const { data: matches, error } = await supabase
             .from("matches")
-            .select("id,status,format,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id")
+            .select("id,status,format,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,player1_stake_confirmed_at,player2_stake_confirmed_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id")
             .in("status", ["character_select", "in_progress"])
             .or("player1_disconnected_at.not.is.null,player2_disconnected_at.not.is.null")
             .limit(200);
 
         if (error || !matches || matches.length === 0) return;
 
+        console.log(`[AbandonmentMonitor] Sweep start candidates=${matches.length}`);
+
         const nowMs = Date.now();
+        let cancelledCount = 0;
+        let timeoutWinCount = 0;
 
         for (const match of matches) {
             const timeoutSeconds = Number(match.disconnect_timeout_seconds || 30);
@@ -221,18 +238,27 @@ export async function runAbandonmentSweep(): Promise<void> {
 
             if (p1Expired && p2Expired) {
                 await resolveBothDisconnected(match);
+                cancelledCount += 1;
                 continue;
             }
 
             if (p1Expired && !match.player2_disconnected_at) {
                 await resolveSingleDisconnected(match, "player1");
+                timeoutWinCount += 1;
                 continue;
             }
 
             if (p2Expired && !match.player1_disconnected_at) {
                 await resolveSingleDisconnected(match, "player2");
+                timeoutWinCount += 1;
                 continue;
             }
+        }
+
+        if (cancelledCount > 0 || timeoutWinCount > 0) {
+            console.log(
+                `[AbandonmentMonitor] Sweep results cancelled=${cancelledCount} timeoutWins=${timeoutWinCount}`,
+            );
         }
     } catch (err) {
         console.error("[AbandonmentMonitor] Sweep error:", err);
@@ -243,6 +269,8 @@ export async function runAbandonmentSweep(): Promise<void> {
 
 export function startAbandonmentMonitor(): void {
     if (monitorTimer) return;
+
+    console.log(`[AbandonmentMonitor] Started (interval=${MONITOR_INTERVAL_MS}ms)`);
 
     monitorTimer = setInterval(() => {
         runAbandonmentSweep().catch((err) => {
