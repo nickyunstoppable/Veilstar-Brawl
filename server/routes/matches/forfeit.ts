@@ -9,6 +9,10 @@ import { calculateEloChange } from "../../lib/game-types";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const ZK_DISABLE_FORFEIT_IN_STRICT = (process.env.ZK_DISABLE_FORFEIT_IN_STRICT ?? "false") === "true";
+
 interface ForfeitBody {
     address: string;
 }
@@ -18,6 +22,13 @@ export async function handleForfeit(
     req: Request
 ): Promise<Response> {
     try {
+        if (PRIVATE_ROUNDS_ENABLED && ZK_STRICT_FINALIZE && ZK_DISABLE_FORFEIT_IN_STRICT) {
+            return Response.json(
+                { error: "Forfeit is disabled in strict ZK mode. Match completion must be proof-backed." },
+                { status: 409 },
+            );
+        }
+
         const body = await req.json() as ForfeitBody;
 
         if (!body.address) {

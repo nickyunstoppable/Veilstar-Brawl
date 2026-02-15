@@ -16,8 +16,13 @@ import {
     isStellarConfigured,
     matchIdToSessionId,
     reportMatchResultOnChain,
+    submitZkMatchOutcomeOnChain,
 } from "../../lib/stellar-contract";
-import { verifyNoirProof } from "../../lib/zk-proof";
+import { createHash } from "node:crypto";
+
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const ZK_REQUIRE_TRANSCRIPT_HASH = (process.env.ZK_REQUIRE_TRANSCRIPT_HASH ?? "true") !== "false";
 
 interface FinalizeBody {
     winnerAddress?: string;
@@ -25,6 +30,60 @@ interface FinalizeBody {
     publicInputs?: unknown;
     transcriptHash?: string;
     broadcast?: boolean;
+}
+
+function stableStringify(value: unknown): string {
+    if (value === null || typeof value !== "object") {
+        return JSON.stringify(value);
+    }
+
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+
+    const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, val]) => `${JSON.stringify(key)}:${stableStringify(val)}`).join(",")}}`;
+}
+
+async function computeTranscriptHash(matchId: string): Promise<string> {
+    const supabase = getSupabase();
+
+    const { data: match } = await supabase
+        .from("matches")
+        .select("*")
+        .eq("id", matchId)
+        .single();
+
+    const { data: rounds } = await supabase
+        .from("rounds")
+        .select("*")
+        .eq("match_id", matchId)
+        .order("round_number", { ascending: true })
+        .order("turn_number", { ascending: true });
+
+    const roundIds = (rounds || []).map((round: any) => round.id);
+    const { data: moves } = roundIds.length > 0
+        ? await supabase
+            .from("moves")
+            .select("*")
+            .in("round_id", roundIds)
+        : { data: [] as any[] };
+
+    const { data: surges } = await supabase
+        .from("power_surges")
+        .select("*")
+        .eq("match_id", matchId)
+        .order("round_number", { ascending: true });
+
+    const transcript = {
+        match,
+        rounds: rounds || [],
+        moves: moves || [],
+        powerSurges: surges || [],
+    };
+
+    return createHash("sha256").update(stableStringify(transcript)).digest("hex");
 }
 
 export async function handleFinalizeWithZkProof(matchId: string, req: Request): Promise<Response> {
@@ -41,22 +100,43 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             );
         }
 
-        const verification = await verifyNoirProof({
-            proof,
-            publicInputs: body.publicInputs,
-            transcriptHash: body.transcriptHash,
-            matchId,
-            winnerAddress,
-        });
-
-        if (!verification.ok) {
+        const strictFinalize = PRIVATE_ROUNDS_ENABLED && ZK_STRICT_FINALIZE;
+        if ((strictFinalize || ZK_REQUIRE_TRANSCRIPT_HASH) && !body.transcriptHash?.trim()) {
             return Response.json(
-                { error: "ZK proof verification failed" },
+                { error: "Missing 'transcriptHash' for ZK finalize" },
                 { status: 400 },
             );
         }
 
-        console.log(`[ZK Finalize] Proof verified for match ${matchId} via ${verification.backend}`);
+        if (body.transcriptHash?.trim()) {
+            const expectedTranscriptHash = await computeTranscriptHash(matchId);
+            if (body.transcriptHash.trim() !== expectedTranscriptHash) {
+                return Response.json(
+                    {
+                        error: "Transcript hash mismatch",
+                        details: {
+                            expected: expectedTranscriptHash,
+                            received: body.transcriptHash.trim(),
+                        },
+                    },
+                    { status: 409 },
+                );
+            }
+        }
+
+        const vkIdHex = (
+            process.env.ZK_FINALIZE_VK_ID
+            || process.env.ZK_GROTH16_VK_ID
+            || process.env.ZK_VERIFIER_VK_ID
+            || ""
+        ).trim();
+
+        if (!vkIdHex) {
+            return Response.json(
+                { error: "Missing finalize verifier key id (set ZK_FINALIZE_VK_ID or ZK_GROTH16_VK_ID)" },
+                { status: 500 },
+            );
+        }
 
         const supabase = getSupabase();
         const { data: match, error } = await supabase
@@ -97,6 +177,7 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
         }
 
         let onChainTxHash: string | null = null;
+        let onChainOutcomeTxHash: string | null = null;
         let onChainSessionId = typeof match.onchain_session_id === "number"
             ? match.onchain_session_id
             : null;
@@ -156,6 +237,30 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 );
             }
 
+            console.log(`[ZK Finalize] Submitting on-chain match outcome proof for match ${matchId}`);
+            const outcomeProofResult = await submitZkMatchOutcomeOnChain(
+                matchId,
+                winnerAddress,
+                vkIdHex,
+                proof,
+                body.publicInputs,
+                {
+                    contractId: onChainContractId || undefined,
+                    sessionId: onChainSessionId,
+                },
+            );
+
+            if (!outcomeProofResult.success) {
+                return Response.json(
+                    {
+                        error: "On-chain match outcome proof transaction failed",
+                        details: outcomeProofResult.error || null,
+                    },
+                    { status: 502 },
+                );
+            }
+            onChainOutcomeTxHash = outcomeProofResult.txHash || null;
+
             console.log(`[ZK Finalize] Reporting on-chain result for match ${matchId}`);
             const onChainResult = await reportMatchResultOnChain(
                 matchId,
@@ -189,6 +294,12 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                     .eq("id", matchId);
             }
         }
+        else if (strictFinalize) {
+            return Response.json(
+                { error: "Strict trustless finalize requires Stellar on-chain integration" },
+                { status: 409 },
+            );
+        }
 
         if (body.broadcast !== false) {
             await broadcastGameEvent(matchId, "match_ended", {
@@ -201,6 +312,7 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 isPrivateRoom: !!match.room_code,
                 onChainSessionId: onChainSessionId ?? matchIdToSessionId(matchId),
                 onChainTxHash,
+                onChainOutcomeTxHash,
                 zkProofSubmitted: true,
                 transcriptHash: body.transcriptHash || null,
                 proofPublicInputs: body.publicInputs || null,
@@ -212,11 +324,12 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
         return Response.json({
             success: true,
             onChainTxHash,
+            onChainOutcomeTxHash,
             onChainSessionId: onChainSessionId ?? matchIdToSessionId(matchId),
             zkProofAccepted: true,
             zkVerification: {
-                backend: verification.backend,
-                command: verification.command,
+                backend: "onchain-groth16",
+                command: "submit_zk_match_outcome",
             },
         });
     } catch (err) {

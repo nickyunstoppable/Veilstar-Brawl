@@ -9,12 +9,22 @@ import { broadcastGameEvent } from "../../lib/matchmaker";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+
 interface TimeoutBody {
     address: string;
 }
 
 export async function handleTimeoutVictory(matchId: string, req: Request): Promise<Response> {
     try {
+        if (PRIVATE_ROUNDS_ENABLED && ZK_STRICT_FINALIZE) {
+            return Response.json(
+                { error: "Timeout victory is disabled in strict ZK mode. Match completion must be proof-backed." },
+                { status: 409 },
+            );
+        }
+
         const body = await req.json() as TimeoutBody;
         const address = body.address?.trim();
 

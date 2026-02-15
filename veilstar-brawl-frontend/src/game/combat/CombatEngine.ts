@@ -503,15 +503,27 @@ export class CombatEngine {
             };
         }
 
-        // Get outcome from resolution matrix
-        let outcome = opponentMove
-            ? RESOLUTION_MATRIX[myMove][opponentMove]
-            : "hit"; // If opponent is stunned, we hit
+        const normalizeOutcomeForInvisibleMove = (
+            rawOutcome: MoveOutcome,
+            move: MoveType,
+            surgeMods: SurgeModifiers
+        ): MoveOutcome => {
+            if (move === "block" || move === "stunned") return rawOutcome;
+            if (!isInvisibleMove(surgeMods)) return rawOutcome;
+            if (rawOutcome === "missed" || rawOutcome === "staggered" || rawOutcome === "reflected") {
+                return "hit";
+            }
+            return rawOutcome;
+        };
 
-        // Apply Surge Invisible Move (Cannot be countered)
-        if (isInvisibleMove(mySurgeMods)) {
-            outcome = "hit";
-        }
+        // Get outcome from resolution matrix
+        const outcome = normalizeOutcomeForInvisibleMove(
+            opponentMove
+                ? RESOLUTION_MATRIX[myMove][opponentMove]
+                : "hit", // If opponent is stunned, we hit
+            myMove,
+            mySurgeMods
+        );
 
         // Detect counter-hit: when your move beats the opponent's move in RPS
         // Punch > Special, Kick > Punch, Special > Block
@@ -548,7 +560,11 @@ export class CombatEngine {
         // Calculate damage taken
         let damageTaken = 0;
         if (opponentMove && outcome !== "guarding") {
-            const opponentOutcome = RESOLUTION_MATRIX[opponentMove][myMove];
+            const opponentOutcome = normalizeOutcomeForInvisibleMove(
+                RESOLUTION_MATRIX[opponentMove][myMove],
+                opponentMove,
+                opponentSurgeMods
+            );
             if (opponentOutcome === "hit") {
                 const baseDamage = BASE_MOVE_STATS[opponentMove].damage;
                 const modifier = opponentStats.damageModifiers[opponentMove];

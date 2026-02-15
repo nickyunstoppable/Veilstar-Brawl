@@ -134,8 +134,24 @@ CREATE TABLE public.round_private_commits (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT round_private_commits_pkey PRIMARY KEY (id),
+  CONSTRAINT round_private_commits_match_round_player_key UNIQUE (match_id, round_number, player_address),
   CONSTRAINT round_private_commits_match_id_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
   CONSTRAINT round_private_commits_resolved_round_id_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id)
+);
+CREATE TABLE public.round_resolution_locks (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  match_id uuid NOT NULL,
+  round_number integer NOT NULL CHECK (round_number >= 1),
+  lock_owner text,
+  lock_acquired_at timestamp with time zone NOT NULL DEFAULT now(),
+  resolved_round_id uuid,
+  resolved_at timestamp with time zone,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT round_resolution_locks_pkey PRIMARY KEY (id),
+  CONSTRAINT round_resolution_locks_match_round_key UNIQUE (match_id, round_number),
+  CONSTRAINT round_resolution_locks_match_id_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
+  CONSTRAINT round_resolution_locks_resolved_round_id_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id)
 );
 CREATE TABLE public.rounds (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),

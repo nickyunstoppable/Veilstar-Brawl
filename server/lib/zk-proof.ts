@@ -111,6 +111,16 @@ function pruneVerificationCacheIfNeeded(): void {
 }
 
 export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerificationResult> {
+    const maybeGroth16Proof = decodeMaybeBase64(payload.proof);
+    if (maybeGroth16Proof && maybeGroth16Proof.length === 256) {
+        return {
+            ok: true,
+            backend: "onchain-groth16",
+            command: "onchain-verifier-contract",
+            output: "Off-chain verification skipped for Groth16 calldata payload; verification is enforced on-chain.",
+        };
+    }
+
     const verifyEnabled = (process.env.ZK_VERIFY_ENABLED ?? "true") !== "false";
     if (!verifyEnabled) {
         return {

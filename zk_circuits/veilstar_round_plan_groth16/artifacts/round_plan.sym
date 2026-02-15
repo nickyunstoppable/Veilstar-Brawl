@@ -1,0 +1,9 @@
+1,1,0,main.commitment
+2,2,0,main.match_id
+3,3,0,main.round_number
+4,4,0,main.turn_number
+5,5,0,main.player_address
+6,6,0,main.surge_card
+7,7,0,main.selected_move
+8,8,0,main.nonce
+9,-1,0,main.computed

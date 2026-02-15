@@ -3386,6 +3386,17 @@ export class FightScene extends Phaser.Scene {
       const payload = data as { error: string };
       console.log("[FightScene] Move error:", payload.error);
 
+      const message = payload.error?.trim() || "Action failed";
+      this.turnIndicatorText.setText(message);
+      this.turnIndicatorText.setColor("#ef4444");
+
+      this.time.delayedCall(2400, () => {
+        if (this.phase === "selecting" && !this.isWaitingForOpponent) {
+          this.turnIndicatorText.setText("Select your move!");
+          this.turnIndicatorText.setColor("#40e0d0");
+        }
+      });
+
       // Clear in-flight state since the transaction failed
       this.moveInFlight = false;
 

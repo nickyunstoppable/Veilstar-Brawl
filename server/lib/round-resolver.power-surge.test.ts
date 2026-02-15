@@ -104,4 +104,110 @@ describe("round-resolver power surge integration", () => {
 
     expect(result.player1EnergyAfter).toBe(34);
   });
+
+  it("ghost-dag prevents special from being counter-missed by punch", () => {
+    const result = resolveRound(
+      {
+        player1Move: "special",
+        player2Move: "punch",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-ghost-dag",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "ghost-dag",
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player1IsStunnedNext).toBe(false);
+    expect(result.player2HealthAfter).toBe(75);
+  });
+
+  it("both ghost-dag: special vs punch should not stun either player", () => {
+    const result = resolveRound(
+      {
+        player1Move: "special",
+        player2Move: "punch",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-ghost-both-missed",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "ghost-dag",
+        player2Surge: "ghost-dag",
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player2.outcome).toBe("hit");
+    expect(result.player1IsStunnedNext).toBe(false);
+    expect(result.player2IsStunnedNext).toBe(false);
+  });
+
+  it("ghost-dag prevents punch from being counter-staggered by kick", () => {
+    const result = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "kick",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-ghost-stagger",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "ghost-dag",
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player1IsStunnedNext).toBe(false);
+    expect(result.player1HealthAfter).toBe(85);
+    expect(result.player2HealthAfter).toBe(90);
+  });
+
+  it("ghost-dag prevents kick from being reflected by block", () => {
+    const result = resolveRound(
+      {
+        player1Move: "kick",
+        player2Move: "block",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-ghost-reflect",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "ghost-dag",
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player1HealthAfter).toBe(100);
+    expect(result.player2HealthAfter).toBe(92);
+  });
 });

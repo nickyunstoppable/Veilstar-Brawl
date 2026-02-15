@@ -12,15 +12,69 @@
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { GAME_CONSTANTS } from "../../lib/game-types";
+import { createHash } from "node:crypto";
 import {
     getConfiguredContractId,
     isOnChainRegistrationConfigured,
     matchIdToSessionId,
+    getOnChainMatchStateBySession,
     prepareRegistration,
     setMatchStakeOnChain,
     submitSignedRegistration,
     type PreparedRegistration,
 } from "../../lib/stellar-contract";
+
+function deterministicSessionCandidate(matchId: string, index: number): number {
+    const digest = createHash("sha256").update(`${matchId}:${index}`).digest();
+    const value = digest.readUInt32BE(0);
+    return (value % 2_147_483_647) + 1;
+}
+
+async function reserveUniqueSessionId(matchId: string, preferred: number): Promise<number> {
+    const supabase = getSupabase();
+    const contractId = getConfiguredContractId() || null;
+
+    const isSessionAvailable = async (sessionId: number): Promise<boolean> => {
+        const { data: existing, error: existingError } = await supabase
+            .from("matches")
+            .select("id")
+            .eq("onchain_session_id", sessionId)
+            .neq("id", matchId)
+            .limit(1);
+
+        if (existingError) {
+            throw new Error(`Failed to check reserved on-chain session ids: ${existingError.message}`);
+        }
+
+        if ((existing || []).length > 0) return false;
+
+        const onChainState = await getOnChainMatchStateBySession(sessionId, {
+            contractId: contractId || undefined,
+        });
+
+        return !onChainState;
+    };
+
+    const candidates: number[] = [];
+    if (Number.isInteger(preferred) && preferred > 0 && preferred <= 2_147_483_647) {
+        candidates.push(preferred);
+    }
+
+    for (let i = 0; i < 48; i++) {
+        candidates.push(deterministicSessionCandidate(matchId, i));
+    }
+
+    const seen = new Set<number>();
+    for (const sessionId of candidates) {
+        if (seen.has(sessionId)) continue;
+        seen.add(sessionId);
+        if (await isSessionAvailable(sessionId)) {
+            return sessionId;
+        }
+    }
+
+    throw new Error("Unable to reserve a unique on-chain session id after multiple attempts");
+}
 
 async function configureStakeIfNeeded(matchId: string): Promise<{ ok: true } | { ok: false; error: string }> {
     const supabase = getSupabase();
@@ -63,6 +117,10 @@ interface PendingRegistration {
 
 const pendingRegistrations = new Map<string, PendingRegistration>();
 
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // =============================================================================
 // POST /api/matches/:matchId/register/prepare
 // =============================================================================
@@ -84,7 +142,7 @@ export async function handlePrepareRegistration(
         // Fetch match
         const { data: match, error } = await supabase
             .from("matches")
-            .select("player1_address, player2_address, status, is_bot_match")
+            .select("player1_address, player2_address, status, is_bot_match, onchain_session_id")
             .eq("id", matchId)
             .single();
 
@@ -132,11 +190,16 @@ export async function handlePrepareRegistration(
             });
         }
 
+        const reservedSessionId = typeof match.onchain_session_id === "number"
+            ? match.onchain_session_id
+            : await reserveUniqueSessionId(matchId, matchIdToSessionId(matchId));
+
         // Prepare the transaction
         const prepared = await prepareRegistration(
             matchId,
             match.player1_address,
             match.player2_address,
+            { sessionId: reservedSessionId },
         );
 
         // Store pending registration
@@ -156,6 +219,7 @@ export async function handlePrepareRegistration(
                 match.player2_address,
                 {},
                 prepared.transactionXdr,
+                { sessionId: prepared.sessionId },
             );
 
             if (!result.success) {
@@ -257,7 +321,7 @@ export async function handleSubmitAuth(
             const supabase = getSupabase();
             const { data: match, error } = await supabase
                 .from("matches")
-                .select("player1_address, player2_address, status, is_bot_match")
+                .select("player1_address, player2_address, status, is_bot_match, onchain_session_id")
                 .eq("id", matchId)
                 .single();
 
@@ -292,9 +356,13 @@ export async function handleSubmitAuth(
                     ? body.requiredAuthAddresses
                     : [match.player1_address, match.player2_address];
 
+            const reconstructedSessionId = typeof match.onchain_session_id === "number"
+                ? match.onchain_session_id
+                : await reserveUniqueSessionId(matchId, matchIdToSessionId(matchId));
+
             pending = {
                 prepared: {
-                    sessionId: matchIdToSessionId(matchId),
+                    sessionId: reconstructedSessionId,
                     authEntries: {},
                     requiredAuthAddresses: reconstructedRequired,
                     transactionXdr: body.transactionXdr,
@@ -357,13 +425,66 @@ export async function handleSubmitAuth(
         // Both signed — assemble and submit
         pending.submitted = true;
 
-        const result = await submitSignedRegistration(
+        const maxSubmitAttempts = 4;
+        let txXdrCandidate = pending.prepared.transactionXdr;
+        let result = await submitSignedRegistration(
             matchId,
             pending.player1Address,
             pending.player2Address,
             pending.signedAuthEntries,
-            pending.prepared.transactionXdr,
+            txXdrCandidate,
+            { sessionId: pending.prepared.sessionId },
         );
+
+        for (let attempt = 2; attempt <= maxSubmitAttempts; attempt++) {
+            if (result.success) break;
+            if (!/txBadSeq/i.test(result.error || "")) break;
+
+            try {
+                const refreshed = await prepareRegistration(
+                    matchId,
+                    pending.player1Address,
+                    pending.player2Address,
+                    { sessionId: pending.prepared.sessionId },
+                );
+
+                pending.prepared = refreshed;
+                pending.requiredAuthAddresses = refreshed.requiredAuthAddresses;
+                txXdrCandidate = refreshed.transactionXdr;
+            } catch (refreshErr) {
+                const refreshMessage = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+                result = {
+                    success: false,
+                    error: `txBadSeq recovery failed while rebuilding tx: ${refreshMessage}`,
+                };
+                break;
+            }
+
+            await sleep(120 * (attempt - 1));
+
+            result = await submitSignedRegistration(
+                matchId,
+                pending.player1Address,
+                pending.player2Address,
+                pending.signedAuthEntries,
+                txXdrCandidate,
+                { sessionId: pending.prepared.sessionId },
+            );
+        }
+
+        if (!result.success && /txBadSeq/i.test(result.error || "")) {
+            const recoveredOnChainState = await getOnChainMatchStateBySession(
+                pending.prepared.sessionId,
+                { contractId: getConfiguredContractId() || undefined },
+            );
+
+            if (recoveredOnChainState) {
+                result = {
+                    success: true,
+                    sessionId: pending.prepared.sessionId,
+                };
+            }
+        }
 
         // Store on-chain session ID in match metadata
         const supabase = getSupabase();

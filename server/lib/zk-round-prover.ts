@@ -1,7 +1,7 @@
-import { rm, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import type { MoveType } from "./game-types";
 import { POWER_SURGE_CARD_IDS, type PowerSurgeCardId } from "./power-surge";
@@ -16,8 +16,19 @@ const MOVE_TO_CODE: Record<MoveType, number> = {
     special: 4,
 };
 
-const compiledCircuitKeys = new Set<string>();
-const compilingCircuitPromises = new Map<string, Promise<void>>();
+const COMMITMENT_FACTORS = {
+    round: 1000003n,
+    turn: 1000033n,
+    player: 1000037n,
+    surge: 1000039n,
+    move: 1000081n,
+    nonce: 1000099n,
+};
+
+const setupInFlight = new Map<string, Promise<void>>();
+const SNARKJS_CLI_PATH = resolve(process.cwd(), "node_modules", "snarkjs", "build", "cli.cjs");
+const NODE_BIN = existsSync("/usr/bin/node") ? "/usr/bin/node" : "node";
+const SNARKJS_NODE_CLI = [NODE_BIN, SNARKJS_CLI_PATH];
 
 function parseCommandLine(input: string): string[] {
     const args: string[] = [];
@@ -79,62 +90,150 @@ async function runCommand(cmd: string[], cwd: string): Promise<{ stdout: string;
     return { stdout, stderr };
 }
 
-async function ensureCircuitCompiled(circuitDir: string, circuitName: string): Promise<void> {
-    const cacheKey = `${circuitDir}::${circuitName}`;
-    if (compiledCircuitKeys.has(cacheKey)) return;
-
-    const existing = compilingCircuitPromises.get(cacheKey);
-    if (existing) {
-        await existing;
-        return;
-    }
-
-    const compilePromise = (async () => {
-        await runCommand(["nargo", "compile"], circuitDir);
-        compiledCircuitKeys.add(cacheKey);
-    })();
-
-    compilingCircuitPromises.set(cacheKey, compilePromise);
-    try {
-        await compilePromise;
-    } finally {
-        compilingCircuitPromises.delete(cacheKey);
-    }
-}
-
-function toFieldDecimal(input: string): string {
+function toFieldDecimal(input: string): bigint {
     const digestHex = createHash("sha256").update(input).digest("hex");
-    const value = BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
-    return value.toString(10);
-}
-
-function toTomlString(value: string): string {
-    return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-}
-
-function parseCommitmentFromNargoOutput(stdout: string): string {
-    const outputRegex = /Circuit output:\s*(0x[0-9a-fA-F]+)/;
-    const match = stdout.match(outputRegex);
-    if (!match?.[1]) {
-        throw new Error("Unable to parse commitment output from nargo execute");
-    }
-    return match[1].toLowerCase();
+    return BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
 }
 
 function resolveCircuitDir(): string {
-    const configured = process.env.ZK_ROUND_CIRCUIT_DIR?.trim();
+    const configured = process.env.ZK_GROTH16_ROUND_CIRCUIT_DIR?.trim();
     if (configured) return configured;
-    return resolve(process.cwd(), "zk_circuits", "veilstar_round_plan");
-}
-
-function resolveCircuitName(): string {
-    return process.env.ZK_ROUND_CIRCUIT_NAME?.trim() || "veilstar_round_plan";
+    return resolve(process.cwd(), "zk_circuits", "veilstar_round_plan_groth16");
 }
 
 function toSurgeCode(cardId: PowerSurgeCardId): number {
     const idx = POWER_SURGE_CARD_IDS.indexOf(cardId);
     if (idx < 0) return 0;
     return idx + 1;
+}
+
+function toBytes32FromDecimal(value: string): Buffer {
+    const bigint = BigInt(value);
+    if (bigint < 0n) throw new Error("Negative field element is not supported");
+    const hex = bigint.toString(16).padStart(64, "0");
+    return Buffer.from(hex, "hex");
+}
+
+function serializeGroth16ProofToCalldataBytes(proof: any): Buffer {
+    if (!proof?.pi_a || !proof?.pi_b || !proof?.pi_c) {
+        throw new Error("Invalid Groth16 proof JSON shape");
+    }
+
+    const a = [
+        toBytes32FromDecimal(String(proof.pi_a[0])),
+        toBytes32FromDecimal(String(proof.pi_a[1])),
+    ];
+
+    const b = [
+        toBytes32FromDecimal(String(proof.pi_b[0][1])),
+        toBytes32FromDecimal(String(proof.pi_b[0][0])),
+        toBytes32FromDecimal(String(proof.pi_b[1][1])),
+        toBytes32FromDecimal(String(proof.pi_b[1][0])),
+    ];
+
+    const c = [
+        toBytes32FromDecimal(String(proof.pi_c[0])),
+        toBytes32FromDecimal(String(proof.pi_c[1])),
+    ];
+
+    const calldata = Buffer.concat([...a, ...b, ...c]);
+    if (calldata.length !== 256) {
+        throw new Error(`Serialized Groth16 calldata must be 256 bytes, got ${calldata.length}`);
+    }
+
+    return calldata;
+}
+
+async function ensureGroth16Artifacts(circuitDir: string): Promise<void> {
+    const key = circuitDir;
+    const inFlight = setupInFlight.get(key);
+    if (inFlight) {
+        await inFlight;
+        return;
+    }
+
+    const setupPromise = (async () => {
+        const artifactsDir = join(circuitDir, "artifacts");
+        await mkdir(artifactsDir, { recursive: true });
+
+        const r1csPath = join(artifactsDir, "round_plan.r1cs");
+        const wasmPath = join(artifactsDir, "round_plan_js", "round_plan.wasm");
+        const ptauFinalPath = join(artifactsDir, "pot12_final.ptau");
+        const zkeyFinalPath = join(artifactsDir, "round_plan_final.zkey");
+        const vkeyPath = join(artifactsDir, "verification_key.json");
+
+        const circomCmd = process.env.ZK_GROTH16_CIRCOM_CMD?.trim()
+            ? parseCommandLine(process.env.ZK_GROTH16_CIRCOM_CMD)
+            : ["npx", "circom2", "round_plan.circom", "--r1cs", "--wasm", "--sym", "-o", "artifacts"];
+
+        if (!existsSync(r1csPath) || !existsSync(wasmPath)) {
+            await runCommand(circomCmd, circuitDir);
+        }
+
+        if (!existsSync(ptauFinalPath)) {
+            await runCommand([...SNARKJS_NODE_CLI, "powersoftau", "new", "bn128", "12", "artifacts/pot12_0000.ptau", "-v"], circuitDir);
+            await runCommand([
+                ...SNARKJS_NODE_CLI, "powersoftau", "contribute",
+                "artifacts/pot12_0000.ptau",
+                "artifacts/pot12_0001.ptau",
+                "--name", "veilstar-groth16-local-ptau",
+                "-e", "veilstar-local-ptau-entropy",
+            ], circuitDir);
+            await runCommand([
+                ...SNARKJS_NODE_CLI, "powersoftau", "prepare", "phase2",
+                "artifacts/pot12_0001.ptau",
+                "artifacts/pot12_final.ptau",
+            ], circuitDir);
+        }
+
+        if (!existsSync(zkeyFinalPath) || !existsSync(vkeyPath)) {
+            await runCommand([
+                ...SNARKJS_NODE_CLI, "groth16", "setup",
+                "artifacts/round_plan.r1cs",
+                "artifacts/pot12_final.ptau",
+                "artifacts/round_plan_0000.zkey",
+            ], circuitDir);
+            await runCommand([
+                ...SNARKJS_NODE_CLI, "zkey", "contribute",
+                "artifacts/round_plan_0000.zkey",
+                "artifacts/round_plan_final.zkey",
+                "--name", "veilstar-groth16-local-zkey",
+                "-e", "veilstar-local-zkey-entropy",
+            ], circuitDir);
+            await runCommand([
+                ...SNARKJS_NODE_CLI, "zkey", "export", "verificationkey",
+                "artifacts/round_plan_final.zkey",
+                "artifacts/verification_key.json",
+            ], circuitDir);
+        }
+    })();
+
+    setupInFlight.set(key, setupPromise);
+    try {
+        await setupPromise;
+    } finally {
+        setupInFlight.delete(key);
+    }
+}
+
+function computeCommitment(inputs: {
+    matchIdField: bigint;
+    roundNumber: bigint;
+    turnNumber: bigint;
+    playerField: bigint;
+    surgeCode: bigint;
+    moveCode: bigint;
+    nonce: bigint;
+}): bigint {
+    return (
+        inputs.matchIdField
+        + inputs.roundNumber * COMMITMENT_FACTORS.round
+        + inputs.turnNumber * COMMITMENT_FACTORS.turn
+        + inputs.playerField * COMMITMENT_FACTORS.player
+        + inputs.surgeCode * COMMITMENT_FACTORS.surge
+        + inputs.moveCode * COMMITMENT_FACTORS.move
+        + inputs.nonce * COMMITMENT_FACTORS.nonce
+    ) % BN254_FIELD_PRIME;
 }
 
 export interface ProvePrivateRoundPlanParams {
@@ -153,96 +252,99 @@ export interface ProvePrivateRoundPlanResult {
     publicInputs: string;
     nonce: string;
     prover: {
-        nargo: string;
-        bb: string;
+        backend: string;
         circuitDir: string;
+        verifyKeyPath: string;
     };
 }
 
 export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams): Promise<ProvePrivateRoundPlanResult> {
     const circuitDir = resolveCircuitDir();
-    const circuitName = resolveCircuitName();
 
-    if (!existsSync(join(circuitDir, "Nargo.toml"))) {
-        throw new Error(`Noir circuit directory not found or invalid: ${circuitDir}`);
+    if (!existsSync(join(circuitDir, "round_plan.circom"))) {
+        throw new Error(`Groth16 circuit not found: ${join(circuitDir, "round_plan.circom")}`);
     }
 
-    const requestId = randomUUID().replaceAll("-", "");
-    const proverName = `Prover_${requestId}`;
-    const witnessName = `witness_${requestId}`;
-    const proverTomlPath = join(circuitDir, `${proverName}.toml`);
-    const witnessPath = join(circuitDir, "target", `${witnessName}.gz`);
-    const bytecodePath = join(circuitDir, "target", `${circuitName}.json`);
+    await ensureGroth16Artifacts(circuitDir);
 
-    const outputDir = join(tmpdir(), `vbb-zk-round-${requestId}`);
-    const proofPath = join(outputDir, "proof");
-    const publicInputsPath = join(outputDir, "public_inputs");
+    const artifactsDir = join(circuitDir, "artifacts");
+    const wasmPath = join(artifactsDir, "round_plan_js", "round_plan.wasm");
+    const zkeyPath = join(artifactsDir, "round_plan_final.zkey");
+    const vkeyPath = join(artifactsDir, "verification_key.json");
+
+    const requestId = randomUUID().replaceAll("-", "");
+    const workDir = join(tmpdir(), `vbb-groth16-round-${requestId}`);
+    await mkdir(workDir, { recursive: true });
+
+    const inputPath = join(workDir, "input.json");
+    const proofPath = join(workDir, "proof.json");
+    const publicPath = join(workDir, "public.json");
 
     const moveCode = MOVE_TO_CODE[params.move] ?? MOVE_TO_CODE.block;
 
-    const nonce = (params.nonce && params.nonce.trim().length > 0)
-        ? params.nonce.trim()
+    const nonceValue = (params.nonce && params.nonce.trim().length > 0)
+        ? BigInt(params.nonce.trim())
         : toFieldDecimal(`${params.matchId}|${params.playerAddress}|${params.roundNumber}|${params.turnNumber}|${Date.now()}|${requestId}`);
 
-    const tomlLines = [
-        `match_id = ${toTomlString(toFieldDecimal(params.matchId))}`,
-        `round_number = ${toTomlString(String(params.roundNumber))}`,
-        `turn_number = ${toTomlString(String(params.turnNumber))}`,
-        `player_address = ${toTomlString(toFieldDecimal(params.playerAddress))}`,
-        `surge_card = ${toTomlString(String(toSurgeCode(params.surgeCardId)))}`,
-        `selected_move = ${toTomlString(String(moveCode))}`,
-        `nonce = ${toTomlString(nonce)}`,
-    ];
+    const matchIdField = toFieldDecimal(params.matchId);
+    const playerField = toFieldDecimal(params.playerAddress);
+    const surgeCode = BigInt(toSurgeCode(params.surgeCardId));
 
-    const customNargo = process.env.ZK_ROUND_NARGO_CMD?.trim();
-    const customBbProve = process.env.ZK_ROUND_BB_PROVE_CMD?.trim();
+    const commitmentValue = computeCommitment({
+        matchIdField,
+        roundNumber: BigInt(params.roundNumber),
+        turnNumber: BigInt(params.turnNumber),
+        playerField,
+        surgeCode,
+        moveCode: BigInt(moveCode),
+        nonce: nonceValue,
+    });
 
-    const nargoCommand = customNargo
-        ? parseCommandLine(customNargo)
-        : ["nargo", "execute", witnessName, "--prover-name", proverName];
-
-    const bbProveCommand = customBbProve
-        ? parseCommandLine(customBbProve)
-        : ["bb", "prove", "-b", bytecodePath, "-w", witnessPath, "-o", outputDir];
-
-    if (nargoCommand.length === 0) {
-        throw new Error("ZK_ROUND_NARGO_CMD is empty");
-    }
-    if (bbProveCommand.length === 0) {
-        throw new Error("ZK_ROUND_BB_PROVE_CMD is empty");
-    }
+    const input = {
+        commitment: commitmentValue.toString(),
+        match_id: matchIdField.toString(),
+        round_number: String(params.roundNumber),
+        turn_number: String(params.turnNumber),
+        player_address: playerField.toString(),
+        surge_card: surgeCode.toString(),
+        selected_move: String(moveCode),
+        nonce: nonceValue.toString(),
+    };
 
     try {
-        await writeFile(proverTomlPath, `${tomlLines.join("\n")}\n`, "utf8");
+        await writeFile(inputPath, JSON.stringify(input), "utf8");
 
-        await ensureCircuitCompiled(circuitDir, circuitName);
-        const nargoRun = await runCommand(nargoCommand, circuitDir);
+        await runCommand([
+            ...SNARKJS_NODE_CLI, "groth16", "fullprove",
+            inputPath,
+            wasmPath,
+            zkeyPath,
+            proofPath,
+            publicPath,
+        ], circuitDir);
 
-        const commitment = parseCommitmentFromNargoOutput(`${nargoRun.stdout}\n${nargoRun.stderr}`);
-
-        await runCommand(bbProveCommand, circuitDir);
-
-        const [proofBytes, publicInputBytes] = await Promise.all([
-            readFile(proofPath),
-            readFile(publicInputsPath),
+        const [proofJsonRaw, publicJsonRaw] = await Promise.all([
+            readFile(proofPath, "utf8"),
+            readFile(publicPath, "utf8"),
         ]);
 
+        const proofJson = JSON.parse(proofJsonRaw);
+        const publicInputsJson = JSON.parse(publicJsonRaw);
+
+        const proofBytes = serializeGroth16ProofToCalldataBytes(proofJson);
+
         return {
-            commitment,
+            commitment: `0x${toBytes32FromDecimal(commitmentValue.toString()).toString("hex")}`,
             proof: `base64:${proofBytes.toString("base64")}`,
-            publicInputs: `base64:${publicInputBytes.toString("base64")}`,
-            nonce,
+            publicInputs: JSON.stringify(publicInputsJson),
+            nonce: nonceValue.toString(),
             prover: {
-                nargo: nargoCommand.join(" "),
-                bb: bbProveCommand.join(" "),
+                backend: "circom2-snarkjs-groth16",
                 circuitDir,
+                verifyKeyPath: vkeyPath,
             },
         };
     } finally {
-        await Promise.all([
-            unlink(proverTomlPath).catch(() => {}),
-            unlink(witnessPath).catch(() => {}),
-            rm(outputDir, { recursive: true, force: true }).catch(() => {}),
-        ]);
+        await rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
 }

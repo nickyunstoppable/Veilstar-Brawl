@@ -4,6 +4,7 @@ const ZK_API_BASE = import.meta.env.VITE_ZK_API_BASE_URL || API_BASE;
 export interface CommitPrivateRoundPlanRequest {
     address: string;
     roundNumber: number;
+    turnNumber: number;
     commitment: string;
     proof: string;
     publicInputs?: unknown;
@@ -15,6 +16,7 @@ export interface CommitPrivateRoundPlanRequest {
 export interface ResolvePrivateRoundRequest {
     address: string;
     roundNumber: number;
+    turnNumber: number;
     move: "punch" | "kick" | "block" | "special" | "stunned";
     surgeCardId?: string | null;
     proof: string;

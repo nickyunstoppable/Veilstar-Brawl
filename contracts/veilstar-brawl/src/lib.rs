@@ -21,7 +21,7 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype,
-    symbol_short, token, Address, BytesN, Env, IntoVal, vec,
+    symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Vec, vec,
 };
 
 // ==========================================================================
@@ -41,6 +41,16 @@ pub trait GameHub {
     );
 
     fn end_game(env: Env, session_id: u32, player1_won: bool);
+}
+
+#[contractclient(name = "ZkVerifierContractClient")]
+pub trait ZkVerifierContract {
+    fn verify_round_proof(
+        env: Env,
+        vk_id: BytesN<32>,
+        proof: Bytes,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> bool;
 }
 
 // ==========================================================================
@@ -65,6 +75,16 @@ pub enum Error {
     StakeDepositExpired = 12,
     DeadlineNotReached = 13,
     MatchCancelled = 14,
+    InvalidZkCommitment = 15,
+    ZkCommitAlreadySubmitted = 16,
+    ZkCommitRequired = 17,
+    InvalidZkVerifier = 18,
+    ZkCommitNotFound = 19,
+    ZkVerificationAlreadySubmitted = 20,
+    ZkProofInvalid = 21,
+    ZkVerifierNotConfigured = 22,
+    ZkMatchOutcomeRequired = 23,
+    InvalidWinnerClaim = 24,
 }
 
 // ==========================================================================
@@ -101,20 +121,47 @@ pub struct Match {
     pub player1_stake_paid: bool,
     pub player2_stake_paid: bool,
     pub fee_accrued_stroops: i128,
+    pub player1_zk_commits: u32,
+    pub player2_zk_commits: u32,
+    pub player1_zk_verified: u32,
+    pub player2_zk_verified: u32,
     pub is_cancelled: bool,
     pub winner: Option<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkVerificationRecord {
+    pub verifier_contract: Address,
+    pub commitment: BytesN<32>,
+    pub vk_id: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkMatchOutcomeRecord {
+    pub verifier_contract: Address,
+    pub winner: Address,
+    pub vk_id: BytesN<32>,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Match(u32),
+    MatchSalt(u32),
+    ZkCommit(u32, BytesN<32>, u32, u32, bool),
+    ZkVerified(u32, BytesN<32>, u32, u32, bool),
+    ZkMatchOutcome(u32),
     GameHubAddress,
     Admin,
+    ZkVerifierContractAddress,
+    ZkVerifierVkId,
     TreasuryAddress,
     XlmToken,
     FeeAccrued,
     LastSweepTs,
+    ZkGateRequired,
 }
 
 // ==========================================================================
@@ -176,6 +223,8 @@ impl VeilstarBrawlContract {
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
         env.storage().instance().set(&DataKey::FeeAccrued, &0_i128);
         env.storage().instance().set(&DataKey::LastSweepTs, &0_u64);
+        env.storage().instance().set(&DataKey::ZkGateRequired, &false);
+        env.storage().instance().set(&DataKey::ZkVerifierVkId, &BytesN::from_array(&env, &[0u8; 32]));
     }
 
     // ======================================================================
@@ -233,15 +282,29 @@ impl VeilstarBrawlContract {
             player1_stake_paid: false,
             player2_stake_paid: false,
             fee_accrued_stroops: 0,
+            player1_zk_commits: 0,
+            player2_zk_commits: 0,
+            player1_zk_verified: 0,
+            player2_zk_verified: 0,
             is_cancelled: false,
             winner: None,
         };
 
         let key = DataKey::Match(session_id);
+        let mut salt_bytes = [0u8; 8];
+        salt_bytes[..4].copy_from_slice(&session_id.to_be_bytes());
+        salt_bytes[4..].copy_from_slice(&env.ledger().sequence().to_be_bytes());
+        let match_salt = env.crypto().sha256(&Bytes::from_array(&env, &salt_bytes));
+        let salt_key = DataKey::MatchSalt(session_id);
+
         env.storage().temporary().set(&key, &m);
+        env.storage().temporary().set(&salt_key, &match_salt);
         env.storage()
             .temporary()
             .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        env.storage()
+            .temporary()
+            .extend_ttl(&salt_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
 
         Ok(())
     }
@@ -396,7 +459,31 @@ impl VeilstarBrawlContract {
             return Err(Error::MatchCancelled);
         }
 
-        let winner = if player1_won {
+        let zk_gate_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkGateRequired)
+            .unwrap_or(false);
+
+        if zk_gate_required && (m.player1_zk_verified == 0 || m.player2_zk_verified == 0) {
+            return Err(Error::ZkCommitRequired);
+        }
+
+        let winner = if zk_gate_required {
+            let outcome_key = DataKey::ZkMatchOutcome(session_id);
+            let outcome: ZkMatchOutcomeRecord = env
+                .storage()
+                .temporary()
+                .get(&outcome_key)
+                .ok_or(Error::ZkMatchOutcomeRequired)?;
+
+            let expected_player1_won = outcome.winner == m.player1;
+            if expected_player1_won != player1_won {
+                return Err(Error::InvalidWinnerClaim);
+            }
+
+            outcome.winner
+        } else if player1_won {
             m.player1.clone()
         } else {
             m.player2.clone()
@@ -447,6 +534,268 @@ impl VeilstarBrawlContract {
             .expect("GameHub not set");
         let hub = GameHubClient::new(&env, &hub_addr);
         hub.end_game(&session_id, &player1_won);
+
+        Ok(())
+    }
+
+    pub fn submit_zk_match_outcome(
+        env: Env,
+        session_id: u32,
+        winner: Address,
+        vk_id: BytesN<32>,
+        proof: Bytes,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<(), Error> {
+        if proof.len() != 256 || public_inputs.is_empty() {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let key = DataKey::Match(session_id);
+        let m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let configured_vk_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerifierVkId)
+            .unwrap_or(zero.clone());
+
+        if configured_vk_id == zero || vk_id != configured_vk_id {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        if winner != m.player1 && winner != m.player2 {
+            return Err(Error::InvalidWinnerClaim);
+        }
+
+        let verifier_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerifierContractAddress)
+            .ok_or(Error::ZkVerifierNotConfigured)?;
+
+        let verifier = ZkVerifierContractClient::new(&env, &verifier_contract);
+        let verified = verifier.verify_round_proof(&vk_id, &proof, &public_inputs);
+        if !verified {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let outcome_key = DataKey::ZkMatchOutcome(session_id);
+        if env.storage().temporary().has(&outcome_key) {
+            return Err(Error::ZkVerificationAlreadySubmitted);
+        }
+
+        let record = ZkMatchOutcomeRecord {
+            verifier_contract: verifier_contract.clone(),
+            winner,
+            vk_id,
+        };
+
+        env.storage().temporary().set(&outcome_key, &record);
+        env.storage()
+            .temporary()
+            .extend_ttl(&outcome_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        env.events().publish((symbol_short!("zkout"), session_id), verifier_contract);
+
+        Ok(())
+    }
+
+    pub fn submit_zk_commit(
+        env: Env,
+        session_id: u32,
+        player: Address,
+        round: u32,
+        turn: u32,
+        commitment: BytesN<32>,
+    ) -> Result<(), Error> {
+        player.require_auth();
+
+        if round == 0 || turn == 0 {
+            return Err(Error::InvalidZkCommitment);
+        }
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        let is_p1 = player == m.player1;
+        let is_p2 = player == m.player2;
+        if !is_p1 && !is_p2 {
+            return Err(Error::NotPlayer);
+        }
+
+        let match_salt: BytesN<32> = env
+            .storage()
+            .temporary()
+            .get(&DataKey::MatchSalt(session_id))
+            .ok_or(Error::MatchNotFound)?;
+
+        let zk_key = DataKey::ZkCommit(session_id, match_salt, round, turn, is_p1);
+        let had_existing_commit = env.storage().temporary().has(&zk_key);
+        env.storage().temporary().set(&zk_key, &commitment);
+        env.storage()
+            .temporary()
+            .extend_ttl(&zk_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        if !had_existing_commit {
+            if is_p1 {
+                m.player1_zk_commits += 1;
+            } else if is_p2 {
+                m.player2_zk_commits += 1;
+            }
+        }
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        env.events().publish(
+            (symbol_short!("zkcmt"), session_id, round, turn),
+            (player, commitment),
+        );
+
+        Ok(())
+    }
+
+    pub fn submit_zk_verification(
+        env: Env,
+        session_id: u32,
+        player: Address,
+        round: u32,
+        turn: u32,
+        commitment: BytesN<32>,
+        vk_id: BytesN<32>,
+        proof: Bytes,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<(), Error> {
+        if round == 0 || turn == 0 {
+            return Err(Error::InvalidZkCommitment);
+        }
+
+        if proof.len() == 0 {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let key = DataKey::Match(session_id);
+        let mut m: Match = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::MatchNotFound)?;
+
+        if m.winner.is_some() {
+            return Err(Error::MatchAlreadyEnded);
+        }
+
+        if m.is_cancelled {
+            return Err(Error::MatchCancelled);
+        }
+
+        let is_p1 = player == m.player1;
+        let is_p2 = player == m.player2;
+        if !is_p1 && !is_p2 {
+            return Err(Error::NotPlayer);
+        }
+
+        let match_salt: BytesN<32> = env
+            .storage()
+            .temporary()
+            .get(&DataKey::MatchSalt(session_id))
+            .ok_or(Error::MatchNotFound)?;
+
+        let commit_key = DataKey::ZkCommit(session_id, match_salt.clone(), round, turn, is_p1);
+        let stored_commitment: BytesN<32> = env
+            .storage()
+            .temporary()
+            .get(&commit_key)
+            .ok_or(Error::ZkCommitNotFound)?;
+
+        if stored_commitment != commitment {
+            return Err(Error::InvalidZkCommitment);
+        }
+
+        let verify_key = DataKey::ZkVerified(session_id, match_salt, round, turn, is_p1);
+        let had_existing_verification = env.storage().temporary().has(&verify_key);
+
+        let configured_vk_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerifierVkId)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+
+        if configured_vk_id != BytesN::from_array(&env, &[0u8; 32]) && vk_id != configured_vk_id {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        if proof.len() != 256 || public_inputs.is_empty() {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let verifier_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerifierContractAddress)
+            .ok_or(Error::ZkVerifierNotConfigured)?;
+
+        let verifier = ZkVerifierContractClient::new(&env, &verifier_contract);
+        let verified = verifier.verify_round_proof(&vk_id, &proof, &public_inputs);
+        if !verified {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let record = ZkVerificationRecord {
+            verifier_contract: verifier_contract.clone(),
+            commitment,
+            vk_id,
+        };
+
+        env.storage().temporary().set(&verify_key, &record);
+        env.storage()
+            .temporary()
+            .extend_ttl(&verify_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        if !had_existing_verification {
+            if is_p1 {
+                m.player1_zk_verified += 1;
+            } else if is_p2 {
+                m.player2_zk_verified += 1;
+            }
+        }
+
+        env.storage().temporary().set(&key, &m);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+        env.events().publish(
+            (symbol_short!("zkver"), session_id, round, turn),
+            (player, verifier_contract),
+        );
 
         Ok(())
     }
@@ -815,6 +1164,34 @@ impl VeilstarBrawlContract {
             .unwrap_or(0_u64)
     }
 
+    pub fn get_zk_gate_required(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::ZkGateRequired)
+            .unwrap_or(false)
+    }
+
+    pub fn get_zk_verifier_contract(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ZkVerifierContractAddress)
+            .ok_or(Error::ZkVerifierNotConfigured)
+    }
+
+    pub fn get_zk_verifier_vk_id(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ZkVerifierVkId)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    pub fn get_zk_match_outcome(env: Env, session_id: u32) -> Result<ZkMatchOutcomeRecord, Error> {
+        env.storage()
+            .temporary()
+            .get(&DataKey::ZkMatchOutcome(session_id))
+            .ok_or(Error::ZkMatchOutcomeRequired)
+    }
+
     // ======================================================================
     // Admin setters
     // ======================================================================
@@ -851,6 +1228,38 @@ impl VeilstarBrawlContract {
         env.storage()
             .instance()
             .set(&DataKey::TreasuryAddress, &new_treasury);
+    }
+
+    pub fn set_zk_gate_required(env: Env, required: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::ZkGateRequired, &required);
+    }
+
+    pub fn set_zk_verifier_contract(env: Env, verifier_contract: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::ZkVerifierContractAddress, &verifier_contract);
+    }
+
+    pub fn set_zk_verifier_vk_id(env: Env, vk_id: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::ZkVerifierVkId, &vk_id);
     }
 
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {

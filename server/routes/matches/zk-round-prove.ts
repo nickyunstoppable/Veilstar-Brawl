@@ -58,7 +58,7 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
         });
 
         console.log(
-            `[ZK Round Prove] Proof generated match=${matchId} round=${roundNumber} turn=${turnNumber} prover=${proof.prover}`,
+            `[ZK Round Prove] Proof generated match=${matchId} round=${roundNumber} turn=${turnNumber} prover=${JSON.stringify(proof.prover)}`,
         );
 
         return Response.json({

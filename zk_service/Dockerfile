@@ -3,7 +3,7 @@ FROM oven/bun:1
 WORKDIR /app
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends curl ca-certificates git jq \
+	&& apt-get install -y --no-install-recommends curl ca-certificates git jq nodejs npm \
 	&& rm -rf /var/lib/apt/lists/*
 
 ARG BB_VERSION=3.0.0-nightly.20260102

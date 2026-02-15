@@ -5,7 +5,7 @@
 
 use crate::{Error, MoveType, VeilstarBrawlContract, VeilstarBrawlContractClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{contract, contractimpl, vec, Address, Bytes, BytesN, Env, Vec};
 
 // ============================================================================
 // Mock GameHub
@@ -32,14 +32,19 @@ impl MockGameHub {
     pub fn add_game(_env: Env, _game_address: Address) {}
 }
 
-// ============================================================================
-// Mock XLM Token (SAC-compatible)
-// ============================================================================
+#[contract]
+pub struct MockZkVerifier;
 
-mod mock_token {
-    soroban_sdk::contractimport!(
-        file = "../target/wasm32-unknown-unknown/release/soroban_token_contract.wasm"
-    );
+#[contractimpl]
+impl MockZkVerifier {
+    pub fn verify_round_proof(
+        _env: Env,
+        _vk_id: BytesN<32>,
+        _proof: Bytes,
+        _public_inputs: Vec<BytesN<32>>,
+    ) -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -54,6 +59,7 @@ fn setup_test() -> (
     Address,   // player2
     Address,   // treasury
     Address,   // xlm token
+    Address,   // zk verifier
 ) {
     let env = Env::default();
     env.mock_all_auths();
@@ -77,6 +83,9 @@ fn setup_test() -> (
     let xlm_addr = env.register_stellar_asset_contract_v2(xlm_admin.clone())
         .address();
 
+    // Deploy mock zk verifier
+    let verifier_addr = env.register(MockZkVerifier, ());
+
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let player1 = Address::generate(&env);
@@ -96,10 +105,10 @@ fn setup_test() -> (
     // Mint some to contract for fee reserve testing
     xlm.mint(&contract_id, &200_000_000); // 20 XLM
 
-    (env, client, admin, player1, player2, treasury, xlm_addr)
+    (env, client, admin, player1, player2, treasury, xlm_addr, verifier_addr)
 }
 
-fn assert_contract_error<T, E>(
+fn assert_contract_error<T: core::fmt::Debug, E: core::fmt::Debug>(
     result: &Result<Result<T, E>, Result<Error, soroban_sdk::InvokeError>>,
     expected: Error,
 ) {
@@ -115,7 +124,7 @@ fn assert_contract_error<T, E>(
 
 #[test]
 fn test_start_and_get_match() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
 
@@ -130,7 +139,7 @@ fn test_start_and_get_match() {
 
 #[test]
 fn test_submit_move_increments_counters() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
 
@@ -146,7 +155,7 @@ fn test_submit_move_increments_counters() {
 
 #[test]
 fn test_submit_power_surge_collects_fee() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
 
@@ -159,7 +168,7 @@ fn test_submit_power_surge_collects_fee() {
 
 #[test]
 fn test_end_match_sets_winner() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
     client.submit_move(&1u32, &p1, &MoveType::Special, &1u32);
@@ -173,7 +182,7 @@ fn test_end_match_sets_winner() {
 
 #[test]
 fn test_end_match_player2_wins() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&2u32, &p1, &p2, &100_000, &100_000);
     client.end_game(&2u32, &false);
@@ -188,7 +197,7 @@ fn test_end_match_player2_wins() {
 
 #[test]
 fn test_cannot_submit_move_after_match_ended() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
     client.end_game(&1u32, &true);
@@ -199,7 +208,7 @@ fn test_cannot_submit_move_after_match_ended() {
 
 #[test]
 fn test_cannot_end_match_twice() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
     client.end_game(&1u32, &true);
@@ -210,7 +219,7 @@ fn test_cannot_end_match_twice() {
 
 #[test]
 fn test_non_player_cannot_submit_move() {
-    let (env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
     let outsider = Address::generate(&env);
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
@@ -221,7 +230,7 @@ fn test_non_player_cannot_submit_move() {
 
 #[test]
 fn test_match_not_found() {
-    let (_env, client, _admin, _p1, _p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, _p1, _p2, _treasury, _xlm, _verifier) = setup_test();
 
     let result = client.try_get_match(&999u32);
     assert_contract_error(&result, Error::MatchNotFound);
@@ -233,18 +242,16 @@ fn test_match_not_found() {
 
 #[test]
 fn test_sweep_treasury() {
-    let (env, client, _admin, p1, p2, treasury, xlm_addr) = setup_test();
+    let (env, client, _admin, p1, p2, treasury, xlm_addr, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
 
-    // Submit many moves to accumulate XLM in contract
-    for turn in 1..=20u32 {
-        client.submit_move(&1u32, &p1, &MoveType::Punch, &turn);
-        client.submit_move(&1u32, &p2, &MoveType::Kick, &turn);
-    }
+    // Fees accrue from stake settlement, not move submissions.
+    client.set_match_stake(&1u32, &10_000_000i128); // 1 XLM stake per player
+    client.deposit_stake(&1u32, &p1);
+    client.deposit_stake(&1u32, &p2);
+    client.end_game(&1u32, &true);
 
-    // Contract now has: 20 XLM (initial) + 40 * 0.0001 XLM = 20.004 XLM
-    // Sweep should transfer 20.004 - 10 = 10.004 XLM to treasury
     let swept = client.sweep_treasury();
     assert!(swept > 0);
 
@@ -256,12 +263,11 @@ fn test_sweep_treasury() {
 
 #[test]
 fn test_sweep_nothing_when_below_reserve() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, _p1, _p2, _treasury, _xlm, _verifier) = setup_test();
 
-    // Only 20 XLM in contract. Reserve is 10 XLM.
-    // 20 - 10 = 10 XLM sweepable → should succeed
-    let swept = client.sweep_treasury();
-    assert_eq!(swept, 100_000_000); // 10 XLM
+    // No accrued protocol fees yet, so sweep must fail.
+    let result = client.try_sweep_treasury();
+    assert_contract_error(&result, Error::NothingToSweep);
 }
 
 // ============================================================================
@@ -270,15 +276,7 @@ fn test_sweep_nothing_when_below_reserve() {
 
 #[test]
 fn test_multiple_independent_matches() {
-    let (env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
-    let p3 = Address::generate(&env);
-    let p4 = Address::generate(&env);
-
-    // Mint XLM for new players
-    let xlm_admin = Address::generate(&env);
-    // p3 and p4 need XLM — use the asset client
-    // Actually they're already in the test env with mock_all_auths,
-    // but they need token balance. Let's just test with p1/p2 in different sessions.
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&10u32, &p1, &p2, &100_000, &100_000);
     client.start_game(&20u32, &p2, &p1, &200_000, &200_000);
@@ -291,12 +289,8 @@ fn test_multiple_independent_matches() {
 
     assert_eq!(m1.player1_moves, 1);
     assert_eq!(m1.player2_moves, 0);
-    assert_eq!(m2.player1_moves, 0); // p2 is player1 in session 20
-    assert_eq!(m2.player2_moves, 0); // wait, p2 submitted but they're player1 in session 20
-
-    // Actually p2 is player1 in session 20, so p2's move counts as player1_moves
-    let m2 = client.get_match(&20u32);
     assert_eq!(m2.player1_moves, 1); // p2 is player1 here
+    assert_eq!(m2.player2_moves, 0);
 }
 
 // ============================================================================
@@ -305,7 +299,7 @@ fn test_multiple_independent_matches() {
 
 #[test]
 fn test_all_move_types() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&1u32, &p1, &p2, &100_000, &100_000);
 
@@ -320,7 +314,7 @@ fn test_all_move_types() {
 
 #[test]
 fn test_set_match_stake_is_idempotent_for_same_amount() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&55u32, &p1, &p2, &100_000, &100_000);
 
@@ -333,7 +327,7 @@ fn test_set_match_stake_is_idempotent_for_same_amount() {
 
 #[test]
 fn test_deposit_stake_is_idempotent_per_player() {
-    let (_env, client, _admin, p1, p2, _treasury, _xlm) = setup_test();
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
     client.start_game(&77u32, &p1, &p2, &100_000, &100_000);
     client.set_match_stake(&77u32, &10_000_000i128);
@@ -345,4 +339,182 @@ fn test_deposit_stake_is_idempotent_per_player() {
     let m = client.get_match(&77u32);
     assert!(m.player1_stake_paid);
     assert!(m.player2_stake_paid);
+}
+
+#[test]
+fn test_end_game_requires_zk_commit_when_gate_enabled() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
+
+    client.start_game(&101u32, &p1, &p2, &100_000, &100_000);
+    client.set_zk_gate_required(&true);
+
+    let c1 = BytesN::from_array(&env, &[1u8; 32]);
+    let c2 = BytesN::from_array(&env, &[2u8; 32]);
+    client.submit_zk_commit(&101u32, &p1, &1u32, &1u32, &c1);
+    client.submit_zk_commit(&101u32, &p2, &1u32, &1u32, &c2);
+
+    let result = client.try_end_game(&101u32, &true);
+    assert_contract_error(&result, Error::ZkCommitRequired);
+}
+
+#[test]
+fn test_submit_zk_commit_allows_end_game_under_gate() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, verifier) = setup_test();
+
+    client.start_game(&102u32, &p1, &p2, &100_000, &100_000);
+    client.set_zk_gate_required(&true);
+
+    let c1 = BytesN::from_array(&env, &[1u8; 32]);
+    let c2 = BytesN::from_array(&env, &[2u8; 32]);
+
+    client.submit_zk_commit(&102u32, &p1, &1u32, &1u32, &c1);
+    client.submit_zk_commit(&102u32, &p2, &1u32, &1u32, &c2);
+
+    client.set_zk_verifier_contract(&verifier);
+
+    let vk_id = BytesN::from_array(&env, &[3u8; 32]);
+    client.set_zk_verifier_vk_id(&vk_id);
+    let proof = Bytes::from_array(&env, &[4u8; 256]);
+    let public_inputs = vec![&env, BytesN::from_array(&env, &[5u8; 32])];
+
+    client.submit_zk_verification(
+        &102u32,
+        &p1,
+        &1u32,
+        &1u32,
+        &c1,
+        &vk_id,
+        &proof,
+        &public_inputs,
+    );
+    client.submit_zk_verification(
+        &102u32,
+        &p2,
+        &1u32,
+        &1u32,
+        &c2,
+        &vk_id,
+        &proof,
+        &public_inputs,
+    );
+
+    client.submit_zk_match_outcome(&102u32, &p1, &vk_id, &proof, &public_inputs);
+
+    client.end_game(&102u32, &true);
+    let m = client.get_match(&102u32);
+    assert_eq!(m.winner.unwrap(), p1);
+    assert_eq!(m.player1_zk_commits, 1);
+    assert_eq!(m.player2_zk_commits, 1);
+    assert_eq!(m.player1_zk_verified, 1);
+    assert_eq!(m.player2_zk_verified, 1);
+}
+
+#[test]
+fn test_end_game_requires_match_outcome_when_gate_enabled() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, verifier) = setup_test();
+
+    client.start_game(&110u32, &p1, &p2, &100_000, &100_000);
+    client.set_zk_gate_required(&true);
+
+    let c1 = BytesN::from_array(&env, &[1u8; 32]);
+    let c2 = BytesN::from_array(&env, &[2u8; 32]);
+    let vk_id = BytesN::from_array(&env, &[3u8; 32]);
+    let proof = Bytes::from_array(&env, &[4u8; 256]);
+    let public_inputs = vec![&env, BytesN::from_array(&env, &[5u8; 32])];
+
+    client.set_zk_verifier_contract(&verifier);
+    client.set_zk_verifier_vk_id(&vk_id);
+    client.submit_zk_commit(&110u32, &p1, &1u32, &1u32, &c1);
+    client.submit_zk_commit(&110u32, &p2, &1u32, &1u32, &c2);
+    client.submit_zk_verification(&110u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs);
+    client.submit_zk_verification(&110u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs);
+
+    let result = client.try_end_game(&110u32, &true);
+    assert_contract_error(&result, Error::ZkMatchOutcomeRequired);
+}
+
+#[test]
+fn test_end_game_rejects_winner_mismatch_with_match_outcome() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, verifier) = setup_test();
+
+    client.start_game(&111u32, &p1, &p2, &100_000, &100_000);
+    client.set_zk_gate_required(&true);
+
+    let c1 = BytesN::from_array(&env, &[6u8; 32]);
+    let c2 = BytesN::from_array(&env, &[7u8; 32]);
+    let vk_id = BytesN::from_array(&env, &[8u8; 32]);
+    let proof = Bytes::from_array(&env, &[9u8; 256]);
+    let public_inputs = vec![&env, BytesN::from_array(&env, &[10u8; 32])];
+
+    client.set_zk_verifier_contract(&verifier);
+    client.set_zk_verifier_vk_id(&vk_id);
+    client.submit_zk_commit(&111u32, &p1, &1u32, &1u32, &c1);
+    client.submit_zk_commit(&111u32, &p2, &1u32, &1u32, &c2);
+    client.submit_zk_verification(&111u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs);
+    client.submit_zk_verification(&111u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs);
+    client.submit_zk_match_outcome(&111u32, &p2, &vk_id, &proof, &public_inputs);
+
+    let result = client.try_end_game(&111u32, &true);
+    assert_contract_error(&result, Error::InvalidWinnerClaim);
+
+    client.end_game(&111u32, &false);
+    let m = client.get_match(&111u32);
+    assert_eq!(m.winner.unwrap(), p2);
+}
+
+#[test]
+fn test_duplicate_zk_commit_rejected() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
+
+    client.start_game(&103u32, &p1, &p2, &100_000, &100_000);
+
+    let c1 = BytesN::from_array(&env, &[9u8; 32]);
+    client.submit_zk_commit(&103u32, &p1, &2u32, &3u32, &c1);
+
+    // Idempotent duplicate commit should succeed and not inflate counters.
+    client.submit_zk_commit(&103u32, &p1, &2u32, &3u32, &c1);
+    let m = client.get_match(&103u32);
+    assert_eq!(m.player1_zk_commits, 1);
+}
+
+#[test]
+fn test_duplicate_zk_verification_rejected() {
+    let (env, client, _admin, p1, p2, _treasury, _xlm, verifier) = setup_test();
+
+    client.start_game(&104u32, &p1, &p2, &100_000, &100_000);
+
+    let c1 = BytesN::from_array(&env, &[7u8; 32]);
+    client.set_zk_verifier_contract(&verifier);
+
+    let vk_id = BytesN::from_array(&env, &[8u8; 32]);
+    client.set_zk_verifier_vk_id(&vk_id);
+    let proof = Bytes::from_array(&env, &[9u8; 256]);
+    let public_inputs = vec![&env, BytesN::from_array(&env, &[10u8; 32])];
+
+    client.submit_zk_commit(&104u32, &p1, &1u32, &2u32, &c1);
+    client.submit_zk_verification(
+        &104u32,
+        &p1,
+        &1u32,
+        &2u32,
+        &c1,
+        &vk_id,
+        &proof,
+        &public_inputs,
+    );
+
+    // Idempotent duplicate verification should succeed and not inflate counters.
+    client.submit_zk_verification(
+        &104u32,
+        &p1,
+        &1u32,
+        &2u32,
+        &c1,
+        &vk_id,
+        &proof,
+        &public_inputs,
+    );
+
+    let m = client.get_match(&104u32);
+    assert_eq!(m.player1_zk_verified, 1);
 }

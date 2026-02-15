@@ -167,6 +167,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     } = useOnChainRegistration();
     const [sceneConfig, setSceneConfig] = useState<CharacterSelectSceneConfig | null>(null);
     const [stakeGate, setStakeGate] = useState<StakeGateState | null>(null);
+    const [pendingRegistrationNoStake, setPendingRegistrationNoStake] = useState(false);
     const [stakeClockNowMs, setStakeClockNowMs] = useState<number>(Date.now());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -206,6 +207,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         stakeExpireTriggeredRef.current = false;
         stakeSubmitInFlightRef.current = false;
         setStakeSubmitLocked(false);
+        setPendingRegistrationNoStake(false);
 
         if (stakeErrorTimerRef.current) {
             clearTimeout(stakeErrorTimerRef.current);
@@ -258,7 +260,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     }, [stakeGate?.error]);
 
     useEffect(() => {
-        if (!publicKey || !stakeGate?.required || !stakeGate.pendingRegistration) return;
+        if (!publicKey) return;
+        const shouldRegister = stakeGate?.required ? stakeGate.pendingRegistration : pendingRegistrationNoStake;
+        if (!shouldRegister) return;
         if (registrationTriggeredRef.current) return;
 
         registrationTriggeredRef.current = true;
@@ -266,11 +270,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             console.error("[CharacterSelectClient] Registration signing failed:", err);
             registrationTriggeredRef.current = false;
         });
-    }, [matchId, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required]);
+    }, [matchId, pendingRegistrationNoStake, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required]);
 
     useEffect(() => {
         if (registrationStatus === "complete" || registrationStatus === "skipped") {
             registrationCompleteRef.current = true;
+            setPendingRegistrationNoStake(false);
             setStakeGate((prev) => prev
                 ? {
                     ...prev,
@@ -290,6 +295,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 }
                 : prev,
             );
+            setPendingRegistrationNoStake(true);
             registrationTriggeredRef.current = false;
         }
     }, [registrationError, registrationStatus]);
@@ -480,6 +486,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                 const isHost = match.player1_address === publicKey;
                 const hasStake = parseStroops(match.stake_amount_stroops) > 0n;
+                const hasOpponent = !!match.player1_address && !!match.player2_address;
+                const pendingRegistration = hasOpponent && !match.onchain_session_id && !registrationCompleteRef.current;
                 const myConfirmed = isHost
                     ? !!match.player1_stake_confirmed_at
                     : !!match.player2_stake_confirmed_at;
@@ -518,12 +526,15 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         myConfirmed: prev?.myConfirmed || effectiveMyConfirmed || localStakeConfirmedRef.current,
                         opponentConfirmed,
                         bothConfirmed,
-                        pendingRegistration: !match.onchain_session_id,
+                        pendingRegistration,
                         stakeDeadlineAtMs: deadlineAtMs ?? prev?.stakeDeadlineAtMs,
                         isSubmitting: prev?.isSubmitting ?? false,
                         error: prev?.error ?? null,
                     };
                 });
+                if (!hasStake) {
+                    setPendingRegistrationNoStake(pendingRegistration);
+                }
 
                 const playerBanId = isHost
                     ? (match.player1_ban_id ?? match.player1_ban_character_id ?? null)
@@ -612,6 +623,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 .on("broadcast", { event: "registration_complete" }, (payload) => {
                     EventBus.emit("registration_complete", payload.payload);
                     registrationCompleteRef.current = true;
+                    setPendingRegistrationNoStake(false);
                     setStakeGate((prev) => prev
                         ? {
                             ...prev,
@@ -842,6 +854,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 if (!match) return;
 
                 const hasStake = parseStroops(match.stake_amount_stroops) > 0n;
+                const hasOpponent = !!match.player1_address && !!match.player2_address;
+                const pendingRegistration = hasOpponent && !match.onchain_session_id && !registrationCompleteRef.current;
                 if (hasStake || stakeGate?.required) {
                     const myConfirmed = myRole === "player1"
                         ? !!match.player1_stake_confirmed_at
@@ -875,7 +889,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                             myConfirmed: previous?.myConfirmed || effectiveMyConfirmed || localStakeConfirmedRef.current,
                             opponentConfirmed,
                             bothConfirmed,
-                            pendingRegistration: !match.onchain_session_id && !registrationCompleteRef.current,
+                            pendingRegistration,
                             stakeDeadlineAtMs: match.stake_deadline_at
                                 ? new Date(match.stake_deadline_at).getTime()
                                 : previous?.stakeDeadlineAtMs,
@@ -885,6 +899,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     });
                 } else {
                     setStakeGate(null);
+                    setPendingRegistrationNoStake(pendingRegistration);
                 }
 
                 const opponentCharacterId = myRole === "player1"
@@ -1268,6 +1283,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const commitRes = await commitPrivateRoundPlan(params.matchId, {
                         address: params.address,
                         roundNumber: params.roundNumber,
+                        turnNumber: params.turnNumber,
                         commitment,
                         proof: sharedRoundProof,
                         publicInputs: proofPublicInputs,
@@ -1298,6 +1314,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         await resolvePrivateRound(params.matchId, {
                             address: params.address,
                             roundNumber: params.roundNumber,
+                            turnNumber: params.turnNumber,
                             move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
                             surgeCardId: roundPlan.surgeCardId,
                             proof: sharedRoundProof,
@@ -1590,8 +1607,22 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 });
 
                 if (!response.ok) {
-                    console.error("[CharacterSelectClient] Surrender failed:", await response.text());
-                    EventBus.emit("game:moveError", { error: "Surrender failed" });
+                    const responseText = await response.text();
+                    console.error("[CharacterSelectClient] Surrender failed:", responseText);
+
+                    let errorMessage = "Surrender failed";
+                    try {
+                        const parsed = JSON.parse(responseText) as { error?: string };
+                        if (parsed?.error) {
+                            errorMessage = parsed.error;
+                        }
+                    } catch {
+                        if (responseText.trim()) {
+                            errorMessage = responseText.trim();
+                        }
+                    }
+
+                    EventBus.emit("game:moveError", { error: errorMessage });
                 }
             } catch (error) {
                 console.error("[CharacterSelectClient] Surrender error:", error);
@@ -2072,10 +2103,60 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const requiredDepositStroops = stakeAmountStroops + stakeFeeStroops;
     const myStakeConfirmed = !!stakeGate?.myConfirmed || localStakeConfirmedRef.current;
     const shouldBlockForStake = !!stakeGate?.required && !stakeGate.bothConfirmed;
+    const shouldBlockForRegistration = !stakeGate?.required && pendingRegistrationNoStake;
     const stakeSubmitBusy = stakeGate?.isSubmitting || stakeSubmitLocked;
     const stakeTimeLeftSeconds = stakeGate?.stakeDeadlineAtMs
         ? Math.max(0, Math.ceil((stakeGate.stakeDeadlineAtMs - stakeClockNowMs) / 1000))
         : null;
+
+    if (shouldBlockForRegistration) {
+        return (
+            <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50 p-4">
+                <div className="relative w-64 h-64 mb-10 flex items-center justify-center">
+                    <div className="absolute w-full h-full rounded-full border-4 border-emerald-500 animate-ping" />
+                    <div className="absolute w-32 h-32 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                        <svg
+                            className="w-16 h-16 text-emerald-500"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                        >
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M5 13l4 4L19 7"
+                            />
+                        </svg>
+                    </div>
+                </div>
+
+                <h2 className="text-2xl font-bold font-orbitron text-emerald-500 mb-2">OPPONENT FOUND!</h2>
+
+                <div className="mt-3 bg-black/80 border border-cyber-gold/40 rounded-xl px-6 py-3 flex items-center gap-3 backdrop-blur-sm">
+                    {registrationStatus === "error" ? (
+                        <>
+                            <span className="w-3 h-3 rounded-full bg-red-500" />
+                            <span className="text-red-400 text-xs font-orbitron tracking-wider">
+                                ON-CHAIN: {registrationError || "FAILED"}
+                            </span>
+                        </>
+                    ) : (
+                        <>
+                            <div className="w-4 h-4 border-2 border-cyber-gold border-t-transparent rounded-full animate-spin" />
+                            <span className="text-cyber-gold text-xs font-orbitron tracking-wider">
+                                {registrationStatus === "preparing" && "PREPARING TX..."}
+                                {registrationStatus === "signing" && "SIGN IN WALLET..."}
+                                {registrationStatus === "waiting_for_opponent" && "WAITING FOR OPPONENT SIGNATURE..."}
+                                {registrationStatus === "submitting" && "SUBMITTING ON-CHAIN..."}
+                                {(registrationStatus === "idle" || registrationStatus === "complete" || registrationStatus === "skipped") && "PREPARING MATCH..."}
+                            </span>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
+    }
 
     if (shouldBlockForStake) {
         return (

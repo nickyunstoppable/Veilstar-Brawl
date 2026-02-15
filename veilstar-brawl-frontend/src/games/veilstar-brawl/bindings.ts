@@ -34,7 +34,7 @@ if (typeof window !== "undefined") {
 export const networks = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
-    contractId: "CDVWJMGCR5B3MFVDN6UBYAVRDX7PPL7POLDIZ2PTNYDNH6LYZG5LTCLB",
+    contractId: "CCRWOHBQGN75SNSCX3MVM3CRAUJXHZJ2EILQFFZEHU6FDBXV5RNSASJR",
   }
 } as const
 
@@ -52,7 +52,17 @@ export const Errors = {
   11: {message:"SweepTooEarly"},
   12: {message:"StakeDepositExpired"},
   13: {message:"DeadlineNotReached"},
-  14: {message:"MatchCancelled"}
+  14: {message:"MatchCancelled"},
+  15: {message:"InvalidZkCommitment"},
+  16: {message:"ZkCommitAlreadySubmitted"},
+  17: {message:"ZkCommitRequired"},
+  18: {message:"InvalidZkVerifier"},
+  19: {message:"ZkCommitNotFound"},
+  20: {message:"ZkVerificationAlreadySubmitted"},
+  21: {message:"ZkProofInvalid"},
+  22: {message:"ZkVerifierNotConfigured"},
+  23: {message:"ZkMatchOutcomeRequired"},
+  24: {message:"InvalidWinnerClaim"}
 }
 
 
@@ -63,10 +73,14 @@ export interface Match {
   player1_moves: u32;
   player1_points: i128;
   player1_stake_paid: boolean;
+  player1_zk_commits: u32;
+  player1_zk_verified: u32;
   player2: string;
   player2_moves: u32;
   player2_points: i128;
   player2_stake_paid: boolean;
+  player2_zk_commits: u32;
+  player2_zk_verified: u32;
   stake_amount_stroops: i128;
   stake_deadline_ts: u64;
   stake_fee_bps: u32;
@@ -74,13 +88,27 @@ export interface Match {
   winner: Option<string>;
 }
 
-export type DataKey = {tag: "Match", values: readonly [u32]} | {tag: "GameHubAddress", values: void} | {tag: "Admin", values: void} | {tag: "TreasuryAddress", values: void} | {tag: "XlmToken", values: void} | {tag: "FeeAccrued", values: void} | {tag: "LastSweepTs", values: void};
+export type DataKey = {tag: "Match", values: readonly [u32]} | {tag: "MatchSalt", values: readonly [u32]} | {tag: "ZkCommit", values: readonly [u32, Buffer, u32, u32, boolean]} | {tag: "ZkVerified", values: readonly [u32, Buffer, u32, u32, boolean]} | {tag: "ZkMatchOutcome", values: readonly [u32]} | {tag: "GameHubAddress", values: void} | {tag: "Admin", values: void} | {tag: "ZkVerifierContractAddress", values: void} | {tag: "ZkVerifierVkId", values: void} | {tag: "TreasuryAddress", values: void} | {tag: "XlmToken", values: void} | {tag: "FeeAccrued", values: void} | {tag: "LastSweepTs", values: void} | {tag: "ZkGateRequired", values: void};
 
 export enum MoveType {
   Punch = 0,
   Kick = 1,
   Block = 2,
   Special = 3,
+}
+
+
+export interface ZkMatchOutcomeRecord {
+  verifier_contract: string;
+  vk_id: Buffer;
+  winner: string;
+}
+
+
+export interface ZkVerificationRecord {
+  commitment: Buffer;
+  verifier_contract: string;
+  vk_id: Buffer;
 }
 
 export interface Client {
@@ -185,6 +213,11 @@ export interface Client {
   set_match_stake: ({session_id, stake_amount_stroops}: {session_id: u32, stake_amount_stroops: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a submit_zk_commit transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  submit_zk_commit: ({session_id, player, round, turn, commitment}: {session_id: u32, player: string, round: u32, turn: u32, commitment: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a get_last_sweep_ts transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   get_last_sweep_ts: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
@@ -194,6 +227,51 @@ export interface Client {
    * Record a power surge pick on-chain and collect 0.0001 XLM from the player.
    */
   submit_power_surge: ({session_id, player, round, card_code}: {session_id: u32, player: string, round: u32, card_code: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a get_zk_gate_required transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_zk_gate_required: (options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
+
+  /**
+   * Construct and simulate a get_zk_match_outcome transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_zk_match_outcome: ({session_id}: {session_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<ZkMatchOutcomeRecord>>>
+
+  /**
+   * Construct and simulate a set_zk_gate_required transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  set_zk_gate_required: ({required}: {required: boolean}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a get_zk_verifier_vk_id transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_zk_verifier_vk_id: (options?: MethodOptions) => Promise<AssembledTransaction<Buffer>>
+
+  /**
+   * Construct and simulate a set_zk_verifier_vk_id transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  set_zk_verifier_vk_id: ({vk_id}: {vk_id: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a submit_zk_verification transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  submit_zk_verification: ({session_id, player, round, turn, commitment, vk_id, proof, public_inputs}: {session_id: u32, player: string, round: u32, turn: u32, commitment: Buffer, vk_id: Buffer, proof: Buffer, public_inputs: Array<Buffer>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a submit_zk_match_outcome transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  submit_zk_match_outcome: ({session_id, winner, vk_id, proof, public_inputs}: {session_id: u32, winner: string, vk_id: Buffer, proof: Buffer, public_inputs: Array<Buffer>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a get_zk_verifier_contract transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  get_zk_verifier_contract: (options?: MethodOptions) => Promise<AssembledTransaction<Result<string>>>
+
+  /**
+   * Construct and simulate a set_zk_verifier_contract transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  set_zk_verifier_contract: ({verifier_contract}: {verifier_contract: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
 }
 export class Client extends ContractClient {
@@ -215,10 +293,12 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAADgAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAGAAAAAAAAAAxJbnZhbGlkU3Rha2UAAAAHAAAAAAAAABJTdGFrZU5vdENvbmZpZ3VyZWQAAAAAAAgAAAAAAAAAEFN0YWtlQWxyZWFkeVBhaWQAAAAJAAAAAAAAAAxTdGFrZU5vdFBhaWQAAAAKAAAAAAAAAA1Td2VlcFRvb0Vhcmx5AAAAAAAACwAAAAAAAAATU3Rha2VEZXBvc2l0RXhwaXJlZAAAAAAMAAAAAAAAABJEZWFkbGluZU5vdFJlYWNoZWQAAAAAAA0AAAAAAAAADk1hdGNoQ2FuY2VsbGVkAAAAAAAO",
-        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAADwAAAAAAAAATZmVlX2FjY3J1ZWRfc3Ryb29wcwAAAAALAAAAAAAAAAxpc19jYW5jZWxsZWQAAAABAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADXBsYXllcjFfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMV9zdGFrZV9wYWlkAAAAAAABAAAAAAAAAAdwbGF5ZXIyAAAAABMAAAAAAAAADXBsYXllcjJfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIyX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMl9zdGFrZV9wYWlkAAAAAAABAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAAAAAAAEXN0YWtlX2RlYWRsaW5lX3RzAAAAAAAABgAAAAAAAAANc3Rha2VfZmVlX2JwcwAAAAAAAAQAAAAAAAAAE3RvdGFsX3hsbV9jb2xsZWN0ZWQAAAAACwAAAAAAAAAGd2lubmVyAAAAAAPoAAAAEw==",
-        "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAABwAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAA9UcmVhc3VyeUFkZHJlc3MAAAAAAAAAAAAAAAAIWGxtVG9rZW4AAAAAAAAAAAAAAApGZWVBY2NydWVkAAAAAAAAAAAAAAAAAAtMYXN0U3dlZXBUcwA=",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAAGAAAAAAAAAANTWF0Y2hOb3RGb3VuZAAAAAAAAAEAAAAAAAAACU5vdFBsYXllcgAAAAAAAAIAAAAAAAAAEU1hdGNoQWxyZWFkeUVuZGVkAAAAAAAAAwAAAAAAAAASTWF0Y2hOb3RJblByb2dyZXNzAAAAAAAEAAAAAAAAABNJbnN1ZmZpY2llbnRCYWxhbmNlAAAAAAUAAAAAAAAADk5vdGhpbmdUb1N3ZWVwAAAAAAAGAAAAAAAAAAxJbnZhbGlkU3Rha2UAAAAHAAAAAAAAABJTdGFrZU5vdENvbmZpZ3VyZWQAAAAAAAgAAAAAAAAAEFN0YWtlQWxyZWFkeVBhaWQAAAAJAAAAAAAAAAxTdGFrZU5vdFBhaWQAAAAKAAAAAAAAAA1Td2VlcFRvb0Vhcmx5AAAAAAAACwAAAAAAAAATU3Rha2VEZXBvc2l0RXhwaXJlZAAAAAAMAAAAAAAAABJEZWFkbGluZU5vdFJlYWNoZWQAAAAAAA0AAAAAAAAADk1hdGNoQ2FuY2VsbGVkAAAAAAAOAAAAAAAAABNJbnZhbGlkWmtDb21taXRtZW50AAAAAA8AAAAAAAAAGFprQ29tbWl0QWxyZWFkeVN1Ym1pdHRlZAAAABAAAAAAAAAAEFprQ29tbWl0UmVxdWlyZWQAAAARAAAAAAAAABFJbnZhbGlkWmtWZXJpZmllcgAAAAAAABIAAAAAAAAAEFprQ29tbWl0Tm90Rm91bmQAAAATAAAAAAAAAB5aa1ZlcmlmaWNhdGlvbkFscmVhZHlTdWJtaXR0ZWQAAAAAABQAAAAAAAAADlprUHJvb2ZJbnZhbGlkAAAAAAAVAAAAAAAAABdaa1ZlcmlmaWVyTm90Q29uZmlndXJlZAAAAAAWAAAAAAAAABZaa01hdGNoT3V0Y29tZVJlcXVpcmVkAAAAAAAXAAAAAAAAABJJbnZhbGlkV2lubmVyQ2xhaW0AAAAAABg=",
+        "AAAAAQAAAAAAAAAAAAAABU1hdGNoAAAAAAAAEwAAAAAAAAATZmVlX2FjY3J1ZWRfc3Ryb29wcwAAAAALAAAAAAAAAAxpc19jYW5jZWxsZWQAAAABAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADXBsYXllcjFfbW92ZXMAAAAAAAAEAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAScGxheWVyMV9zdGFrZV9wYWlkAAAAAAABAAAAAAAAABJwbGF5ZXIxX3prX2NvbW1pdHMAAAAAAAQAAAAAAAAAE3BsYXllcjFfemtfdmVyaWZpZWQAAAAABAAAAAAAAAAHcGxheWVyMgAAAAATAAAAAAAAAA1wbGF5ZXIyX21vdmVzAAAAAAAABAAAAAAAAAAOcGxheWVyMl9wb2ludHMAAAAAAAsAAAAAAAAAEnBsYXllcjJfc3Rha2VfcGFpZAAAAAAAAQAAAAAAAAAScGxheWVyMl96a19jb21taXRzAAAAAAAEAAAAAAAAABNwbGF5ZXIyX3prX3ZlcmlmaWVkAAAAAAQAAAAAAAAAFHN0YWtlX2Ftb3VudF9zdHJvb3BzAAAACwAAAAAAAAARc3Rha2VfZGVhZGxpbmVfdHMAAAAAAAAGAAAAAAAAAA1zdGFrZV9mZWVfYnBzAAAAAAAABAAAAAAAAAATdG90YWxfeGxtX2NvbGxlY3RlZAAAAAALAAAAAAAAAAZ3aW5uZXIAAAAAA+gAAAAT",
+        "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAADgAAAAEAAAAAAAAABU1hdGNoAAAAAAAAAQAAAAQAAAABAAAAAAAAAAlNYXRjaFNhbHQAAAAAAAABAAAABAAAAAEAAAAAAAAACFprQ29tbWl0AAAABQAAAAQAAAPuAAAAIAAAAAQAAAAEAAAAAQAAAAEAAAAAAAAAClprVmVyaWZpZWQAAAAAAAUAAAAEAAAD7gAAACAAAAAEAAAABAAAAAEAAAABAAAAAAAAAA5aa01hdGNoT3V0Y29tZQAAAAAAAQAAAAQAAAAAAAAAAAAAAA5HYW1lSHViQWRkcmVzcwAAAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAABlaa1ZlcmlmaWVyQ29udHJhY3RBZGRyZXNzAAAAAAAAAAAAAAAAAAAOWmtWZXJpZmllclZrSWQAAAAAAAAAAAAAAAAAD1RyZWFzdXJ5QWRkcmVzcwAAAAAAAAAAAAAAAAhYbG1Ub2tlbgAAAAAAAAAAAAAACkZlZUFjY3J1ZWQAAAAAAAAAAAAAAAAAC0xhc3RTd2VlcFRzAAAAAAAAAAAAAAAADlprR2F0ZVJlcXVpcmVkAAA=",
         "AAAAAwAAAAAAAAAAAAAACE1vdmVUeXBlAAAABAAAAAAAAAAFUHVuY2gAAAAAAAAAAAAAAAAAAARLaWNrAAAAAQAAAAAAAAAFQmxvY2sAAAAAAAACAAAAAAAAAAdTcGVjaWFsAAAAAAM=",
+        "AAAAAQAAAAAAAAAAAAAAFFprTWF0Y2hPdXRjb21lUmVjb3JkAAAAAwAAAAAAAAARdmVyaWZpZXJfY29udHJhY3QAAAAAAAATAAAAAAAAAAV2a19pZAAAAAAAA+4AAAAgAAAAAAAAAAZ3aW5uZXIAAAAAABM=",
+        "AAAAAQAAAAAAAAAAAAAAFFprVmVyaWZpY2F0aW9uUmVjb3JkAAAAAwAAAAAAAAAKY29tbWl0bWVudAAAAAAD7gAAACAAAAAAAAAAEXZlcmlmaWVyX2NvbnRyYWN0AAAAAAAAEwAAAAAAAAAFdmtfaWQAAAAAAAPuAAAAIA==",
         "AAAAAAAAAAAAAAAHZ2V0X2h1YgAAAAAAAAAAAQAAABM=",
         "AAAAAAAAAAAAAAAHc2V0X2h1YgAAAAABAAAAAAAAAAduZXdfaHViAAAAABMAAAAA",
         "AAAAAAAAAAAAAAAHdXBncmFkZQAAAAABAAAAAAAAAA1uZXdfd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAA",
@@ -237,8 +317,18 @@ export class Client extends ContractClient {
         "AAAAAAAAAE5UcmFuc2ZlciBhY2NydWVkIHByb3RvY29sIGZlZXMgdG8gdHJlYXN1cnkgd2FsbGV0IGF0IG1vc3Qgb25jZSBldmVyeSAyNCBob3Vycy4AAAAAAA5zd2VlcF90cmVhc3VyeQAAAAAAAAAAAAEAAAPpAAAACwAAAAM=",
         "AAAAAAAAAAAAAAAPZ2V0X2ZlZV9hY2NydWVkAAAAAAAAAAABAAAACw==",
         "AAAAAAAAAIhDb25maWd1cmUgc3Rha2UgZm9yIGEgc2Vzc2lvbiBiZWZvcmUgZGVwb3NpdHMgYmVnaW4uClN0YWtlIGFtb3VudCBpcyB0aGUgYmFzZSB3YWdlciAoZS5nLiAxIFhMTSkuIEVhY2ggcGxheWVyIGRlcG9zaXRzIHN0YWtlICsgMC4xJSBmZWUuAAAAD3NldF9tYXRjaF9zdGFrZQAAAAACAAAAAAAAAApzZXNzaW9uX2lkAAAAAAAEAAAAAAAAABRzdGFrZV9hbW91bnRfc3Ryb29wcwAAAAsAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAAAAAAAQc3VibWl0X3prX2NvbW1pdAAAAAUAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAABnBsYXllcgAAAAAAEwAAAAAAAAAFcm91bmQAAAAAAAAEAAAAAAAAAAR0dXJuAAAABAAAAAAAAAAKY29tbWl0bWVudAAAAAAD7gAAACAAAAABAAAD6QAAAAIAAAAD",
         "AAAAAAAAAAAAAAARZ2V0X2xhc3Rfc3dlZXBfdHMAAAAAAAAAAAAAAQAAAAY=",
-        "AAAAAAAAAEpSZWNvcmQgYSBwb3dlciBzdXJnZSBwaWNrIG9uLWNoYWluIGFuZCBjb2xsZWN0IDAuMDAwMSBYTE0gZnJvbSB0aGUgcGxheWVyLgAAAAAAEnN1Ym1pdF9wb3dlcl9zdXJnZQAAAAAABAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAVyb3VuZAAAAAAAAAQAAAAAAAAACWNhcmRfY29kZQAAAAAAAAQAAAABAAAD6QAAAAIAAAAD" ]),
+        "AAAAAAAAAEpSZWNvcmQgYSBwb3dlciBzdXJnZSBwaWNrIG9uLWNoYWluIGFuZCBjb2xsZWN0IDAuMDAwMSBYTE0gZnJvbSB0aGUgcGxheWVyLgAAAAAAEnN1Ym1pdF9wb3dlcl9zdXJnZQAAAAAABAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAVyb3VuZAAAAAAAAAQAAAAAAAAACWNhcmRfY29kZQAAAAAAAAQAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAAAAAAAUZ2V0X3prX2dhdGVfcmVxdWlyZWQAAAAAAAAAAQAAAAE=",
+        "AAAAAAAAAAAAAAAUZ2V0X3prX21hdGNoX291dGNvbWUAAAABAAAAAAAAAApzZXNzaW9uX2lkAAAAAAAEAAAAAQAAA+kAAAfQAAAAFFprTWF0Y2hPdXRjb21lUmVjb3JkAAAAAw==",
+        "AAAAAAAAAAAAAAAUc2V0X3prX2dhdGVfcmVxdWlyZWQAAAABAAAAAAAAAAhyZXF1aXJlZAAAAAEAAAAA",
+        "AAAAAAAAAAAAAAAVZ2V0X3prX3ZlcmlmaWVyX3ZrX2lkAAAAAAAAAAAAAAEAAAPuAAAAIA==",
+        "AAAAAAAAAAAAAAAVc2V0X3prX3ZlcmlmaWVyX3ZrX2lkAAAAAAAAAQAAAAAAAAAFdmtfaWQAAAAAAAPuAAAAIAAAAAA=",
+        "AAAAAAAAAAAAAAAWc3VibWl0X3prX3ZlcmlmaWNhdGlvbgAAAAAACAAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAAVyb3VuZAAAAAAAAAQAAAAAAAAABHR1cm4AAAAEAAAAAAAAAApjb21taXRtZW50AAAAAAPuAAAAIAAAAAAAAAAFdmtfaWQAAAAAAAPuAAAAIAAAAAAAAAAFcHJvb2YAAAAAAAAOAAAAAAAAAA1wdWJsaWNfaW5wdXRzAAAAAAAD6gAAA+4AAAAgAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAAAAAAAAXc3VibWl0X3prX21hdGNoX291dGNvbWUAAAAABQAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGd2lubmVyAAAAAAATAAAAAAAAAAV2a19pZAAAAAAAA+4AAAAgAAAAAAAAAAVwcm9vZgAAAAAAAA4AAAAAAAAADXB1YmxpY19pbnB1dHMAAAAAAAPqAAAD7gAAACAAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAAAAAAAYZ2V0X3prX3ZlcmlmaWVyX2NvbnRyYWN0AAAAAAAAAAEAAAPpAAAAEwAAAAM=",
+        "AAAAAAAAAAAAAAAYc2V0X3prX3ZlcmlmaWVyX2NvbnRyYWN0AAAAAQAAAAAAAAARdmVyaWZpZXJfY29udHJhY3QAAAAAAAATAAAAAA==" ]),
       options
     )
   }
@@ -260,7 +350,17 @@ export class Client extends ContractClient {
         sweep_treasury: this.txFromJSON<Result<i128>>,
         get_fee_accrued: this.txFromJSON<i128>,
         set_match_stake: this.txFromJSON<Result<void>>,
+        submit_zk_commit: this.txFromJSON<Result<void>>,
         get_last_sweep_ts: this.txFromJSON<u64>,
-        submit_power_surge: this.txFromJSON<Result<void>>
+        submit_power_surge: this.txFromJSON<Result<void>>,
+        get_zk_gate_required: this.txFromJSON<boolean>,
+        get_zk_match_outcome: this.txFromJSON<Result<ZkMatchOutcomeRecord>>,
+        set_zk_gate_required: this.txFromJSON<null>,
+        get_zk_verifier_vk_id: this.txFromJSON<Buffer>,
+        set_zk_verifier_vk_id: this.txFromJSON<null>,
+        submit_zk_verification: this.txFromJSON<Result<void>>,
+        submit_zk_match_outcome: this.txFromJSON<Result<void>>,
+        get_zk_verifier_contract: this.txFromJSON<Result<string>>,
+        set_zk_verifier_contract: this.txFromJSON<null>
   }
 }

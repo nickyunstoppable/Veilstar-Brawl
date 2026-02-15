@@ -22,10 +22,11 @@ import {
     isValidMove,
 } from "./round-resolver";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "./stellar-contract";
-import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
+import { proveAndFinalizeMatch, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
 import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type PowerSurgeCardId } from "./power-surge";
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
 
 // =============================================================================
 // TYPES
@@ -299,9 +300,20 @@ export async function resolveTurn(
             })
             .eq("id", roundId);
 
+        const autoFinalize = getAutoProveFinalizeStatus();
+        const stellarReady = isStellarConfigured();
+        const proofFirstFinalizeRequired = matchOver
+            && !!matchWinner
+            && PRIVATE_ROUNDS_ENABLED
+            && ZK_STRICT_FINALIZE;
+
+        if (proofFirstFinalizeRequired && !autoFinalize.enabled) {
+            return createErrorResult(`ZK finalize required but unavailable: ${autoFinalize.reason}`);
+        }
+
         // Update match state
         let eloChanges: EloChanges | null = null;
-        if (matchOver && matchWinner) {
+        if (matchOver && matchWinner && !proofFirstFinalizeRequired) {
             const winnerAddress = matchWinner === "player1"
                 ? match.player1_address
                 : match.player2_address;
@@ -326,7 +338,7 @@ export async function resolveTurn(
                 .update({
                     player1_rounds_won: p1RoundsWon,
                     player2_rounds_won: p2RoundsWon,
-                    fight_phase: roundOver ? "round_end" : "selecting",
+                    fight_phase: matchOver ? "match_end" : (roundOver ? "round_end" : "selecting"),
                 })
                 .eq("id", matchId);
         }
@@ -422,10 +434,28 @@ export async function resolveTurn(
             // Report result on-chain (non-blocking)
             let onChainTxHash: string | undefined;
             let onChainSkippedReason: string | undefined;
-            const autoFinalize = getAutoProveFinalizeStatus();
-            const stellarReady = isStellarConfigured();
+            let zkFinalizeFailedReason: string | undefined;
 
-            if (!autoFinalize.enabled && stellarReady) {
+            if (proofFirstFinalizeRequired) {
+                try {
+                    const proofFinalize = await proveAndFinalizeMatch({
+                        matchId,
+                        winnerAddress: winnerAddr,
+                        allowRemoteDelegation: true,
+                    });
+
+                    const finalizeResponse = proofFinalize.finalizeResponse as any;
+                    onChainTxHash = finalizeResponse?.onChainTxHash || onChainTxHash;
+
+                    eloChanges = await updateElo(match, winnerAddr);
+                } catch (err) {
+                    zkFinalizeFailedReason = err instanceof Error ? err.message : String(err);
+                    console.error("[CombatResolver] Proof-first finalize failed:", zkFinalizeFailedReason);
+                    return createErrorResult(`ZK proof finalize failed: ${zkFinalizeFailedReason}`);
+                }
+            }
+
+            if (!proofFirstFinalizeRequired && !autoFinalize.enabled && stellarReady) {
                 try {
                     const onChainResult = await reportMatchResultOnChain(
                         matchId,
@@ -451,7 +481,7 @@ export async function resolveTurn(
                 }
             }
 
-            if (autoFinalize.enabled) {
+            if (!proofFirstFinalizeRequired && autoFinalize.enabled) {
                 triggerAutoProveFinalize(matchId, winnerAddr, "combat-resolver");
             } else if (!stellarReady) {
                 onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
@@ -474,6 +504,7 @@ export async function resolveTurn(
                 onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
                 onChainTxHash,
                 onChainSkippedReason,
+                zkFinalizeFailedReason,
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
         } else if (roundOver) {

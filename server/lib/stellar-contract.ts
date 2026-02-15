@@ -21,7 +21,9 @@ import {
     authorizeEntry,
     xdr as xdrLib,
 } from "@stellar/stellar-sdk";
+import { createHash } from "node:crypto";
 import { Buffer } from "buffer";
+import { readFile } from "node:fs/promises";
 import type { PowerSurgeCardId } from "./power-surge";
 import { ensureEnvLoaded } from "./env";
 
@@ -591,12 +593,13 @@ export async function prepareRegistration(
     matchId: string,
     player1Address: string,
     player2Address: string,
+    options?: { sessionId?: number },
 ): Promise<PreparedRegistration> {
     if (!CONTRACT_ID) {
         throw new Error("Stellar contract not configured (missing CONTRACT_ID)");
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
 
     // Use admin as fee-payer/tx source for this server-submitted flow.
     // If we used a player as tx source, we would also need the player's envelope signature.
@@ -681,12 +684,13 @@ export async function submitSignedRegistration(
     player2Address: string,
     signedAuthEntries: Record<string, string>,
     transactionXdr: string,
+    options?: { sessionId?: number },
 ): Promise<OnChainResult> {
     if (!CONTRACT_ID) {
         return { success: false, error: "Stellar contract not configured" };
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
 
     try {
         console.log(`[Stellar] Submitting client-signed registration (sessionId: ${sessionId})`);
@@ -1143,7 +1147,11 @@ export async function getOnChainMatchState(matchId: string): Promise<any | null>
         });
 
         const tx = await (client as any).get_match({ session_id: sessionId });
-        return tx.result;
+        const result = tx?.result;
+        if (result && typeof result === "object" && "error" in result) {
+            return null;
+        }
+        return result ?? null;
     } catch {
         return null;
     }
@@ -1165,7 +1173,11 @@ export async function getOnChainMatchStateBySession(
         });
 
         const tx = await (client as any).get_match({ session_id: sessionId });
-        return tx.result;
+        const result = tx?.result;
+        if (result && typeof result === "object" && "error" in result) {
+            return null;
+        }
+        return result ?? null;
     } catch {
         return null;
     }
@@ -1219,6 +1231,535 @@ export async function setMatchStakeOnChain(matchId: string, stakeAmountStroops: 
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { success: false, error: message, sessionId };
+    }
+}
+
+function normalizeCommitmentHexToBytes32(commitmentHex: string): Buffer {
+    const normalized = commitmentHex.trim().toLowerCase();
+    if (!/^0x[0-9a-f]+$/.test(normalized)) {
+        throw new Error("Invalid commitment hex format");
+    }
+
+    const rawHex = normalized.slice(2);
+    if (rawHex.length === 0 || rawHex.length > 64) {
+        throw new Error("Commitment hex length must be between 1 and 32 bytes");
+    }
+
+    const padded = rawHex.padStart(64, "0");
+    return Buffer.from(padded, "hex");
+}
+
+function normalizeSha256HexToBytes32(inputHex: string, label: string): Buffer {
+    const normalized = inputHex.trim().toLowerCase().replace(/^0x/, "");
+    if (!/^[0-9a-f]{64}$/.test(normalized)) {
+        throw new Error(`${label} must be a 32-byte hex string`);
+    }
+
+    return Buffer.from(normalized, "hex");
+}
+
+function normalizeHexToBytes32(inputHex: string, label: string): Buffer {
+    const normalized = inputHex.trim().toLowerCase().replace(/^0x/, "");
+    if (!/^[0-9a-f]{64}$/.test(normalized)) {
+        throw new Error(`${label} must be a 32-byte hex string`);
+    }
+
+    return Buffer.from(normalized, "hex");
+}
+
+function hashUnknownToSha256Hex(value: unknown): string {
+    if (value === undefined || value === null) {
+        return createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    }
+
+    if (typeof value === "string") {
+        const text = value.trim();
+        if (text.startsWith("base64:")) {
+            const decoded = Buffer.from(text.slice("base64:".length), "base64");
+            return createHash("sha256").update(decoded).digest("hex");
+        }
+        if (/^0x[0-9a-f]+$/i.test(text)) {
+            const decoded = Buffer.from(text.slice(2), "hex");
+            return createHash("sha256").update(decoded).digest("hex");
+        }
+
+        return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+    }
+
+    return createHash("sha256").update(Buffer.from(JSON.stringify(value), "utf8")).digest("hex");
+}
+
+export async function setZkGateRequiredOnChain(
+    required: boolean,
+    options?: { contractId?: string },
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const contractId = options?.contractId || undefined;
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available" };
+    }
+
+    try {
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+        const setZkGateRequired = (client as any).set_zk_gate_required;
+        if (typeof setZkGateRequired !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose set_zk_gate_required. Redeploy the updated veilstar-brawl contract and restart server.",
+            };
+        }
+
+        const tx = await setZkGateRequired({ required });
+        const { txHash } = await signAndSendTx(tx);
+        return { success: true, txHash };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
+    }
+}
+
+export async function submitZkCommitOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    turnNumber: number,
+    commitmentHex: string,
+    options?: { contractId?: string; sessionId?: number },
+): Promise<OnChainResult> {
+    if (!isStellarConfigured()) {
+        return { success: false, error: "Stellar contract not configured" };
+    }
+
+    const keypair = getKeypairForAddress(playerAddress);
+    if (!keypair) {
+        return { success: false, error: `No keypair for ${playerAddress}` };
+    }
+
+    if (!Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+        return { success: false, error: "roundNumber and turnNumber must be positive integers" };
+    }
+
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
+
+    try {
+        const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
+
+        const client = await createContractClient(keypair.publicKey(), createSigner(keypair), contractId);
+        const submitZkCommit = (client as any).submit_zk_commit;
+        if (typeof submitZkCommit !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose submit_zk_commit. Redeploy the updated veilstar-brawl contract and restart server.",
+                sessionId,
+            };
+        }
+
+        const tx = await submitZkCommit({
+            session_id: sessionId,
+            player: playerAddress,
+            round: roundNumber,
+            turn: turnNumber,
+            commitment: commitmentBytes,
+        });
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message, sessionId };
+    }
+}
+
+export async function submitZkVerificationOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    turnNumber: number,
+    commitmentHex: string,
+    vkIdHex: string,
+    proof: unknown,
+    publicInputs: unknown,
+    options?: { contractId?: string; sessionId?: number },
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for verifier submissions" };
+    }
+
+    if (!Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+        return { success: false, error: "roundNumber and turnNumber must be positive integers" };
+    }
+
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
+
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available", sessionId };
+    }
+
+    try {
+        const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
+        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+
+        const rawProofBytes = decodeMaybeBase64(proof);
+        if (!rawProofBytes) {
+            return { success: false, error: "proof must be base64-encoded bytes", sessionId };
+        }
+
+        if (rawProofBytes.length !== 256) {
+            return {
+                success: false,
+                error: `Trustless mode requires Groth16 calldata proof (256 bytes); received ${rawProofBytes.length} bytes`,
+                sessionId,
+            };
+        }
+
+        const normalizedPublicInputs = normalizePublicInputsToBytes32(publicInputs);
+        const proofBytes = rawProofBytes;
+        const publicInputsBytes = normalizedPublicInputs;
+
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+        const submitZkVerification = (client as any).submit_zk_verification;
+        if (typeof submitZkVerification !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose submit_zk_verification. Redeploy the updated veilstar-brawl contract and restart server.",
+                sessionId,
+            };
+        }
+
+        const tx = await submitZkVerification({
+            session_id: sessionId,
+            verifier: adminKeypair.publicKey(),
+            player: playerAddress,
+            round: roundNumber,
+            turn: turnNumber,
+            commitment: commitmentBytes,
+            vk_id: vkIdBytes,
+            proof: proofBytes,
+            public_inputs: publicInputsBytes,
+        });
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message, sessionId };
+    }
+}
+
+export async function submitZkMatchOutcomeOnChain(
+    matchId: string,
+    winnerAddress: string,
+    vkIdHex: string,
+    proof: unknown,
+    publicInputs: unknown,
+    options?: { contractId?: string; sessionId?: number },
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for verifier submissions" };
+    }
+
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
+
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available", sessionId };
+    }
+
+    try {
+        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+
+        const proofBytes = decodeMaybeBase64(proof);
+        if (!proofBytes) {
+            return { success: false, error: "proof must be base64-encoded bytes", sessionId };
+        }
+
+        if (proofBytes.length !== 256) {
+            return {
+                success: false,
+                error: `Trustless mode requires Groth16 calldata proof (256 bytes); received ${proofBytes.length} bytes`,
+                sessionId,
+            };
+        }
+
+        const publicInputsBytes = normalizePublicInputsToBytes32(publicInputs);
+        if (publicInputsBytes.length === 0) {
+            return { success: false, error: "public inputs cannot be empty", sessionId };
+        }
+
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+        const submitMatchOutcome = (client as any).submit_zk_match_outcome;
+        if (typeof submitMatchOutcome !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose submit_zk_match_outcome. Redeploy the updated veilstar-brawl contract and restart server.",
+                sessionId,
+            };
+        }
+
+        const tx = await submitMatchOutcome({
+            session_id: sessionId,
+            winner: winnerAddress,
+            vk_id: vkIdBytes,
+            proof: proofBytes,
+            public_inputs: publicInputsBytes,
+        });
+        const { txHash } = await signAndSendTx(tx);
+
+        return { success: true, txHash, sessionId };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message, sessionId };
+    }
+}
+
+function decodeMaybeBase64(value: unknown): Buffer | null {
+    if (typeof value !== "string") return null;
+    const text = value.trim();
+    if (!text.startsWith("base64:")) return null;
+    return Buffer.from(text.slice("base64:".length), "base64");
+}
+
+function normalizePublicInputsToBytes32(value: unknown): Buffer[] {
+    const parseNumberLike = (entry: unknown): Buffer => {
+        if (typeof entry === "string") {
+            const text = entry.trim();
+            if (/^0x[0-9a-fA-F]+$/.test(text)) {
+                const raw = text.slice(2);
+                if (raw.length > 64) throw new Error("public input hex value exceeds 32 bytes");
+                return Buffer.from(raw.padStart(64, "0"), "hex");
+            }
+            if (/^[0-9]+$/.test(text)) {
+                const valueBig = BigInt(text);
+                const hex = valueBig.toString(16);
+                if (hex.length > 64) throw new Error("public input decimal value exceeds 32 bytes");
+                return Buffer.from(hex.padStart(64, "0"), "hex");
+            }
+        }
+
+        if (typeof entry === "number" && Number.isFinite(entry) && Number.isInteger(entry) && entry >= 0) {
+            const hex = BigInt(entry).toString(16);
+            if (hex.length > 64) throw new Error("public input number exceeds 32 bytes");
+            return Buffer.from(hex.padStart(64, "0"), "hex");
+        }
+
+        throw new Error("public inputs must be hex or decimal scalars");
+    };
+
+    if (Array.isArray(value)) {
+        return value.map(parseNumberLike);
+    }
+
+    if (typeof value === "string") {
+        const decoded = decodeMaybeBase64(value);
+        if (decoded) {
+            const asText = decoded.toString("utf8").trim();
+            if (asText.startsWith("[")) {
+                const parsed = JSON.parse(asText);
+                if (!Array.isArray(parsed)) throw new Error("public inputs payload must decode to array");
+                return parsed.map(parseNumberLike);
+            }
+
+            if (decoded.length === 0) {
+                throw new Error("public inputs base64 payload is empty");
+            }
+
+            if (decoded.length % 32 !== 0) {
+                throw new Error("public inputs base64 must decode to a JSON array or 32-byte packed field elements");
+            }
+
+            const chunks: Buffer[] = [];
+            for (let offset = 0; offset < decoded.length; offset += 32) {
+                chunks.push(decoded.subarray(offset, offset + 32));
+            }
+            return chunks;
+        }
+
+        const trimmed = value.trim();
+        if (trimmed.startsWith("[")) {
+            const parsed = JSON.parse(trimmed);
+            if (!Array.isArray(parsed)) throw new Error("public inputs payload must be array");
+            return parsed.map(parseNumberLike);
+        }
+    }
+
+    throw new Error("Unsupported public inputs format for on-chain verifier");
+}
+
+export async function setZkVerifierContractOnChain(
+    verifierContractAddress: string,
+    options?: { contractId?: string },
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const contractId = options?.contractId || undefined;
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available" };
+    }
+
+    try {
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+        const setVerifier = (client as any).set_zk_verifier_contract;
+        if (typeof setVerifier !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose set_zk_verifier_contract. Redeploy veilstar-brawl and restart server.",
+            };
+        }
+
+        const tx = await setVerifier({ verifier_contract: verifierContractAddress });
+        const { txHash } = await signAndSendTx(tx);
+        return { success: true, txHash };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
+    }
+}
+
+export async function setZkVerifierVkIdOnChain(
+    vkIdHex: string,
+    options?: { contractId?: string },
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const contractId = options?.contractId || undefined;
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available" };
+    }
+
+    try {
+        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+        const setVkId = (client as any).set_zk_verifier_vk_id;
+        if (typeof setVkId !== "function") {
+            return {
+                success: false,
+                error: "Deployed contract does not expose set_zk_verifier_vk_id. Redeploy veilstar-brawl and restart server.",
+            };
+        }
+
+        const tx = await setVkId({ vk_id: vkIdBytes });
+        const { txHash } = await signAndSendTx(tx);
+        return { success: true, txHash };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
+    }
+}
+
+function fieldToBytes32(value: string, label: string): Buffer {
+    const bigint = BigInt(value);
+    if (bigint < 0n) {
+        throw new Error(`${label} must be non-negative`);
+    }
+
+    const hex = bigint.toString(16);
+    if (hex.length > 64) {
+        throw new Error(`${label} exceeds 32 bytes`);
+    }
+
+    return Buffer.from(hex.padStart(64, "0"), "hex");
+}
+
+function g1ToBytes64(point: unknown, label: string): Buffer {
+    const arr = point as string[];
+    if (!Array.isArray(arr) || arr.length < 2) {
+        throw new Error(`${label} must be a G1 point array`);
+    }
+
+    return Buffer.concat([
+        fieldToBytes32(String(arr[0]), `${label}[0]`),
+        fieldToBytes32(String(arr[1]), `${label}[1]`),
+    ]);
+}
+
+function g2ToBytes128(point: unknown, label: string): Buffer {
+    const arr = point as string[][];
+    if (!Array.isArray(arr) || arr.length < 2 || !Array.isArray(arr[0]) || !Array.isArray(arr[1])) {
+        throw new Error(`${label} must be a G2 point array`);
+    }
+
+    // snarkjs JSON uses [[x_c0, x_c1], [y_c0, y_c1], ...]
+    // Serialize in Solidity/precompile order: x_c1, x_c0, y_c1, y_c0.
+    return Buffer.concat([
+        fieldToBytes32(String(arr[0][1]), `${label}[0][1]`),
+        fieldToBytes32(String(arr[0][0]), `${label}[0][0]`),
+        fieldToBytes32(String(arr[1][1]), `${label}[1][1]`),
+        fieldToBytes32(String(arr[1][0]), `${label}[1][0]`),
+    ]);
+}
+
+export async function setGroth16VerificationKeyOnChain(
+    verifierContractAddress: string,
+    vkIdHex: string,
+    verificationKeyJsonPath: string,
+): Promise<OnChainResult> {
+    if (!isOnChainRegistrationConfigured()) {
+        return { success: false, error: "Stellar contract not configured for admin submissions" };
+    }
+
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available" };
+    }
+
+    try {
+        const raw = await readFile(verificationKeyJsonPath, "utf8");
+        const vk = JSON.parse(raw) as Record<string, unknown>;
+
+        const alphaG1 = g1ToBytes64(vk.vk_alpha_1, "vk_alpha_1");
+        const betaG2 = g2ToBytes128(vk.vk_beta_2, "vk_beta_2");
+        const gammaG2 = g2ToBytes128(vk.vk_gamma_2, "vk_gamma_2");
+        const deltaG2 = g2ToBytes128(vk.vk_delta_2, "vk_delta_2");
+
+        const icRaw = vk.IC as unknown[];
+        if (!Array.isArray(icRaw) || icRaw.length === 0) {
+            return { success: false, error: "verification key IC must be a non-empty array" };
+        }
+        const ic = icRaw.map((point, index) => g1ToBytes64(point, `IC[${index}]`));
+
+        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+
+        const client = await createContractClient(
+            adminKeypair.publicKey(),
+            createSigner(adminKeypair),
+            verifierContractAddress,
+        );
+
+        const setVerificationKey = (client as any).set_verification_key;
+        if (typeof setVerificationKey !== "function") {
+            return {
+                success: false,
+                error: "Deployed verifier contract does not expose set_verification_key",
+            };
+        }
+
+        const tx = await setVerificationKey({
+            vk_id: vkIdBytes,
+            alpha_g1: alphaG1,
+            beta_g2: betaG2,
+            gamma_g2: gammaG2,
+            delta_g2: deltaG2,
+            ic,
+        });
+        const { txHash } = await signAndSendTx(tx);
+        return { success: true, txHash };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
     }
 }
 

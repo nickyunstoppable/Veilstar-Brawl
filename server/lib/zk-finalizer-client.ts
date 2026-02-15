@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getSupabase } from "./supabase";
 
 interface ProveAndFinalizeParams {
@@ -159,6 +159,25 @@ function isSelfDelegationUrl(remoteBaseUrl: string): boolean {
     }
 }
 
+function stableStringify(value: unknown): string {
+    if (value === null || typeof value !== "object") {
+        return JSON.stringify(value);
+    }
+
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+
+    const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, val]) => `${JSON.stringify(key)}:${stableStringify(val)}`).join(",")}}`;
+}
+
+function hashTranscript(value: unknown): string {
+    const canonical = stableStringify(value);
+    return createHash("sha256").update(canonical).digest("hex");
+}
+
 async function loadMatchTranscript(matchId: string): Promise<unknown> {
     const supabase = getSupabase();
 
@@ -194,7 +213,6 @@ async function loadMatchTranscript(matchId: string): Promise<unknown> {
         rounds: rounds || [],
         moves: moves || [],
         powerSurges: surges || [],
-        exportedAt: new Date().toISOString(),
     };
 }
 
@@ -252,6 +270,7 @@ export async function proveAndFinalizeMatch(
     try {
         console.log(`[ZK Finalizer] Local prove+finalize start match=${params.matchId}`);
         const transcript = await loadMatchTranscript(params.matchId);
+        const transcriptHash = hashTranscript(transcript);
         await writeFile(inputPath, JSON.stringify(transcript), "utf8");
 
         const parsed = parseCommandLine(proveCommandTemplate);
@@ -304,6 +323,7 @@ export async function proveAndFinalizeMatch(
                 winnerAddress: params.winnerAddress,
                 proof,
                 publicInputs,
+                transcriptHash,
                 broadcast: false,
             }),
         });

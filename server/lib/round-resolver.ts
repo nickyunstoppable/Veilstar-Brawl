@@ -90,6 +90,21 @@ function isCounterHit(attackerMove: MoveType, defenderMove: MoveType): boolean {
     );
 }
 
+function normalizeOutcomeForInvisibleMove(
+    outcome: MoveOutcome,
+    move: MoveType,
+    mods: ReturnType<typeof calculateSurgeEffects>["player1Modifiers"] | null
+): MoveOutcome {
+    if (!mods || move === "block" || move === "stunned") return outcome;
+    if (!isInvisibleMove(mods)) return outcome;
+
+    if (outcome === "missed" || outcome === "staggered" || outcome === "reflected") {
+        return "hit";
+    }
+
+    return outcome;
+}
+
 function calculateDamageWithSurges(params: {
     attackerMove: MoveType;
     defenderMove: MoveType;
@@ -114,13 +129,13 @@ function calculateDamageWithSurges(params: {
     const blockDisabled = defenderMove === "block" && isBlockDisabled(defenderMods, attackerMods);
     const effectiveDefenderMove = blockDisabled ? "stunned" : defenderMove;
 
-    const attackerInvisible = isInvisibleMove(attackerMods);
     const baseDamage = MOVE_PROPERTIES[attackerMove].damage;
 
-    let outcome: MoveOutcome = RESOLUTION_MATRIX[attackerMove][effectiveDefenderMove];
-    if (attackerInvisible) {
-        outcome = "hit";
-    }
+    const outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
+        RESOLUTION_MATRIX[attackerMove][effectiveDefenderMove],
+        attackerMove,
+        attackerMods
+    );
 
     let damage = 0;
     if (outcome === "hit") {
@@ -229,8 +244,16 @@ export function resolveRound(
             ? "stunned"
             : player2Move;
 
-    const p1Outcome: MoveOutcome = RESOLUTION_MATRIX[p1EffectiveMove][p2EffectiveMove];
-    const p2Outcome: MoveOutcome = RESOLUTION_MATRIX[p2EffectiveMove][p1EffectiveMove];
+    const p1Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
+        RESOLUTION_MATRIX[p1EffectiveMove][p2EffectiveMove],
+        p1EffectiveMove,
+        p1Mods ?? null
+    );
+    const p2Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
+        RESOLUTION_MATRIX[p2EffectiveMove][p1EffectiveMove],
+        p2EffectiveMove,
+        p2Mods ?? null
+    );
 
     const p1CounterHit = isCounterHit(p1EffectiveMove, p2EffectiveMove);
     const p2CounterHit = isCounterHit(p2EffectiveMove, p1EffectiveMove);
