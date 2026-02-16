@@ -1012,7 +1012,27 @@ export async function submitSignedZkCommitOnChain(
 
         const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
 
-        const submitWithXdr = async (xdrToSubmit: string): Promise<{ success: boolean; txHash?: string; error?: string }> => {
+        const buildFreshCommitXdr = async (): Promise<string> => {
+            const adminClient = await createAdminContractClient(options?.contractId || undefined);
+            const submitZkCommit = (adminClient as any).submit_zk_commit;
+            if (typeof submitZkCommit !== "function") {
+                throw new Error("Deployed contract does not expose submit_zk_commit");
+            }
+
+            const freshTx = await submitZkCommit({
+                session_id: sessionId,
+                player: playerAddress,
+                round: roundNumber,
+                turn: turnNumber,
+                commitment: commitmentBytes,
+            });
+
+            return freshTx.toXDR();
+        };
+
+        const submitWithXdr = async (
+            xdrToSubmit: string,
+        ): Promise<{ success: boolean; txHash?: string; error?: string; alreadySubmitted?: boolean }> => {
             try {
                 const adminClient = await createAdminContractClient(options?.contractId || undefined);
                 const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(xdrToSubmit, {
@@ -1044,6 +1064,18 @@ export async function submitSignedZkCommitOnChain(
             } catch (err: any) {
                 const baseMessage = err instanceof Error ? err.message : String(err);
                 const decoded = withDecodedResult(err, baseMessage);
+
+                // If a client retries the exact same signed auth entry (same Soroban nonce),
+                // Soroban will fail auth with ExistingValue (nonce already exists). This
+                // usually means the first submission actually succeeded and consumed the nonce.
+                // Treat it as idempotent success so callers can proceed.
+                if (/nonce already exists for address|Error\(Auth,\s*ExistingValue\)|\bExistingValue\b/i.test(decoded)) {
+                    console.warn(
+                        `[Stellar][submitSignedZkCommitOnChain] nonce already exists; treating as already submitted match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}`,
+                    );
+                    return { success: true, alreadySubmitted: true };
+                }
+
                 console.warn(
                     `[Stellar][submitSignedZkCommitOnChain] send error match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort} error=${decoded}`,
                 );
@@ -1051,38 +1083,26 @@ export async function submitSignedZkCommitOnChain(
             }
         };
 
-        const buildFreshCommitXdr = async (): Promise<string> => {
-            const adminClient = await createAdminContractClient(options?.contractId || undefined);
-            const submitZkCommit = (adminClient as any).submit_zk_commit;
-            if (typeof submitZkCommit !== "function") {
-                throw new Error("Deployed contract does not expose submit_zk_commit");
-            }
-
-            const freshTx = await submitZkCommit({
-                session_id: sessionId,
-                player: playerAddress,
-                round: roundNumber,
-                turn: turnNumber,
-                commitment: commitmentBytes,
-            });
-
-            return freshTx.toXDR();
-        };
-
         try {
-            const maxAttempts = 5;
+            const maxAttempts = 3;
             let xdrToSubmit = transactionXdr;
-
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 console.log(
                     `[Stellar][submitSignedZkCommitOnChain] attempt=${attempt}/${maxAttempts} match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}`,
                 );
+
                 const result = await submitWithXdr(xdrToSubmit);
                 if (result.success) {
                     return { success: true, txHash: result.txHash, sessionId };
                 }
 
                 const errorText = String(result.error || "");
+
+                // NOTE: txBadSeq can happen when the prepared tx envelope becomes stale
+                // (admin fee-payer submitted another tx). We can safely rebuild a fresh
+                // envelope and re-inject the SAME signed Soroban auth entry because the
+                // auth signature is over the auth entry itself (invocation + nonce), not
+                // over the fee-payer account sequence.
                 const retryable = /txBadSeq|TRY_AGAIN_LATER|temporar|timeout|Sending the transaction to the network failed/i.test(errorText);
                 if (!retryable || attempt === maxAttempts) {
                     console.warn(
@@ -1091,9 +1111,16 @@ export async function submitSignedZkCommitOnChain(
                     return { success: false, error: errorText || "Failed to submit signed zk commit", sessionId };
                 }
 
-                const backoffMs = 150 * attempt;
-                await sleep(backoffMs);
-                xdrToSubmit = await buildFreshCommitXdr();
+                await sleep(150 * attempt);
+                try {
+                    xdrToSubmit = await buildFreshCommitXdr();
+                } catch (rebuildErr: any) {
+                    const rebuildMsg = rebuildErr instanceof Error ? rebuildErr.message : String(rebuildErr);
+                    console.warn(
+                        `[Stellar][submitSignedZkCommitOnChain] rebuild fresh tx failed attempt=${attempt} match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}: ${rebuildMsg}`,
+                    );
+                    // keep previous xdrToSubmit; next attempt may still succeed if error was transient
+                }
             }
 
             return { success: false, error: "Failed to submit signed zk commit after retries", sessionId };

@@ -30,6 +30,7 @@ const PRIVATE_ROUND_PLAN_TURNS = 10;
 const PRIVATE_ROUND_SERVER_MAX_ENERGY = 100;
 const PRIVATE_ROUND_SERVER_ENERGY_REGEN = 8;
 const ROUND_MOVE_TIMER_MS = 90000;
+const DEBUG_MATCH_END_FLOW = (import.meta.env.VITE_DEBUG_MATCH_END_FLOW ?? "false") === "true";
 const apiUrl = (path: string): string => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
 /**
@@ -86,6 +87,8 @@ export class FightScene extends Phaser.Scene {
   private narrativeText!: Phaser.GameObjects.Text;
   private turnIndicatorText!: Phaser.GameObjects.Text;
   private privatePlanEnergyText?: Phaser.GameObjects.Text;
+  private zkOnChainBadgeText?: Phaser.GameObjects.Text;
+  private zkOnChainBadgeRound: number = 0;
 
   // Character sprites
   private player1Sprite!: Phaser.GameObjects.Sprite;
@@ -202,6 +205,8 @@ export class FightScene extends Phaser.Scene {
   private activeTransactionToast?: TransactionToast;
   private moveConfirmedListener?: (data: unknown) => void;
   private privateRoundCommittedListener?: (data: unknown) => void;
+  private zkProgressListener?: (data: unknown) => void;
+  private zkWaitStickyUntil: number = 0;
 
   // Pending server state - holds the new HP/energy values during animations
   // This prevents the UI from showing new values before animations complete
@@ -295,6 +300,49 @@ export class FightScene extends Phaser.Scene {
     if (!this.isActiveText(this.roundTimerText)) return;
     this.roundTimerText.setText("✓");
     this.roundTimerText.setColor("#22c55e");
+  }
+
+  private showZkWaitingStatus(message: string, color: string = "#22c55e", stickyMs: number = 0): void {
+    if (!PRIVATE_ROUNDS_ENABLED || !this.isActiveText(this.turnIndicatorText)) return;
+    if (!this.isWaitingForOpponent) return;
+    if (this.phase !== "selecting" && this.phase !== "waiting") return;
+
+    this.turnIndicatorText.setText(message);
+    this.turnIndicatorText.setColor(color);
+
+    if (stickyMs > 0) {
+      this.zkWaitStickyUntil = Date.now() + stickyMs;
+    }
+  }
+
+  private startZkWaitingTicker(initialMessage?: string, initialColor: string = "#f97316"): void {
+    if (!PRIVATE_ROUNDS_ENABLED) return;
+    if (initialMessage) this.showZkWaitingStatus(initialMessage, initialColor, 1800);
+  }
+
+  private stopZkWaitingTicker(): void {
+    this.zkWaitStickyUntil = 0;
+  }
+
+  private debugMatchEndLog(message: string, extra?: unknown): void {
+    if (!DEBUG_MATCH_END_FLOW) return;
+    if (extra === undefined) {
+      console.log(`[TERMDBG][FightScene] ${message}`);
+      return;
+    }
+    console.log(`[TERMDBG][FightScene] ${message}`, extra);
+  }
+
+  private hasReachedTerminalScore(): boolean {
+    if (!this.serverState) return false;
+    const roundsToWin = this.combatEngine ? this.combatEngine.getState().roundsToWin : 2;
+    return this.serverState.player1RoundsWon >= roundsToWin || this.serverState.player2RoundsWon >= roundsToWin;
+  }
+
+  private shouldIgnoreRoundStarting(): boolean {
+    return this.phase === "match_end"
+      || !!this.pendingMatchEndPayload
+      || this.hasReachedTerminalScore();
   }
 
   /**
@@ -391,6 +439,7 @@ export class FightScene extends Phaser.Scene {
     this.disconnectTimeoutAt = 0;
     this.isWaitingForOpponent = false;
     this.serverState = null;
+    this.zkOnChainBadgeRound = 0;
   }
 
   /**
@@ -951,10 +1000,15 @@ export class FightScene extends Phaser.Scene {
             // We already submitted - show waiting state
             this.phase = "selecting";
             this.isWaitingForOpponent = true;
-            this.turnIndicatorText.setText("Waiting for opponent...");
-            this.turnIndicatorText.setColor("#f97316");
+            if (PRIVATE_ROUNDS_ENABLED) {
+              this.startZkWaitingTicker("Commitment submitted. Waiting for opponent...", "#f97316");
+            } else {
+              this.turnIndicatorText.setText("Waiting for opponent...");
+              this.turnIndicatorText.setColor("#f97316");
+            }
           } else {
             // We need to make a move
+            this.stopZkWaitingTicker();
             this.startSynchronizedSelectionPhase(moveDeadlineAt);
           }
         } else {
@@ -967,6 +1021,7 @@ export class FightScene extends Phaser.Scene {
       }
 
       case "resolving": {
+        this.stopZkWaitingTicker();
         // We're in resolving phase - animations are playing
         const animationEndsAt = state.animationEndsAt ? new Date(state.animationEndsAt).getTime() : now;
 
@@ -1001,6 +1056,7 @@ export class FightScene extends Phaser.Scene {
       }
 
       case "round_end": {
+        this.stopZkWaitingTicker();
         // Round just ended - show round end UI
         this.phase = "round_end";
         this.turnIndicatorText.setText("Round over!");
@@ -1012,6 +1068,7 @@ export class FightScene extends Phaser.Scene {
       }
 
       case "match_end": {
+        this.stopZkWaitingTicker();
         // Match is over
         this.phase = "match_end";
         this.turnIndicatorText.setText("Match over!");
@@ -1023,6 +1080,7 @@ export class FightScene extends Phaser.Scene {
       }
 
       default:
+        this.stopZkWaitingTicker();
         // Unknown phase - wait for server
         this.phase = "waiting";
         this.turnIndicatorText.setText("Synchronizing...");
@@ -2192,8 +2250,7 @@ export class FightScene extends Phaser.Scene {
         this.isWaitingForOpponent = true;
         this.localMoveSubmitted = true;
         this.moveInFlight = true;
-        this.turnIndicatorText.setText("Submitting 10-move plan...");
-        this.turnIndicatorText.setColor("#f97316");
+        this.startZkWaitingTicker("Generating zk proof for 10-move plan...", "#f97316");
 
         this.moveButtons.forEach(btn => {
           btn.disableInteractive();
@@ -2447,6 +2504,33 @@ export class FightScene extends Phaser.Scene {
       158,
       "",
     ).setOrigin(0.5).setVisible(false);
+
+    this.zkOnChainBadgeText = TextFactory.createSubtitle(
+      this,
+      GAME_DIMENSIONS.CENTER_X,
+      186,
+      "",
+    ).setOrigin(0.5).setVisible(false);
+  }
+
+  private resetZkOnChainBadge(roundNumber: number): void {
+    this.zkOnChainBadgeRound = roundNumber;
+    if (this.zkOnChainBadgeText) {
+      this.zkOnChainBadgeText.setVisible(false);
+      this.zkOnChainBadgeText.setText("");
+    }
+  }
+
+  private setZkOnChainBadge(params: { roundNumber: number; message: string; color: string }): void {
+    if (!PRIVATE_ROUNDS_ENABLED) return;
+    if (!this.zkOnChainBadgeText) return;
+
+    // Ignore late/out-of-round updates.
+    if (params.roundNumber !== this.zkOnChainBadgeRound) return;
+
+    this.zkOnChainBadgeText.setVisible(true);
+    this.zkOnChainBadgeText.setText(params.message);
+    this.zkOnChainBadgeText.setColor(params.color);
   }
 
   private updatePrivatePlanEnergyText(): void {
@@ -3174,8 +3258,12 @@ export class FightScene extends Phaser.Scene {
         this.moveInFlight = false; // Transaction completed successfully
 
         // Update UI to show waiting state, but don't destroy the timer
-        this.turnIndicatorText.setText("Waiting for opponent...");
-        this.turnIndicatorText.setColor("#22c55e");
+        if (PRIVATE_ROUNDS_ENABLED) {
+          this.startZkWaitingTicker("Commitment sent. Waiting for opponent...", "#22c55e");
+        } else {
+          this.turnIndicatorText.setText("Waiting for opponent...");
+          this.turnIndicatorText.setColor("#22c55e");
+        }
 
         // Show transaction toast if we have a tx hash
         const txId = payload.txId || payload.onChainTxHash;
@@ -3202,6 +3290,7 @@ export class FightScene extends Phaser.Scene {
 
       if (payload.bothRevealed) {
         if (PRIVATE_ROUNDS_ENABLED) {
+          this.stopZkWaitingTicker();
           this.phase = "resolving";
           this.isWaitingForOpponent = true;
           this.time.delayedCall(0, () => {
@@ -3222,6 +3311,8 @@ export class FightScene extends Phaser.Scene {
 
       if (payload.bothCommitted) {
         if (PRIVATE_ROUNDS_ENABLED) {
+          this.showZkWaitingStatus("Both commitments locked. Finalizing zk checks...", "#22c55e", 2000);
+          this.stopZkWaitingTicker();
           this.phase = "resolving";
           this.isWaitingForOpponent = true;
           this.time.delayedCall(0, () => {
@@ -3241,11 +3332,49 @@ export class FightScene extends Phaser.Scene {
       }
 
       if (payload.player1Committed || payload.player2Committed) {
-        this.turnIndicatorText.setText("Waiting for opponent...");
-        this.turnIndicatorText.setColor("#22c55e");
+        this.startZkWaitingTicker("Commitment recorded. Waiting for opponent...", "#22c55e");
       }
     };
     EventBus.on("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
+
+    this.zkProgressListener = (data: unknown) => {
+      if (!PRIVATE_ROUNDS_ENABLED) return;
+      if (!this.isSceneUiReady()) return;
+
+      const payload = data as { message?: string; color?: string; stickyMs?: number; stage?: string; roundNumber?: number };
+      if (!payload?.message) return;
+
+      const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
+      const payloadRound = Number(payload.roundNumber ?? currentRound);
+
+      if (payload.stage === "onchain_verify_submitting") {
+        this.setZkOnChainBadge({
+          roundNumber: payloadRound,
+          message: "⛓ On-chain verify pending…",
+          color: "#f97316",
+        });
+      }
+
+      if (payload.stage === "onchain_verify_ok") {
+        this.setZkOnChainBadge({
+          roundNumber: payloadRound,
+          message: "✅ On-chain verified",
+          color: "#22c55e",
+        });
+      }
+
+      if (payload.stage === "onchain_verify_failed" || payload.stage === "onchain_verify_exception") {
+        this.setZkOnChainBadge({
+          roundNumber: payloadRound,
+          message: "⚠ On-chain verify failed",
+          color: "#ef4444",
+        });
+      }
+
+      this.startZkWaitingTicker();
+      this.showZkWaitingStatus(payload.message, payload.color || "#22c55e", payload.stickyMs || 1600);
+    };
+    EventBus.on("game:zkProgress", this.zkProgressListener, this);
 
     // Listen for round resolution (from server combat resolver)
     EventBus.on("game:roundResolved", (data: unknown) => {
@@ -3322,6 +3451,22 @@ export class FightScene extends Phaser.Scene {
         player2RoundsWon: Number(raw.player2RoundsWon ?? fallbackP2RoundsWon),
       };
 
+      this.debugMatchEndLog(`roundResolved normalized r${payload.roundNumber} t${payload.turnNumber}`, {
+        rawIsMatchOver: raw.isMatchOver,
+        normalizedIsMatchOver: payload.isMatchOver,
+        rawMatchWinner: raw.matchWinner,
+        normalizedMatchWinner: payload.matchWinner,
+        rawRounds: {
+          p1: raw.player1RoundsWon,
+          p2: raw.player2RoundsWon,
+        },
+        normalizedRounds: {
+          p1: payload.player1RoundsWon,
+          p2: payload.player2RoundsWon,
+        },
+        phase: this.phase,
+      });
+
       const dedupeKey = `${payload.roundNumber}-${payload.turnNumber}-${payload.player1Health}-${payload.player2Health}-${payload.player1Energy}-${payload.player2Energy}`;
       const turnKey = `${payload.roundNumber}-${payload.turnNumber}`;
       if (this.processedResolvedTurns.has(turnKey)) {
@@ -3389,6 +3534,22 @@ export class FightScene extends Phaser.Scene {
         player1GuardMeter: number;
         player2GuardMeter: number;
       };
+
+      if (this.shouldIgnoreRoundStarting()) {
+        this.debugMatchEndLog(`roundStarting ignored r${payload.roundNumber} t${payload.turnNumber}`, {
+          phase: this.phase,
+          pendingMatchEndPayload: !!this.pendingMatchEndPayload,
+          serverScore: {
+            p1: this.serverState?.player1RoundsWon ?? 0,
+            p2: this.serverState?.player2RoundsWon ?? 0,
+          },
+        });
+        console.log(
+          `[FightScene] Ignoring late game:roundStarting after terminal state - phase=${this.phase}, score=${this.serverState?.player1RoundsWon ?? 0}-${this.serverState?.player2RoundsWon ?? 0}`,
+        );
+        return;
+      }
+
       console.log(`[FightScene] *** game:roundStarting received - Round ${payload.roundNumber}, Turn ${payload.turnNumber}, Current Phase: ${this.phase}, Timestamp: ${Date.now()}`);
       console.log(`[FightScene] *** Deadline in payload: ${payload.moveDeadlineAt}, Time until deadline: ${Math.floor((payload.moveDeadlineAt - Date.now()) / 1000)}s`);
       this.startRoundFromServer(payload);
@@ -3946,6 +4107,21 @@ export class FightScene extends Phaser.Scene {
     player1IsStunned?: boolean;
     player2IsStunned?: boolean;
   }, skipCountdown: boolean = false): void {
+    if (this.shouldIgnoreRoundStarting()) {
+      this.debugMatchEndLog(`startRoundFromServer ignored r${payload.roundNumber} t${payload.turnNumber}`, {
+        phase: this.phase,
+        pendingMatchEndPayload: !!this.pendingMatchEndPayload,
+        serverScore: {
+          p1: this.serverState?.player1RoundsWon ?? 0,
+          p2: this.serverState?.player2RoundsWon ?? 0,
+        },
+      });
+      console.log(
+        `[FightScene] startRoundFromServer ignored (terminal state) - phase=${this.phase}, score=${this.serverState?.player1RoundsWon ?? 0}-${this.serverState?.player2RoundsWon ?? 0}`,
+      );
+      return;
+    }
+
     console.log(`[FightScene] *** startRoundFromServer called - Round ${payload.roundNumber}, Turn ${payload.turnNumber}`);
     console.log(`[FightScene] *** Current phase: ${this.phase}, skipCountdown: ${skipCountdown}, isResolving: ${this.isResolving}, Timestamp: ${Date.now()}`);
     console.log(`[FightScene] *** pendingRoundStart exists: ${!!this.pendingRoundStart}`);
@@ -4168,6 +4344,7 @@ export class FightScene extends Phaser.Scene {
   private async startSynchronizedSelectionPhase(moveDeadlineAt: number): Promise<void> {
     console.log(`[FightScene] *** startSynchronizedSelectionPhase called - deadline: ${moveDeadlineAt}, Timestamp: ${Date.now()}`);
     console.log(`[FightScene] *** Time until deadline: ${Math.floor((moveDeadlineAt - Date.now()) / 1000)}s`);
+    this.stopZkWaitingTicker();
 
     // Clear any previous deadline-based timers
     this.timerExpiredHandled = false;
@@ -4175,6 +4352,7 @@ export class FightScene extends Phaser.Scene {
     this.bothStunnedSkipAt = 0;
 
     const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
+    this.resetZkOnChainBadge(currentRound);
 
     // Check if Power Surge selection is still ongoing - BOTH players must complete
     // Check database to see if both players have submitted their Power Surge selections
@@ -5913,6 +6091,13 @@ export class FightScene extends Phaser.Scene {
       EventBus.off("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
       this.privateRoundCommittedListener = undefined;
     }
+
+    if (this.zkProgressListener) {
+      EventBus.off("game:zkProgress", this.zkProgressListener, this);
+      this.zkProgressListener = undefined;
+    }
+
+    this.stopZkWaitingTicker();
 
     if (this.activeTransactionToast) {
       this.activeTransactionToast.close();

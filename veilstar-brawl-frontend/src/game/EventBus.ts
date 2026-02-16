@@ -79,6 +79,16 @@ export interface GameEvents {
     player2Committed: boolean;
     bothCommitted: boolean;
   };
+  "game:zkProgress": {
+    message: string;
+    color?: string;
+    stickyMs?: number;
+    stage?: string;
+    roundNumber?: number;
+    turnNumber?: number | null;
+    playerAddress?: string | null;
+    at?: number;
+  };
   "game:moveError": { error: string };
   "game:moveInFlight": { player: string };
   "game:roundStarting": any;

@@ -27,6 +27,16 @@ import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type 
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const DEBUG_MATCH_END_FLOW = (process.env.DEBUG_MATCH_END_FLOW ?? "false") === "true";
+
+function debugMatchEndLog(message: string, extra?: unknown): void {
+    if (!DEBUG_MATCH_END_FLOW) return;
+    if (extra === undefined) {
+        console.log(`[TERMDBG][CombatResolver] ${message}`);
+        return;
+    }
+    console.log(`[TERMDBG][CombatResolver] ${message}`, extra);
+}
 
 // =============================================================================
 // TYPES
@@ -330,6 +340,17 @@ export async function resolveTurn(
         const matchOver = isMatchOver(p1RoundsWon, p2RoundsWon, roundsToWin);
         const matchWinner = getMatchWinner(p1RoundsWon, p2RoundsWon, roundsToWin);
 
+        debugMatchEndLog(`resolveTurn decision match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1}`, {
+            roundOver,
+            roundWinner,
+            p1RoundsWon,
+            p2RoundsWon,
+            roundsToWin,
+            matchOver,
+            matchWinner,
+            moves: { p1Move, p2Move },
+        });
+
         // Persist round results
         await supabase
             .from("rounds")
@@ -477,6 +498,13 @@ export async function resolveTurn(
 
         // If match is over, report result on-chain and broadcast match ended
         if (!options?.suppressPostTurnBroadcasts && matchOver && matchWinner) {
+            debugMatchEndLog(`broadcast branch=match_ended match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1}`, {
+                suppressPostTurnBroadcasts: !!options?.suppressPostTurnBroadcasts,
+                suppressNextTurnBroadcastOnly: !!options?.suppressNextTurnBroadcastOnly,
+                p1RoundsWon,
+                p2RoundsWon,
+                matchWinner,
+            });
             const winnerAddr = matchWinner === "player1"
                 ? match.player1_address
                 : match.player2_address;
@@ -558,6 +586,12 @@ export async function resolveTurn(
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
         } else if (!options?.suppressPostTurnBroadcasts && roundOver) {
+            debugMatchEndLog(`broadcast branch=round_ended_then_round_starting match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1}`, {
+                suppressPostTurnBroadcasts: !!options?.suppressPostTurnBroadcasts,
+                suppressNextTurnBroadcastOnly: !!options?.suppressNextTurnBroadcastOnly,
+                p1RoundsWon,
+                p2RoundsWon,
+            });
             // Broadcast round end, then next round start after delay
             await broadcastGameEvent(matchId, "round_ended", {
                 roundNumber: currentRound.round_number,
@@ -592,6 +626,11 @@ export async function resolveTurn(
                 }
             }, 3000);
         } else if (!options?.suppressPostTurnBroadcasts && !options?.suppressNextTurnBroadcastOnly && !matchOver) {
+            debugMatchEndLog(`broadcast branch=next_turn_round_starting match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1}`, {
+                suppressPostTurnBroadcasts: !!options?.suppressPostTurnBroadcasts,
+                suppressNextTurnBroadcastOnly: !!options?.suppressNextTurnBroadcastOnly,
+                nextTurn: (currentRound.turn_number || 1) + 1,
+            });
             // Same round, next turn — broadcast round_starting after animation delay
             const nextTurn = (currentRound.turn_number || 1) + 1;
             const animDelay = 2500; // Allow resolution animation to play

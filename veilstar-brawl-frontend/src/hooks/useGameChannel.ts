@@ -380,6 +380,9 @@ export function useGameChannel(options: UseGameChannelOptions): UseGameChannelRe
                 .on("broadcast", { event: "power_surge_cards" }, ({ payload }) => {
                     console.log("[GameChannel] power_surge_cards received:", payload);
                     EventBus.emit("game:powerSurgeCards", payload);
+                })
+                .on("broadcast", { event: "zk_progress" }, ({ payload }) => {
+                    EventBus.emit("game:zkProgress", payload);
                 });
 
             // Set up presence listeners

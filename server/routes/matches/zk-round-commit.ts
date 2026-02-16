@@ -9,12 +9,17 @@ import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setZkGateRequi
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
-const ZK_VERIFY_COMMIT_PROOF = (process.env.ZK_VERIFY_COMMIT_PROOF ?? "true") === "true";
-const ZK_SYNC_ONCHAIN_VERIFY = (process.env.ZK_SYNC_ONCHAIN_VERIFY ?? "true") === "true";
-const ZK_REVERIFY_ON_RESOLVE = (process.env.ZK_REVERIFY_ON_RESOLVE ?? "false") === "true";
+// Gameplay defaults (hackathon-friendly):
+// - Always verify at commit (fast integrity gate)
+// - Always run on-chain verification asynchronously (never block Phase 3 animation)
+// - Do not re-verify at resolve unless a fallback triggers
+const ZK_VERIFY_COMMIT_PROOF = true;
+const ZK_SYNC_ONCHAIN_VERIFY = false;
+const ZK_REVERIFY_ON_RESOLVE = false;
 const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
 const ZK_GROTH16_VK_ID = (process.env.ZK_GROTH16_VK_ID || "").trim();
 const PRIVATE_ROUND_TURN_DELAY_MS = Number(process.env.ZK_PRIVATE_ROUND_TURN_DELAY_MS ?? "1200");
+const DEBUG_MATCH_END_FLOW = (process.env.DEBUG_MATCH_END_FLOW ?? "false") === "true";
 const privateRoundResolveLocks = new Set<string>();
 const RESOLVE_LOCK_STALE_SECONDS = Number(process.env.ZK_RESOLVE_LOCK_STALE_SECONDS ?? "45");
 const RESOLVE_LOCK_OWNER = `${process.env.FLY_ALLOC_ID || process.env.HOSTNAME || "local"}:${process.pid}`;
@@ -73,6 +78,15 @@ type ResolveLockState = "acquired" | "in_progress" | "resolved";
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function debugMatchEndLog(message: string, extra?: unknown): void {
+    if (!DEBUG_MATCH_END_FLOW) return;
+    if (extra === undefined) {
+        console.log(`[TERMDBG][ZK Round Resolve] ${message}`);
+        return;
+    }
+    console.log(`[TERMDBG][ZK Round Resolve] ${message}`, extra);
 }
 
 function isRetryableSetupError(raw: string): boolean {
@@ -459,8 +473,28 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             );
         }
 
+        await broadcastZkProgress({
+            matchId,
+            roundNumber,
+            turnNumber,
+            stage: "commit_received",
+            message: "Commit received. Validating private round payload...",
+            playerAddress: address,
+            color: "#f97316",
+        });
+
         let verification: Awaited<ReturnType<typeof verifyNoirProof>> | null = null;
         if (ZK_VERIFY_COMMIT_PROOF) {
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "commit_verify_started",
+                message: "Verifying commit proof...",
+                playerAddress: address,
+                color: "#f97316",
+            });
+
             verification = await verifyNoirProof({
                 proof,
                 publicInputs: body.publicInputs,
@@ -478,164 +512,28 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             }
 
             console.log(`[ZK Round Commit] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "commit_verify_ok",
+                message: `Commit proof verified (${verification.backend}).`,
+                playerAddress: address,
+            });
         } else {
             console.log(`[ZK Round Commit] Commit proof verification deferred to resolve match=${matchId} round=${roundNumber}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "commit_verify_deferred",
+                message: "Commit proof verification deferred to resolve stage.",
+                playerAddress: address,
+            });
         }
 
         let onChainCommitTxHash = body.onChainCommitTxHash || null;
         let onChainVerificationTxHash: string | null = null;
-        const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
-
-        if (ZK_ONCHAIN_COMMIT_GATE) {
-            if (strictMode && !isOnChainRegistrationConfigured()) {
-                return Response.json(
-                    { error: "On-chain ZK commit gate requires admin contract configuration" },
-                    { status: 503 },
-                );
-            }
-
-            const onChainSessionId = typeof (match as any).onchain_session_id === "number"
-                ? (match as any).onchain_session_id
-                : null;
-
-            if (strictMode && onChainSessionId === null) {
-                return Response.json(
-                    { error: "On-chain ZK commit gate requires persisted onchain_session_id from registration" },
-                    { status: 409 },
-                );
-            }
-
-            if (isOnChainRegistrationConfigured()) {
-                const setupKey = String(match.onchain_contract_id || "default");
-                const setupResult = await ensureOnChainSetupSingleFlight({
-                    setupKey,
-                    contractId: match.onchain_contract_id || undefined,
-                    strictMode,
-                });
-
-                if (!setupResult.success && strictMode) {
-                    return Response.json(
-                        {
-                            error: "Failed to initialize on-chain ZK setup",
-                            details: setupResult.error || null,
-                        },
-                        { status: 502 },
-                    );
-                }
-
-                const onChainCommit = body.signedAuthEntryXdr && body.transactionXdr
-                    ? await submitSignedZkCommitOnChain(
-                        matchId,
-                        address,
-                        roundNumber,
-                        turnNumber,
-                        commitment,
-                        body.signedAuthEntryXdr,
-                        body.transactionXdr,
-                        {
-                            contractId: match.onchain_contract_id || undefined,
-                            sessionId: onChainSessionId ?? undefined,
-                        },
-                    )
-                    : await submitZkCommitOnChain(
-                        matchId,
-                        address,
-                        roundNumber,
-                        turnNumber,
-                        commitment,
-                        {
-                            contractId: match.onchain_contract_id || undefined,
-                            sessionId: onChainSessionId ?? undefined,
-                        },
-                    );
-
-                console.log(
-                    `[ZK Round Commit] On-chain commit result match=${matchId} round=${roundNumber} trace=${clientTraceId || "n/a"} success=${onChainCommit.success} tx=${onChainCommit.txHash || "n/a"} strict=${strictMode} error=${onChainCommit.error || "n/a"}`,
-                );
-
-                if (!onChainCommit.success && strictMode && !body.signedAuthEntryXdr) {
-                    const commitError = String(onChainCommit.error || "");
-                    if (/No keypair for|Stellar contract not configured|Auth|require_auth/i.test(commitError)) {
-                    return Response.json(
-                        {
-                            error: "On-chain ZK commitment requires wallet auth entry signing",
-                            details: commitError || "Call /api/matches/:matchId/zk/round/commit/prepare and resubmit commit with signedAuthEntryXdr + transactionXdr",
-                        },
-                        { status: 409 },
-                    );
-                    }
-                }
-
-                if (!onChainCommit.success && strictMode) {
-                    return Response.json(
-                        {
-                            error: "On-chain ZK commitment transaction failed",
-                            details: onChainCommit.error || null,
-                        },
-                        { status: 502 },
-                    );
-                }
-
-                if (onChainCommit.success && onChainCommit.txHash) {
-                    onChainCommitTxHash = onChainCommit.txHash;
-                }
-
-                const runOnChainVerification = async () => submitZkVerificationOnChain(
-                    matchId,
-                    address,
-                    roundNumber,
-                    turnNumber,
-                    commitment,
-                    ZK_GROTH16_VK_ID,
-                    proof,
-                    body.publicInputs,
-                    {
-                        contractId: match.onchain_contract_id || undefined,
-                        sessionId: onChainSessionId ?? undefined,
-                    },
-                );
-
-                if (ZK_SYNC_ONCHAIN_VERIFY) {
-                    const onChainVerification = await runOnChainVerification();
-
-                    if (!onChainVerification.success && strictMode) {
-                        return Response.json(
-                            {
-                                error: "On-chain ZK verification failed",
-                                details: onChainVerification.error || null,
-                            },
-                            { status: 502 },
-                        );
-                    }
-
-                    if (onChainVerification.success && onChainVerification.txHash) {
-                        onChainVerificationTxHash = onChainVerification.txHash;
-                    }
-                } else {
-                    void runOnChainVerification()
-                        .then((onChainVerification) => {
-                            if (!onChainVerification.success) {
-                                console.error(
-                                    `[ZK Round Commit] Async on-chain verification failed match=${matchId} round=${roundNumber} player=${address}: ${onChainVerification.error || "unknown"}`,
-                                );
-                                return;
-                            }
-
-                            if (onChainVerification.txHash) {
-                                console.log(
-                                    `[ZK Round Commit] Async on-chain verification confirmed match=${matchId} round=${roundNumber} tx=${onChainVerification.txHash}`,
-                                );
-                            }
-                        })
-                        .catch((verifyErr) => {
-                            const msg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-                            console.error(
-                                `[ZK Round Commit] Async on-chain verification exception match=${matchId} round=${roundNumber}: ${msg}`,
-                            );
-                        });
-                }
-            }
-        }
 
         const { error: upsertError } = await supabase
             .from("round_private_commits")
@@ -662,6 +560,201 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                 { error: `Failed to persist private round commitment: ${upsertError.message}` },
                 { status: 500 },
             );
+        }
+
+        // Fire-and-forget on-chain commit + verification for best UX:
+        // - Do NOT block Phase 3 on chain confirmation.
+        // - Enforcement happens at match finalize for rewards/ELO.
+        if (ZK_ONCHAIN_COMMIT_GATE && isOnChainRegistrationConfigured()) {
+            const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+            const onChainSessionId = typeof (match as any).onchain_session_id === "number"
+                ? (match as any).onchain_session_id
+                : null;
+
+            void (async () => {
+                try {
+                    await broadcastZkProgress({
+                        matchId,
+                        roundNumber,
+                        turnNumber,
+                        stage: "onchain_setup",
+                        message: "Preparing on-chain ZK gate...",
+                        playerAddress: address,
+                        color: "#f97316",
+                    });
+
+                    const setupKey = String(match.onchain_contract_id || "default");
+                    const setupResult = await ensureOnChainSetupSingleFlight({
+                        setupKey,
+                        contractId: match.onchain_contract_id || undefined,
+                        strictMode,
+                    });
+
+                    if (!setupResult.success) {
+                        console.error(
+                            `[ZK Round Commit] Async on-chain setup failed match=${matchId} round=${roundNumber}: ${setupResult.error || "unknown"}`,
+                        );
+                        await broadcastZkProgress({
+                            matchId,
+                            roundNumber,
+                            turnNumber,
+                            stage: "onchain_setup_failed",
+                            message: "On-chain ZK setup failed (async).",
+                            playerAddress: address,
+                            color: "#ef4444",
+                        });
+                        return;
+                    }
+
+                    await broadcastZkProgress({
+                        matchId,
+                        roundNumber,
+                        turnNumber,
+                        stage: "onchain_commit_submitting",
+                        message: "Submitting commitment on-chain (async)...",
+                        playerAddress: address,
+                        color: "#f97316",
+                    });
+
+                    const onChainCommit = body.signedAuthEntryXdr && body.transactionXdr
+                        ? await submitSignedZkCommitOnChain(
+                            matchId,
+                            address,
+                            roundNumber,
+                            turnNumber,
+                            commitment,
+                            body.signedAuthEntryXdr,
+                            body.transactionXdr,
+                            {
+                                contractId: match.onchain_contract_id || undefined,
+                                sessionId: onChainSessionId ?? undefined,
+                            },
+                        )
+                        : await submitZkCommitOnChain(
+                            matchId,
+                            address,
+                            roundNumber,
+                            turnNumber,
+                            commitment,
+                            {
+                                contractId: match.onchain_contract_id || undefined,
+                                sessionId: onChainSessionId ?? undefined,
+                            },
+                        );
+
+                    console.log(
+                        `[ZK Round Commit] Async on-chain commit result match=${matchId} round=${roundNumber} trace=${clientTraceId || "n/a"} success=${onChainCommit.success} tx=${onChainCommit.txHash || "n/a"} error=${onChainCommit.error || "n/a"}`,
+                    );
+
+                    if (!onChainCommit.success) {
+                        await broadcastZkProgress({
+                            matchId,
+                            roundNumber,
+                            turnNumber,
+                            stage: "onchain_commit_failed",
+                            message: "On-chain commitment failed (async).",
+                            playerAddress: address,
+                            color: "#ef4444",
+                        });
+                        return;
+                    }
+
+                    if (onChainCommit.txHash) {
+                        try {
+                            const supabase = getSupabase();
+                            await supabase
+                                .from("round_private_commits")
+                                .update({
+                                    onchain_commit_tx_hash: onChainCommit.txHash,
+                                    updated_at: new Date().toISOString(),
+                                })
+                                .eq("match_id", matchId)
+                                .eq("round_number", roundNumber)
+                                .eq("player_address", address)
+                                .is("resolved_round_id", null);
+                        } catch (dbErr) {
+                            const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+                            console.error(`[ZK Round Commit] Failed to persist async commit tx hash: ${msg}`);
+                        }
+
+                        await broadcastZkProgress({
+                            matchId,
+                            roundNumber,
+                            turnNumber,
+                            stage: "onchain_commit_ok",
+                            message: "On-chain commitment confirmed (async).",
+                            playerAddress: address,
+                        });
+                    }
+
+                    // Verification is always async here for gameplay UX.
+                    await broadcastZkProgress({
+                        matchId,
+                        roundNumber,
+                        turnNumber,
+                        stage: "onchain_verify_submitting",
+                        message: "Submitting on-chain proof verification (async)...",
+                        playerAddress: address,
+                        color: "#f97316",
+                    });
+
+                    const onChainVerification = await submitZkVerificationOnChain(
+                        matchId,
+                        address,
+                        roundNumber,
+                        turnNumber,
+                        commitment,
+                        ZK_GROTH16_VK_ID,
+                        proof,
+                        body.publicInputs,
+                        {
+                            contractId: match.onchain_contract_id || undefined,
+                            sessionId: onChainSessionId ?? undefined,
+                        },
+                    );
+
+                    if (!onChainVerification.success) {
+                        console.error(
+                            `[ZK Round Commit] Async on-chain verification failed match=${matchId} round=${roundNumber} player=${address}: ${onChainVerification.error || "unknown"}`,
+                        );
+                        await broadcastZkProgress({
+                            matchId,
+                            roundNumber,
+                            turnNumber,
+                            stage: "onchain_verify_failed",
+                            message: "On-chain verification failed (async).",
+                            playerAddress: address,
+                            color: "#ef4444",
+                        });
+                        return;
+                    }
+
+                    if (onChainVerification.txHash) {
+                        await broadcastZkProgress({
+                            matchId,
+                            roundNumber,
+                            turnNumber,
+                            stage: "onchain_verify_ok",
+                            message: "On-chain verification confirmed (async).",
+                            playerAddress: address,
+                        });
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    console.error(
+                        `[ZK Round Commit] Async on-chain commit/verify exception match=${matchId} round=${roundNumber} player=${address}: ${msg}`,
+                    );
+                    await broadcastZkProgress({
+                        matchId,
+                        roundNumber,
+                        turnNumber,
+                        stage: "onchain_async_exception",
+                        message: "On-chain submission threw an exception (async).",
+                        playerAddress: address,
+                        color: "#ef4444",
+                    });
+                }
+            })();
         }
 
         const { data: commits } = await supabase
@@ -714,6 +807,14 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             console.warn(
                 `[ZK Round Commit] Waiting for opponent commit match=${matchId} round=${roundNumber} trace=${clientTraceId || "n/a"} p1Committed=${player1Committed} p2Committed=${player2Committed}`,
             );
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "awaiting_opponent_commit",
+                message: "Commit accepted. Waiting for opponent commitment...",
+                playerAddress: address,
+            });
         }
 
         await broadcastGameEvent(matchId, "round_plan_committed", {
@@ -729,6 +830,15 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             await broadcastGameEvent(matchId, "round_plan_ready", {
                 matchId,
                 roundNumber,
+            });
+
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "both_commits_ready",
+                message: "Both commitments locked. Proceed to reveal.",
+                playerAddress: address,
             });
 
             console.log(`[ZK Round Commit] Both players committed match=${matchId} round=${roundNumber}`);
@@ -1021,6 +1131,14 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         }
 
         if (!committedPlayers.has(match.player1_address) || !committedPlayers.has(match.player2_address)) {
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "awaiting_both_commits",
+                message: "Waiting for both commitments before reveal can finalize...",
+                playerAddress: address,
+            });
             return Response.json({
                 success: true,
                 roundNumber,
@@ -1065,6 +1183,16 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         }
 
         if (shouldRunResolveVerification) {
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "resolve_verify_started",
+                message: "Running resolve-time proof verification...",
+                playerAddress: address,
+                color: "#f97316",
+            });
+
             const verification = await verifyNoirProof({
                 proof,
                 publicInputs: body.publicInputs,
@@ -1084,8 +1212,24 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             verificationBackend = verification.backend;
             verificationCommand = verification.command;
             console.log(`[ZK Round Resolve] Proof verified at resolve match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "resolve_verify_ok",
+                message: `Resolve proof verified (${verification.backend}).`,
+                playerAddress: address,
+            });
         } else {
             console.log(`[ZK Round Resolve] Using verified commit proof match=${matchId} round=${roundNumber}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "resolve_verify_reuse",
+                message: "Using previously verified commit proof.",
+                playerAddress: address,
+            });
         }
 
         await supabase
@@ -1144,6 +1288,14 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
         if (!bothRevealed) {
             console.log(`[ZK Round Resolve] Waiting for opponent reveal match=${matchId} round=${roundNumber}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "awaiting_opponent_reveal",
+                message: "Reveal accepted. Waiting for opponent reveal...",
+                playerAddress: address,
+            });
             return Response.json({
                 success: true,
                 roundNumber,
@@ -1187,6 +1339,14 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
         if (resolveLockResult.state === "in_progress") {
             console.log(`[ZK Round Resolve] Resolver lock active match=${matchId} round=${roundNumber}`);
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "awaiting_resolver",
+                message: "Another resolver is finalizing this round...",
+                playerAddress: address,
+            });
             return Response.json({
                 success: true,
                 roundNumber,
@@ -1220,6 +1380,14 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         }
 
         try {
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                turnNumber,
+                stage: "phase3_start",
+                message: "Both reveals verified. Starting Phase 3 simulation...",
+                playerAddress: address,
+            });
 
             const { error: powerSurgeSyncError } = await supabase
                 .from("power_surges")
@@ -1246,12 +1414,23 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             let carryP2Stunned = Boolean(stunSnapshot?.player2_is_stunned);
 
             for (let turn = 1; turn <= PRIVATE_ROUND_PLAN_TURNS; turn += 1) {
+                await broadcastZkProgress({
+                    matchId,
+                    roundNumber,
+                    turnNumber: turn,
+                    stage: "phase3_turn_resolving",
+                    message: `Resolving private turn ${turn}/${PRIVATE_ROUND_PLAN_TURNS}...`,
+                    playerAddress: address,
+                });
+
                 const round = await getOrCreateRoundTurn(matchId, roundNumber, turn);
                 const plannedP1Move = p1Plan.movePlan?.[turn - 1] || "block";
                 const plannedP2Move = p2Plan.movePlan?.[turn - 1] || "block";
 
                 const p1Move = carryP1Stunned ? "stunned" : plannedP1Move;
                 const p2Move = carryP2Stunned ? "stunned" : plannedP2Move;
+
+                debugMatchEndLog(`turn=${turn} planned=(${plannedP1Move},${plannedP2Move}) effective=(${p1Move},${p2Move}) carry=(${carryP1Stunned},${carryP2Stunned}) match=${matchId} round=${roundNumber}`);
 
                 if (p1Move !== plannedP1Move || p2Move !== plannedP2Move) {
                     console.log(
@@ -1279,6 +1458,72 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 const resolution = await resolveTurn(matchId, round.id, {
                     suppressNextTurnBroadcastOnly: true,
                 });
+
+                const resolutionSuccess = (resolution as any)?.success !== false;
+
+                debugMatchEndLog(`turn=${turn} resolveTurn returned`, {
+                    success: (resolution as any)?.success,
+                    isRoundOver: resolution.isRoundOver,
+                    isMatchOver: resolution.isMatchOver,
+                    roundWinner: resolution.roundWinner,
+                    matchWinner: resolution.matchWinner,
+                    error: resolution.error,
+                });
+
+                if (!resolutionSuccess) {
+                    const { data: latestMatch, error: latestMatchError } = await supabase
+                        .from("matches")
+                        .select("status, format, fight_phase, winner_address, player1_rounds_won, player2_rounds_won")
+                        .eq("id", matchId)
+                        .maybeSingle();
+
+                    if (latestMatchError) {
+                        throw new Error(`Private round turn ${turn} failed and match state could not be verified: ${latestMatchError.message}`);
+                    }
+
+                    const p1Rounds = Number((latestMatch as any)?.player1_rounds_won ?? 0);
+                    const p2Rounds = Number((latestMatch as any)?.player2_rounds_won ?? 0);
+                    const roundsToWin = (latestMatch as any)?.format === "best_of_5" ? 3 : 2;
+                    const dbWinnerAddress = String((latestMatch as any)?.winner_address || "").trim();
+                    const dbMatchOver =
+                        (latestMatch as any)?.status === "completed"
+                        || (latestMatch as any)?.fight_phase === "match_end"
+                        || p1Rounds >= roundsToWin
+                        || p2Rounds >= roundsToWin;
+
+                    debugMatchEndLog(`turn=${turn} resolve error fallback DB check`, {
+                        status: (latestMatch as any)?.status,
+                        fightPhase: (latestMatch as any)?.fight_phase,
+                        p1Rounds,
+                        p2Rounds,
+                        roundsToWin,
+                        dbMatchOver,
+                    });
+
+                    if (dbMatchOver) {
+                        const dbMatchWinner = dbWinnerAddress
+                            ? (dbWinnerAddress === match.player1_address ? "player1" : dbWinnerAddress === match.player2_address ? "player2" : null)
+                            : (p1Rounds >= roundsToWin ? "player1" : p2Rounds >= roundsToWin ? "player2" : null);
+
+                        finalResolution = {
+                            ...resolution,
+                            success: true,
+                            isMatchOver: true,
+                            matchWinner: dbMatchWinner,
+                        };
+                        finalResolvedRoundId = round.id;
+
+                        console.warn(
+                            `[ZK Round Resolve] Turn ${turn} returned error payload, but DB shows match_end; stopping plan playback match=${matchId} round=${roundNumber} score=${p1Rounds}-${p2Rounds}`,
+                        );
+                        break;
+                    }
+
+                    throw new Error(
+                        `Private round turn ${turn} resolve failed: ${resolution.error || "unknown error"}`,
+                    );
+                }
+
                 finalResolution = resolution;
                 finalResolvedRoundId = round.id;
 
@@ -1313,6 +1558,15 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 throw new Error("Private round auto-resolution failed to produce a turn result");
             }
 
+            debugMatchEndLog(`loop complete match=${matchId} round=${roundNumber}`, {
+                finalResolvedRoundId,
+                isRoundOver: finalResolution.isRoundOver,
+                isMatchOver: finalResolution.isMatchOver,
+                roundWinner: finalResolution.roundWinner,
+                matchWinner: finalResolution.matchWinner,
+                error: finalResolution.error,
+            });
+
             await supabase
                 .from("round_private_commits")
                 .update({
@@ -1325,6 +1579,14 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 .is("resolved_round_id", null);
 
             await markDistributedResolveLockResolved(matchId, roundNumber, finalResolvedRoundId);
+
+            await broadcastZkProgress({
+                matchId,
+                roundNumber,
+                stage: "phase3_complete",
+                message: "Phase 3 complete. Broadcasting final round result.",
+                playerAddress: address,
+            });
 
             return Response.json({
                 success: true,
@@ -1469,5 +1731,33 @@ export async function handlePreparePrivateRoundCommit(matchId: string, req: Requ
             { error: err instanceof Error ? err.message : "Failed to prepare private round commit" },
             { status: 500 },
         );
+    }
+}
+
+async function broadcastZkProgress(params: {
+    matchId: string;
+    roundNumber: number;
+    stage: string;
+    message: string;
+    playerAddress?: string;
+    turnNumber?: number;
+    color?: string;
+}): Promise<void> {
+    const { matchId, roundNumber, stage, message, playerAddress, turnNumber, color } = params;
+    try {
+        await broadcastGameEvent(matchId, "zk_progress", {
+            matchId,
+            roundNumber,
+            turnNumber: typeof turnNumber === "number" ? turnNumber : null,
+            stage,
+            message,
+            playerAddress: playerAddress || null,
+            color: color || "#22c55e",
+            at: Date.now(),
+        });
+    } catch (err) {
+        // Best-effort: ZK progress UX must never block gameplay or chain-critical logic.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[ZK Progress] Broadcast failed stage=${stage} match=${matchId} round=${roundNumber}: ${msg}`);
     }
 }

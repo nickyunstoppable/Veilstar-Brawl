@@ -734,8 +734,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 .on("broadcast", { event: "round_plan_committed" }, (payload) => {
                     EventBus.emit("game:privateRoundCommitted", payload.payload);
                 })
+                .on("broadcast", { event: "round_plan_ready" }, () => {
+                    // optional UX event handled by round_plan_committed / zk_progress
+                })
                 .on("broadcast", { event: "round_plan_revealed" }, (payload) => {
                     EventBus.emit("game:privateRoundCommitted", payload.payload);
+                })
+                .on("broadcast", { event: "zk_progress" }, (payload) => {
+                    EventBus.emit("game:zkProgress", payload.payload);
                 })
                 .on("broadcast", { event: "match_ended" }, (payload) => {
                     EventBus.emit("game:matchEnded", payload.payload);
@@ -1305,6 +1311,11 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         address: params.address,
                     });
 
+                    const isSignedAuthEntryLikelyStale = (message: string): boolean => {
+                        const msg = String(message || "");
+                        return /auth( entry)?|require_auth|invalid|expired|signature|nonce/i.test(msg);
+                    };
+
                     console.info("[CharacterSelectClient] private-commit:start", {
                         traceId: baseTraceId,
                         matchId: params.matchId,
@@ -1317,29 +1328,36 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         hasCommitment: Boolean(commitment),
                     });
 
+                    let signedAuthEntryXdr: string | null = null;
+                    let transactionXdr: string | null = null;
+                    let preparedOnce = false;
+
                     for (let attempt = 1; attempt <= maxCommitAttempts; attempt++) {
                         const attemptTraceId = `${baseTraceId}:a${attempt}`;
                         try {
-                            console.info("[CharacterSelectClient] private-commit:prepare", {
-                                traceId: attemptTraceId,
-                                attempt,
-                                maxCommitAttempts,
-                            });
+                            if (!preparedOnce) {
+                                console.info("[CharacterSelectClient] private-commit:prepare", {
+                                    traceId: attemptTraceId,
+                                    attempt,
+                                    maxCommitAttempts,
+                                });
 
-                            const preparedCommit = await preparePrivateRoundCommit(params.matchId, {
-                                clientTraceId: attemptTraceId,
-                                address: params.address,
-                                roundNumber: params.roundNumber,
-                                turnNumber: params.turnNumber,
-                                commitment,
-                            });
+                                const preparedCommit = await preparePrivateRoundCommit(params.matchId, {
+                                    clientTraceId: attemptTraceId,
+                                    address: params.address,
+                                    roundNumber: params.roundNumber,
+                                    turnNumber: params.turnNumber,
+                                    commitment,
+                                });
 
-                            if (!preparedCommit?.authEntryXdr || !preparedCommit?.transactionXdr) {
-                                throw new Error("Private round commit prepare did not return auth entry or transaction");
+                                if (!preparedCommit?.authEntryXdr || !preparedCommit?.transactionXdr) {
+                                    throw new Error("Private round commit prepare did not return auth entry or transaction");
+                                }
+
+                                signedAuthEntryXdr = await signSorobanAuthEntry(preparedCommit.authEntryXdr, params.address);
+                                transactionXdr = preparedCommit.transactionXdr;
+                                preparedOnce = true;
                             }
-
-                            const signedAuthEntryXdr = await signSorobanAuthEntry(preparedCommit.authEntryXdr, params.address);
-                            const transactionXdr = preparedCommit.transactionXdr;
 
                             console.info("[CharacterSelectClient] private-commit:submit", {
                                 traceId: attemptTraceId,
@@ -1359,8 +1377,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                                 publicInputs: proofPublicInputs,
                                 transcriptHash: nonce,
                                 encryptedPlan,
-                                signedAuthEntryXdr,
-                                transactionXdr,
+                                signedAuthEntryXdr: signedAuthEntryXdr || undefined,
+                                transactionXdr: transactionXdr || undefined,
                             });
 
                             console.info("[CharacterSelectClient] private-commit:success", {
@@ -1377,12 +1395,26 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         } catch (commitErr) {
                             const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
                             lastCommitError = commitErr instanceof Error ? commitErr : new Error(msg);
-                            const retryable = isRetryableOnChainError(msg);
+
+                            // If the signed auth entry is actually stale/invalid, allow ONE re-prepare/re-sign.
+                            if (preparedOnce && isSignedAuthEntryLikelyStale(msg)) {
+                                console.warn(
+                                    `[CharacterSelectClient] private commit auth entry may be stale; re-preparing once: ${msg}`,
+                                );
+                                preparedOnce = false;
+                                signedAuthEntryXdr = null;
+                                transactionXdr = null;
+                            }
+
+                            const retryable = isRetryableOnChainError(msg) || /network|fetch|timeout|502|503|504|internal/i.test(msg);
                             if (!retryable || attempt === maxCommitAttempts) {
                                 throw lastCommitError;
                             }
+
                             const backoffMs = 250 * attempt;
-                            console.warn(`[CharacterSelectClient] Retryable private commit error (attempt ${attempt}/${maxCommitAttempts}), retrying in ${backoffMs}ms: ${msg}`);
+                            console.warn(
+                                `[CharacterSelectClient] Retryable private commit error (attempt ${attempt}/${maxCommitAttempts}), retrying in ${backoffMs}ms: ${msg}`,
+                            );
                             await new Promise((resolve) => setTimeout(resolve, backoffMs));
                         }
                     }

@@ -106,7 +106,20 @@ export async function commitPrivateRoundPlan(
             ZK_COMMIT_FETCH_TIMEOUT_MS,
         );
     } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
+        const isTimeout = error instanceof DOMException && error.name === "AbortError";
+        const hasSignedPayload = Boolean(request.signedAuthEntryXdr || request.transactionXdr);
+
+        // IMPORTANT: once an auth entry is signed, it contains a Soroban auth nonce.
+        // Retrying the exact same payload can fail with "nonce already exists for address".
+        // Let the caller re-run /commit/prepare to get a fresh auth nonce instead.
+        if (isTimeout && hasSignedPayload) {
+            throw new Error(
+                `Private round commit request timed out after ${ZK_COMMIT_FETCH_TIMEOUT_MS}ms. ` +
+                    "Do not retry with the same signedAuthEntryXdr/transactionXdr; re-prepare and re-sign to get a fresh auth nonce.",
+            );
+        }
+
+        if (isTimeout) {
             console.warn("[zkPrivateRoundClient] commit:timeout, retrying once", {
                 matchId,
                 clientTraceId: request.clientTraceId,
