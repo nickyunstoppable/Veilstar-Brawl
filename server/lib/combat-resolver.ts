@@ -513,6 +513,9 @@ export async function resolveTurn(
             let onChainTxHash: string | undefined;
             let onChainSkippedReason: string | undefined;
             let zkFinalizeFailedReason: string | undefined;
+            let onChainOutcomeTxHash: string | undefined;
+            let onChainResultPending: boolean | undefined;
+            let onChainResultError: string | undefined;
 
             if (proofFirstFinalizeRequired) {
                 try {
@@ -523,7 +526,10 @@ export async function resolveTurn(
                     });
 
                     const finalizeResponse = proofFinalize.finalizeResponse as any;
-                    onChainTxHash = finalizeResponse?.onChainTxHash || onChainTxHash;
+                    onChainTxHash = finalizeResponse?.onChainTxHash || finalizeResponse?.onChainOutcomeTxHash || onChainTxHash;
+                    onChainOutcomeTxHash = finalizeResponse?.onChainOutcomeTxHash || onChainOutcomeTxHash;
+                    onChainResultPending = Boolean(finalizeResponse?.onChainResultPending ?? onChainResultPending);
+                    onChainResultError = finalizeResponse?.onChainResultError || onChainResultError;
 
                     eloChanges = await updateElo(match, winnerAddr);
                 } catch (err) {
@@ -581,6 +587,9 @@ export async function resolveTurn(
                 isPrivateRoom: !!match.room_code,
                 onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
                 onChainTxHash,
+                onChainOutcomeTxHash,
+                onChainResultPending,
+                onChainResultError,
                 onChainSkippedReason,
                 zkFinalizeFailedReason,
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',

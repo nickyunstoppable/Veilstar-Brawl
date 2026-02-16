@@ -8,6 +8,8 @@
     "deploy": "bun run scripts/deploy.ts",
     "bindings": "bun run scripts/bindings.ts",
     "create": "bun run scripts/create.ts",
+    "fee-payers": "bun run scripts/generate-fee-payers.ts",
+    "fee-payers:apply-env": "bun run scripts/apply-fee-payers-env.ts",
     "publish": "bun run scripts/publish.ts",
     "dev": "bun run dev:game veilstar-brawl",
     "dev:catalog": "bun --cwd=sgs_frontend run dev",

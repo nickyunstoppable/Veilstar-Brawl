@@ -13,6 +13,7 @@
 
 import {
     Keypair,
+    StrKey,
     TransactionBuilder,
     hash,
     rpc,
@@ -39,6 +40,8 @@ const CONTRACT_ID = process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "";
 const ADMIN_SECRET = process.env.VITE_DEV_ADMIN_SECRET || process.env.VITE_DEV_PLAYER1_SECRET || "";
 const PLAYER1_SECRET = process.env.VITE_DEV_PLAYER1_SECRET || "";
 const PLAYER2_SECRET = process.env.VITE_DEV_PLAYER2_SECRET || "";
+const FEE_PAYER_SECRETS_RAW =
+    process.env.STELLAR_FEE_PAYER_SECRETS || process.env.VITE_DEV_FEE_PAYER_SECRETS || process.env.VITE_FEE_PAYER_SECRETS || "";
 
 // Points committed per match (0.01 points in 7-decimal format)
 const MATCH_POINTS = BigInt(100_000); // 0.01 points
@@ -84,6 +87,80 @@ function getKeypair(secretKey: string): Keypair | null {
 
 function getAdminKeypair(): Keypair | null {
     return getKeypair(ADMIN_SECRET);
+}
+
+function parseSecretList(raw: string): string[] {
+    return String(raw || "")
+        .split(/[\s,]+/g)
+        .map((s) => s.trim())
+        .filter(Boolean);
+}
+
+function getFeePayerKeypairs(): Keypair[] {
+    const secrets = parseSecretList(FEE_PAYER_SECRETS_RAW);
+    const keypairs: Keypair[] = [];
+    for (const secret of secrets) {
+        const kp = getKeypair(secret);
+        if (kp) keypairs.push(kp);
+    }
+    return keypairs;
+}
+
+function pickFeePayerPublicKey(seed: string): string | null {
+    const pool = getFeePayerKeypairs();
+    if (pool.length === 0) return null;
+    const digest = createHash("sha256").update(seed).digest();
+    const idx = digest.readUInt32BE(0) % pool.length;
+    return pool[idx]!.publicKey();
+}
+
+function pickFeePayerKeypair(seed: string): Keypair | null {
+    const pub = pickFeePayerPublicKey(seed);
+    return pub ? getFeePayerKeypairForPublicKey(pub) : null;
+}
+
+function getFeePayerKeypairForPublicKey(publicKey: string): Keypair | null {
+    const pool = getFeePayerKeypairs();
+    for (const kp of pool) {
+        if (kp.publicKey() === publicKey) return kp;
+    }
+    return null;
+}
+
+function extractTxSourceAccount(transactionXdr: string): string | null {
+    try {
+        const envelope = xdrLib.TransactionEnvelope.fromXDR(transactionXdr, "base64");
+        const envelopeType = envelope.switch().name;
+        const tx = envelopeType === "envelopeTypeTxFeeBump"
+            ? envelope.feeBump().tx().innerTx().v1().tx()
+            : envelope.v1().tx();
+        const source = tx.sourceAccount();
+        const sourceType = source.switch().name;
+        if (sourceType === "keyTypeEd25519") {
+            return StrKey.encodeEd25519PublicKey(source.ed25519());
+        }
+        if (sourceType === "keyTypeMuxedEd25519") {
+            return StrKey.encodeEd25519PublicKey(source.med25519().ed25519());
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+async function createFeePayerContractClient(feePayerKeypair: Keypair, contractIdOverride?: string): Promise<contract.Client> {
+    return createContractClient(feePayerKeypair.publicKey(), createSigner(feePayerKeypair), contractIdOverride);
+}
+
+async function createReadOnlyContractClientWithPublicKey(publicKey: string, contractIdOverride?: string): Promise<contract.Client> {
+    const contractId = resolveContractId(contractIdOverride);
+    const spec = await getContractSpec(contractId);
+    return new contract.Client(spec, {
+        contractId,
+        networkPassphrase: NETWORK_PASSPHRASE,
+        rpcUrl: RPC_URL,
+        publicKey,
+    });
 }
 
 function getKeypairForAddress(address: string): Keypair | null {
@@ -268,6 +345,10 @@ async function withAdminSubmissionLock<T>(lockKey: string, fn: () => Promise<T>)
     }
 }
 
+function getAdminGlobalLockKey(contractId: string | undefined, adminPublicKey: string): string {
+    return `admin:${contractId || CONTRACT_ID}:${adminPublicKey}`;
+}
+
 function isTransientSubmissionError(err: any): boolean {
     const message = String(err?.message || "");
     const responseText = String(err?.response?.data || "");
@@ -407,7 +488,7 @@ export function isContractConfigured(): boolean {
  * This flow requires a funded fee-payer account to sign and submit the tx envelope.
  */
 export function isOnChainRegistrationConfigured(): boolean {
-    return !!(CONTRACT_ID && ADMIN_SECRET);
+    return !!(CONTRACT_ID && (ADMIN_SECRET || getFeePayerKeypairs().length > 0));
 }
 
 /**
@@ -415,7 +496,7 @@ export function isOnChainRegistrationConfigured(): boolean {
  * Requires a configured contract and funded admin fee payer.
  */
 export function isClientSignedActionConfigured(): boolean {
-    return !!(CONTRACT_ID && ADMIN_SECRET);
+    return !!(CONTRACT_ID && (ADMIN_SECRET || getFeePayerKeypairs().length > 0));
 }
 
 export function getConfiguredContractId(): string {
@@ -666,21 +747,16 @@ export async function prepareRegistration(
 
     const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
 
-    // Use admin as fee-payer/tx source for this server-submitted flow.
-    // If we used a player as tx source, we would also need the player's envelope signature.
-    const adminKeypair = getAdminKeypair();
-    if (!adminKeypair) {
-        throw new Error("On-chain registration requires ADMIN_SECRET (fee payer) to be configured");
+    // Use a funded fee-payer as tx source for this server-submitted flow.
+    // Players only sign Soroban auth entries; the server signs the tx envelope with the fee payer.
+    const feePayerPublicKey =
+        pickFeePayerPublicKey(`register:${matchId}:${player1Address}:${player2Address}`) || getAdminKeypair()?.publicKey();
+    if (!feePayerPublicKey) {
+        throw new Error("On-chain registration requires STELLAR_FEE_PAYER_SECRETS (recommended) or ADMIN_SECRET (fallback)");
     }
 
     // Build a contract client with no signer — we only need to simulate
-    const spec = await getContractSpec();
-    const readOnlyClient = new contract.Client(spec, {
-        contractId: CONTRACT_ID,
-        networkPassphrase: NETWORK_PASSPHRASE,
-        rpcUrl: RPC_URL,
-        publicKey: adminKeypair.publicKey(),
-    });
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey);
 
     const tx = await (readOnlyClient as any).start_game({
         session_id: sessionId,
@@ -760,20 +836,17 @@ export async function submitSignedRegistration(
     try {
         console.log(`[Stellar] Submitting client-signed registration (sessionId: ${sessionId})`);
 
-        // Use the admin keypair (or any funded account) to sign the transaction envelope
-        const adminKeypair = getAdminKeypair();
-        if (!adminKeypair) {
-            return { success: false, error: "Admin keypair not available for tx submission", sessionId };
+        const txSource = extractTxSourceAccount(transactionXdr) || "";
+        const feePayerKeypair = (txSource && getFeePayerKeypairForPublicKey(txSource)) || getAdminKeypair();
+        if (!feePayerKeypair) {
+            return {
+                success: false,
+                error: "No fee payer available. Configure STELLAR_FEE_PAYER_SECRETS (recommended) or ADMIN_SECRET (fallback).",
+                sessionId,
+            };
         }
 
-        const spec = await getContractSpec();
-        const client = new contract.Client(spec, {
-            contractId: CONTRACT_ID,
-            networkPassphrase: NETWORK_PASSPHRASE,
-            rpcUrl: RPC_URL,
-            publicKey: adminKeypair.publicKey(),
-            ...createSigner(adminKeypair),
-        });
+        const client = await createFeePayerContractClient(feePayerKeypair);
 
         // Inject signed auth entries into the transaction envelope itself.
         // This must happen before re-simulation/submission.
@@ -919,8 +992,14 @@ export async function prepareMoveOnChain(
         throw new Error(`Unknown move type: ${moveType}`);
     }
 
-    const adminClient = await createAdminContractClient();
-    const tx = await (adminClient as any).submit_move({
+    const feePayerPublicKey =
+        pickFeePayerPublicKey(`move:${matchId}:${playerAddress}:${turn}:${moveType}`) || getAdminKeypair()?.publicKey();
+    if (!feePayerPublicKey) {
+        throw new Error("Client-signed action flow requires either STELLAR_FEE_PAYER_SECRETS or ADMIN_SECRET");
+    }
+
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey);
+    const tx = await (readOnlyClient as any).submit_move({
         session_id: sessionId,
         player: playerAddress,
         move_type: moveVal,
@@ -955,8 +1034,16 @@ export async function prepareZkCommitOnChain(
     const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
     const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
 
-    const adminClient = await createAdminContractClient(options?.contractId || undefined);
-    const submitZkCommit = (adminClient as any).submit_zk_commit;
+    const contractId = options?.contractId || undefined;
+    const feePayerPublicKey =
+        pickFeePayerPublicKey(`zkcommit:${contractId || CONTRACT_ID}:${matchId}:${playerAddress}:${roundNumber}:${turnNumber}`) ||
+        getAdminKeypair()?.publicKey();
+    if (!feePayerPublicKey) {
+        throw new Error("Client-signed action flow requires either STELLAR_FEE_PAYER_SECRETS or ADMIN_SECRET");
+    }
+
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey, contractId);
+    const submitZkCommit = (readOnlyClient as any).submit_zk_commit;
     if (typeof submitZkCommit !== "function") {
         throw new Error("Deployed contract does not expose submit_zk_commit");
     }
@@ -994,16 +1081,21 @@ export async function submitSignedZkCommitOnChain(
 
     const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
 
-    const adminKeypair = getAdminKeypair();
-    if (!adminKeypair) {
-        return { success: false, error: "Admin keypair not available", sessionId };
+    const txSource = extractTxSourceAccount(transactionXdr) || "";
+    const feePayerKeypair = (txSource && getFeePayerKeypairForPublicKey(txSource)) || getAdminKeypair();
+    if (!feePayerKeypair) {
+        return {
+            success: false,
+            error: "No fee payer available. Configure STELLAR_FEE_PAYER_SECRETS (recommended) or ADMIN_SECRET (fallback).",
+            sessionId,
+        };
     }
 
     if (!Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
         return { success: false, error: "roundNumber and turnNumber must be positive integers", sessionId };
     }
 
-    const lockKey = `admin:${options?.contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    const lockKey = getAdminGlobalLockKey(options?.contractId || undefined, feePayerKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
         const playerShort = `${playerAddress.slice(0, 6)}…${playerAddress.slice(-4)}`;
         console.log(
@@ -1013,8 +1105,8 @@ export async function submitSignedZkCommitOnChain(
         const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
 
         const buildFreshCommitXdr = async (): Promise<string> => {
-            const adminClient = await createAdminContractClient(options?.contractId || undefined);
-            const submitZkCommit = (adminClient as any).submit_zk_commit;
+            const feePayerClient = await createFeePayerContractClient(feePayerKeypair, options?.contractId || undefined);
+            const submitZkCommit = (feePayerClient as any).submit_zk_commit;
             if (typeof submitZkCommit !== "function") {
                 throw new Error("Deployed contract does not expose submit_zk_commit");
             }
@@ -1034,7 +1126,7 @@ export async function submitSignedZkCommitOnChain(
             xdrToSubmit: string,
         ): Promise<{ success: boolean; txHash?: string; error?: string; alreadySubmitted?: boolean }> => {
             try {
-                const adminClient = await createAdminContractClient(options?.contractId || undefined);
+                const feePayerClient = await createFeePayerContractClient(feePayerKeypair, options?.contractId || undefined);
                 const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(xdrToSubmit, {
                     [addressKey(playerAddress)]: signedAuthEntryXdr,
                 });
@@ -1050,7 +1142,7 @@ export async function submitSignedZkCommitOnChain(
                     `[Stellar][submitSignedZkCommitOnChain] auth injected match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort} replacedCount=${replacedCount}`,
                 );
 
-                const tx = adminClient.txFromXDR(updatedXdr);
+                const tx = feePayerClient.txFromXDR(updatedXdr);
                 await withTimeout(
                     tx.simulate(),
                     STELLAR_TX_SEND_TIMEOUT_MS,
@@ -1147,7 +1239,13 @@ export async function submitSignedMoveOnChain(
     const sessionId = matchIdToSessionId(matchId);
 
     try {
-        const adminClient = await createAdminContractClient();
+        const txSource = extractTxSourceAccount(transactionXdr) || "";
+        const feePayerKeypair = (txSource && getFeePayerKeypairForPublicKey(txSource)) || getAdminKeypair();
+        if (!feePayerKeypair) {
+            return { success: false, error: "No fee payer available for move submission", sessionId };
+        }
+
+        const feePayerClient = await createFeePayerContractClient(feePayerKeypair);
         const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, {
             [addressKey(playerAddress)]: signedAuthEntryXdr,
         });
@@ -1156,7 +1254,7 @@ export async function submitSignedMoveOnChain(
             return { success: false, error: "Signed auth entry did not match transaction auth entries", sessionId };
         }
 
-        const tx = adminClient.txFromXDR(updatedXdr);
+        const tx = feePayerClient.txFromXDR(updatedXdr);
         await tx.simulate();
         const { txHash } = await signAndSendTx(tx);
 
@@ -1186,8 +1284,14 @@ export async function preparePowerSurgeOnChain(
         throw new Error(`Unknown power surge card: ${cardId}`);
     }
 
-    const adminClient = await createAdminContractClient();
-    const tx = await (adminClient as any).submit_power_surge({
+    const feePayerPublicKey =
+        pickFeePayerPublicKey(`powersurge:${matchId}:${playerAddress}:${roundNumber}:${cardId}`) || getAdminKeypair()?.publicKey();
+    if (!feePayerPublicKey) {
+        throw new Error("Client-signed action flow requires either STELLAR_FEE_PAYER_SECRETS or ADMIN_SECRET");
+    }
+
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey);
+    const tx = await (readOnlyClient as any).submit_power_surge({
         session_id: sessionId,
         player: playerAddress,
         round: roundNumber,
@@ -1216,7 +1320,13 @@ export async function submitSignedPowerSurgeOnChain(
     const sessionId = matchIdToSessionId(matchId);
 
     try {
-        const adminClient = await createAdminContractClient();
+        const txSource = extractTxSourceAccount(transactionXdr) || "";
+        const feePayerKeypair = (txSource && getFeePayerKeypairForPublicKey(txSource)) || getAdminKeypair();
+        if (!feePayerKeypair) {
+            return { success: false, error: "No fee payer available for power surge submission", sessionId };
+        }
+
+        const feePayerClient = await createFeePayerContractClient(feePayerKeypair);
         const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(transactionXdr, {
             [addressKey(playerAddress)]: signedAuthEntryXdr,
         });
@@ -1225,7 +1335,7 @@ export async function submitSignedPowerSurgeOnChain(
             return { success: false, error: "Signed auth entry did not match transaction auth entries", sessionId };
         }
 
-        const tx = adminClient.txFromXDR(updatedXdr);
+        const tx = feePayerClient.txFromXDR(updatedXdr);
         await tx.simulate();
         const { txHash } = await signAndSendTx(tx);
 
@@ -1249,8 +1359,14 @@ export async function prepareStakeDepositOnChain(
 
     const sessionId = matchIdToSessionId(matchId);
 
-    const adminClient = await createAdminContractClient();
-    const tx = await (adminClient as any).deposit_stake({
+    const feePayerPublicKey =
+        pickFeePayerPublicKey(`stake:${matchId}:${playerAddress}`) || getAdminKeypair()?.publicKey();
+    if (!feePayerPublicKey) {
+        throw new Error("Client-signed action flow requires either STELLAR_FEE_PAYER_SECRETS or ADMIN_SECRET");
+    }
+
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey);
+    const tx = await (readOnlyClient as any).deposit_stake({
         session_id: sessionId,
         player: playerAddress,
     });
@@ -1278,7 +1394,12 @@ export async function submitSignedStakeDepositOnChain(
 
     const submitWithTransactionXdr = async (xdrToSubmit: string): Promise<{ txHash?: string; error?: string }> => {
         try {
-            const adminClient = await createAdminContractClient();
+            const txSource = extractTxSourceAccount(xdrToSubmit) || "";
+            const feePayerKeypair = (txSource && getFeePayerKeypairForPublicKey(txSource)) || getAdminKeypair();
+            if (!feePayerKeypair) {
+                return { error: "No fee payer available for stake submission" };
+            }
+            const feePayerClient = await createFeePayerContractClient(feePayerKeypair);
             const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(xdrToSubmit, {
                 [addressKey(playerAddress)]: signedAuthEntryXdr,
             });
@@ -1287,7 +1408,7 @@ export async function submitSignedStakeDepositOnChain(
                 return { error: "Signed auth entry did not match transaction auth entries" };
             }
 
-            const tx = adminClient.txFromXDR(updatedXdr);
+            const tx = feePayerClient.txFromXDR(updatedXdr);
             await tx.simulate();
             const { txHash } = await signAndSendTx(tx);
             return { txHash };
@@ -1370,23 +1491,37 @@ export async function reportMatchResultOnChain(
         return { success: false, error: "Admin keypair not available", sessionId };
     }
 
-    try {
-        console.log(`[Stellar] Reporting match result on-chain (sessionId: ${sessionId}, contract: ${contractId || CONTRACT_ID})`);
+    const lockKey = getAdminGlobalLockKey(contractId, adminKeypair.publicKey());
+    return withAdminSubmissionLock(lockKey, async () => {
+        const maxAttempts = 4;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                console.log(`[Stellar] Reporting match result on-chain (sessionId: ${sessionId}, contract: ${contractId || CONTRACT_ID}, attempt: ${attempt}/${maxAttempts})`);
 
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const tx = await (client as any).end_game({
-            session_id: sessionId,
-            player1_won: player1Won,
-        });
-        const { txHash } = await signAndSendTx(tx);
+                const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+                const tx = await (client as any).end_game({
+                    session_id: sessionId,
+                    player1_won: player1Won,
+                });
+                const { txHash } = await signAndSendTx(tx);
 
-        console.log(`[Stellar] Match result reported. Session: ${sessionId}, TX: ${txHash || "n/a"}`);
-        return { success: true, txHash, sessionId };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[Stellar] Failed to report match result on-chain:`, message);
-        return { success: false, error: message, sessionId };
-    }
+                console.log(`[Stellar] Match result reported. Session: ${sessionId}, TX: ${txHash || "n/a"}`);
+                return { success: true, txHash, sessionId };
+            } catch (err) {
+                const baseMessage = err instanceof Error ? err.message : String(err);
+                const message = withDecodedResult(err, baseMessage);
+
+                if (!isTransientSubmissionError(err) || attempt >= maxAttempts) {
+                    console.error(`[Stellar] Failed to report match result on-chain:`, message);
+                    return { success: false, error: message, sessionId };
+                }
+
+                await sleep(250 * attempt);
+            }
+        }
+
+        return { success: false, error: "end_game retries exhausted", sessionId };
+    });
 }
 
 // =============================================================================
@@ -1566,7 +1701,7 @@ export async function setZkGateRequiredOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    const lockKey = `admin-gate:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    const lockKey = getAdminGlobalLockKey(contractId, adminKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
         try {
             const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
@@ -1666,14 +1801,22 @@ export async function submitZkVerificationOnChain(
     const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
     const contractId = options?.contractId || undefined;
 
-    const adminKeypair = getAdminKeypair();
-    if (!adminKeypair) {
-        return { success: false, error: "Admin keypair not available", sessionId };
+    const feePayerKeypair =
+        pickFeePayerKeypair(`zkverify:${contractId || CONTRACT_ID}:${matchId}:${playerAddress}:${roundNumber}:${turnNumber}`) ||
+        getAdminKeypair();
+    if (!feePayerKeypair) {
+        return {
+            success: false,
+            error: "No fee payer available. Configure STELLAR_FEE_PAYER_SECRETS (recommended) or ADMIN_SECRET (fallback).",
+            sessionId,
+        };
     }
 
-    const lockKey = `admin-zk-verify:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    const lockKey = getAdminGlobalLockKey(contractId, feePayerKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
-    try {
+        const maxAttempts = 4;
+
+        // Normalize/validate once outside the retry loop.
         const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
         const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
 
@@ -1690,38 +1833,52 @@ export async function submitZkVerificationOnChain(
             };
         }
 
-        const normalizedPublicInputs = normalizePublicInputsToBytes32(publicInputs);
+        const publicInputsBytes = normalizePublicInputsToBytes32(publicInputs);
         const proofBytes = rawProofBytes;
-        const publicInputsBytes = normalizedPublicInputs;
 
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const submitZkVerification = (client as any).submit_zk_verification;
-        if (typeof submitZkVerification !== "function") {
-            return {
-                success: false,
-                error: "Deployed contract does not expose submit_zk_verification. Redeploy the updated veilstar-brawl contract and restart server.",
-                sessionId,
-            };
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const client = await createContractClient(
+                    feePayerKeypair.publicKey(),
+                    createSigner(feePayerKeypair),
+                    contractId,
+                );
+                const submitZkVerification = (client as any).submit_zk_verification;
+                if (typeof submitZkVerification !== "function") {
+                    return {
+                        success: false,
+                        error: "Deployed contract does not expose submit_zk_verification. Redeploy the updated veilstar-brawl contract and restart server.",
+                        sessionId,
+                    };
+                }
+
+                const tx = await submitZkVerification({
+                    session_id: sessionId,
+                    verifier: feePayerKeypair.publicKey(),
+                    player: playerAddress,
+                    round: roundNumber,
+                    turn: turnNumber,
+                    commitment: commitmentBytes,
+                    vk_id: vkIdBytes,
+                    proof: proofBytes,
+                    public_inputs: publicInputsBytes,
+                });
+
+                const { txHash } = await signAndSendTx(tx);
+                return { success: true, txHash, sessionId };
+            } catch (err) {
+                const baseMessage = err instanceof Error ? err.message : String(err);
+                const message = withDecodedResult(err, baseMessage);
+
+                if (!isTransientSubmissionError(err) || attempt >= maxAttempts) {
+                    return { success: false, error: message, sessionId };
+                }
+
+                await sleep(250 * attempt);
+            }
         }
 
-        const tx = await submitZkVerification({
-            session_id: sessionId,
-            verifier: adminKeypair.publicKey(),
-            player: playerAddress,
-            round: roundNumber,
-            turn: turnNumber,
-            commitment: commitmentBytes,
-            vk_id: vkIdBytes,
-            proof: proofBytes,
-            public_inputs: publicInputsBytes,
-        });
-        const { txHash } = await signAndSendTx(tx);
-
-        return { success: true, txHash, sessionId };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message, sessionId };
-    }
+        return { success: false, error: "submit_zk_verification retries exhausted", sessionId };
     });
 }
 
@@ -1740,56 +1897,78 @@ export async function submitZkMatchOutcomeOnChain(
     const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
     const contractId = options?.contractId || undefined;
 
-    const adminKeypair = getAdminKeypair();
-    if (!adminKeypair) {
-        return { success: false, error: "Admin keypair not available", sessionId };
+    const feePayerKeypair =
+        pickFeePayerKeypair(`zkoutcome:${contractId || CONTRACT_ID}:${matchId}:${winnerAddress}`) || getAdminKeypair();
+    if (!feePayerKeypair) {
+        return {
+            success: false,
+            error: "No fee payer available. Configure STELLAR_FEE_PAYER_SECRETS (recommended) or ADMIN_SECRET (fallback).",
+            sessionId,
+        };
     }
 
-    try {
-        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+    const lockKey = getAdminGlobalLockKey(contractId, feePayerKeypair.publicKey());
+    return withAdminSubmissionLock(lockKey, async () => {
+        const maxAttempts = 4;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
 
-        const proofBytes = decodeMaybeBase64(proof);
-        if (!proofBytes) {
-            return { success: false, error: "proof must be base64-encoded bytes", sessionId };
+                const proofBytes = decodeMaybeBase64(proof);
+                if (!proofBytes) {
+                    return { success: false, error: "proof must be base64-encoded bytes", sessionId };
+                }
+
+                if (proofBytes.length !== 256) {
+                    return {
+                        success: false,
+                        error: `Trustless mode requires Groth16 calldata proof (256 bytes); received ${proofBytes.length} bytes`,
+                        sessionId,
+                    };
+                }
+
+                const publicInputsBytes = normalizePublicInputsToBytes32(publicInputs);
+                if (publicInputsBytes.length === 0) {
+                    return { success: false, error: "public inputs cannot be empty", sessionId };
+                }
+
+                const client = await createContractClient(
+                    feePayerKeypair.publicKey(),
+                    createSigner(feePayerKeypair),
+                    contractId,
+                );
+                const submitMatchOutcome = (client as any).submit_zk_match_outcome;
+                if (typeof submitMatchOutcome !== "function") {
+                    return {
+                        success: false,
+                        error: "Deployed contract does not expose submit_zk_match_outcome. Redeploy the updated veilstar-brawl contract and restart server.",
+                        sessionId,
+                    };
+                }
+
+                const tx = await submitMatchOutcome({
+                    session_id: sessionId,
+                    verifier: feePayerKeypair.publicKey(),
+                    vk_id: vkIdBytes,
+                    proof: proofBytes,
+                    public_inputs: publicInputsBytes,
+                });
+                const { txHash } = await signAndSendTx(tx);
+
+                return { success: true, txHash, sessionId };
+            } catch (err) {
+                const baseMessage = err instanceof Error ? err.message : String(err);
+                const message = withDecodedResult(err, baseMessage);
+                if (!isTransientSubmissionError(err) || attempt >= maxAttempts) {
+                    return { success: false, error: message, sessionId };
+                }
+
+                await sleep(250 * attempt);
+            }
         }
 
-        if (proofBytes.length !== 256) {
-            return {
-                success: false,
-                error: `Trustless mode requires Groth16 calldata proof (256 bytes); received ${proofBytes.length} bytes`,
-                sessionId,
-            };
-        }
-
-        const publicInputsBytes = normalizePublicInputsToBytes32(publicInputs);
-        if (publicInputsBytes.length === 0) {
-            return { success: false, error: "public inputs cannot be empty", sessionId };
-        }
-
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const submitMatchOutcome = (client as any).submit_zk_match_outcome;
-        if (typeof submitMatchOutcome !== "function") {
-            return {
-                success: false,
-                error: "Deployed contract does not expose submit_zk_match_outcome. Redeploy the updated veilstar-brawl contract and restart server.",
-                sessionId,
-            };
-        }
-
-        const tx = await submitMatchOutcome({
-            session_id: sessionId,
-            winner: winnerAddress,
-            vk_id: vkIdBytes,
-            proof: proofBytes,
-            public_inputs: publicInputsBytes,
-        });
-        const { txHash } = await signAndSendTx(tx);
-
-        return { success: true, txHash, sessionId };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message, sessionId };
-    }
+        return { success: false, error: "submit_zk_match_outcome retries exhausted", sessionId };
+    });
 }
 
 function decodeMaybeBase64(value: unknown): Buffer | null {
@@ -1879,7 +2058,7 @@ export async function setZkVerifierContractOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    const lockKey = `admin-zk-setverifier:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    const lockKey = getAdminGlobalLockKey(contractId, adminKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
         try {
             const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
@@ -1918,7 +2097,7 @@ export async function setZkVerifierVkIdOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    const lockKey = `admin-zk-setvk:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    const lockKey = getAdminGlobalLockKey(contractId, adminKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
         try {
             const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");

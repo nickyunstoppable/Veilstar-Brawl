@@ -713,6 +713,10 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         },
                     );
 
+                    console.log(
+                        `[ZK Round Commit] Async on-chain verification result match=${matchId} round=${roundNumber} player=${address} success=${onChainVerification.success} tx=${onChainVerification.txHash || "n/a"} error=${onChainVerification.error || "n/a"}`,
+                    );
+
                     if (!onChainVerification.success) {
                         console.error(
                             `[ZK Round Commit] Async on-chain verification failed match=${matchId} round=${roundNumber} player=${address}: ${onChainVerification.error || "unknown"}`,

@@ -1102,45 +1102,75 @@ export class FightScene extends Phaser.Scene {
       if (!response.ok) return;
 
       const data = await response.json();
-      if (data.status === "completed" || data.status === "cancelled") {
-        console.log("[FightScene] Match ended, triggering end screen");
+      const match = (data?.match ?? data) as any;
+      const status = String(match?.status || "").toLowerCase();
+      const fightPhase = String(match?.fight_phase ?? match?.fightPhase ?? "");
 
-        // Determine winner role based on winner address
-        let winner: "player1" | "player2" | null = null;
-        if (data.winnerAddress === this.config.player1Address) {
-          winner = "player1";
-        } else if (data.winnerAddress === this.config.player2Address) {
-          winner = "player2";
-        }
+      const onChainSessionIdRaw = match?.onchain_session_id ?? match?.onChainSessionId ?? null;
+      const onChainSessionId = typeof onChainSessionIdRaw === "number"
+        ? onChainSessionIdRaw
+        : (typeof onChainSessionIdRaw === "string" && onChainSessionIdRaw.trim() !== "" ? Number(onChainSessionIdRaw) : null);
 
-        // Construct rating changes from player data if available
-        // Note: This uses current ratings, not the actual match rating changes
-        // For accurate rating changes, the match_ended broadcast should be the source of truth
-        let ratingChanges = undefined;
-        if (data.player1?.rating !== undefined && data.player2?.rating !== undefined && winner) {
-          // We can't accurately compute historical rating changes here,
-          // but we can provide approximate values using current ratings
-          // The ResultsScene will show these if no better data is available
-          const winnerRating = winner === "player1" ? data.player1.rating : data.player2.rating;
-          const loserRating = winner === "player1" ? data.player2.rating : data.player1.rating;
-          ratingChanges = {
-            winner: { before: winnerRating, after: winnerRating, change: 0 },
-            loser: { before: loserRating, after: loserRating, change: 0 },
-          };
-        }
+      const onChainTxHash = String(match?.onchain_result_tx_hash ?? match?.onChainTxHash ?? match?.onChainTxHash ?? "").trim() || undefined;
+      const contractId = String(match?.onchain_contract_id ?? match?.contractId ?? match?.onChainContractId ?? "").trim() || undefined;
+      const isPrivateRoom = !!(match?.room_code ?? match?.roomCode);
 
-        EventBus.emit("game:matchEnded", {
-          matchId: this.config.matchId,
-          winner,
-          winnerAddress: data.winnerAddress || null,
-          reason: data.status === "cancelled" ? "forfeit" : "knockout",
-          finalScore: {
-            player1RoundsWon: data.player1RoundsWon || 0,
-            player2RoundsWon: data.player2RoundsWon || 0,
-          },
-          ratingChanges,
-        });
+      const player1RoundsWon = Number(
+        match?.player1_rounds_won ?? match?.player1RoundsWon ?? match?.player1_roundsWon ?? 0,
+      );
+      const player2RoundsWon = Number(
+        match?.player2_rounds_won ?? match?.player2RoundsWon ?? match?.player2_roundsWon ?? 0,
+      );
+
+      // Strict ZK mode can keep status=in_progress while fight_phase is match_end.
+      const roundsToWin = match?.format === "best_of_5" ? 3 : 2;
+      const isTerminalByStatus = status === "completed" || status === "cancelled";
+      const isTerminalByPhase = fightPhase === "match_end";
+      const isTerminalByScore = player1RoundsWon >= roundsToWin || player2RoundsWon >= roundsToWin;
+      const isTerminal = isTerminalByStatus || isTerminalByPhase || isTerminalByScore;
+
+      this.debugMatchEndLog("fetchFinalMatchState:check", {
+        status,
+        fightPhase,
+        player1RoundsWon,
+        player2RoundsWon,
+        roundsToWin,
+        isTerminal,
+      });
+
+      if (!isTerminal) return;
+
+      console.log("[FightScene] Match ended (or terminal), triggering end screen");
+
+      const winnerAddress = String(match?.winner_address ?? match?.winnerAddress ?? "").trim() || null;
+
+      // Determine winner role based on winner address (preferred) or score fallback.
+      let winner: "player1" | "player2" | null = null;
+      if (winnerAddress === this.config.player1Address) {
+        winner = "player1";
+      } else if (winnerAddress === this.config.player2Address) {
+        winner = "player2";
+      } else if (!winnerAddress) {
+        winner = player1RoundsWon > player2RoundsWon ? "player1" : player2RoundsWon > player1RoundsWon ? "player2" : null;
       }
+
+      const normalizedReason = status === "cancelled" ? "forfeit" : "knockout";
+
+      EventBus.emit("game:matchEnded", {
+        matchId: this.config.matchId,
+        winner,
+        winnerAddress,
+        reason: normalizedReason,
+        finalScore: {
+          player1RoundsWon,
+          player2RoundsWon,
+        },
+        // Ratings are authoritative via match_ended broadcast; omit here.
+        isPrivateRoom,
+        onChainSessionId: Number.isFinite(onChainSessionId as any) ? (onChainSessionId as number) : undefined,
+        onChainTxHash,
+        contractId,
+      });
     } catch (error) {
       console.error("[FightScene] Failed to fetch final match state:", error);
     }
@@ -4602,73 +4632,76 @@ export class FightScene extends Phaser.Scene {
     player1RoundsWon: number;
     player2RoundsWon: number;
   }): void {
-    console.log(`[FightScene] *** handleServerRoundResolved - Setting phase to 'resolving', Timestamp: ${Date.now()}`);
-    console.log(`[FightScene] *** pendingRoundStart before setting phase: ${!!this.pendingRoundStart}`);
+    try {
+      console.log(`[FightScene] *** handleServerRoundResolved - Setting phase to 'resolving', Timestamp: ${Date.now()}`);
+      console.log(`[FightScene] *** pendingRoundStart before setting phase: ${!!this.pendingRoundStart}`);
 
-    // Set resolving flag to prevent match end from interrupting animations
-    this.isResolving = true;
-    this.phase = "resolving";
-    if (PRIVATE_ROUNDS_ENABLED) {
-      this.setMoveButtonsVisible(false);
-      this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
-      this.turnIndicatorText.setColor("#f97316");
-    }
+      // Set resolving flag to prevent match end from interrupting animations
+      this.isResolving = true;
+      this.phase = "resolving";
+      if (PRIVATE_ROUNDS_ENABLED) {
+        this.setMoveButtonsVisible(false);
+        if (this.isActiveText(this.turnIndicatorText)) {
+          this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+          this.turnIndicatorText.setColor("#f97316");
+        }
+      }
 
-    // Clear any pending deadline-based timers to prevent them firing during animations
-    this.timerExpiredHandled = true;
-    this.stunnedAutoSubmitAt = 0;
-    this.bothStunnedSkipAt = 0;
+      // Clear any pending deadline-based timers to prevent them firing during animations
+      this.timerExpiredHandled = true;
+      this.stunnedAutoSubmitAt = 0;
+      this.bothStunnedSkipAt = 0;
 
-    // Get max values from local engine for fallback (server should provide these)
-    const localState = this.combatEngine.getState();
+      // Get max values from local engine for fallback (server should provide these)
+      const localState = this.combatEngine.getState();
 
-    // Store previous health for damage calculation
-    const prevP1Health = this.serverState?.player1Health ?? payload.player1Health;
-    const prevP2Health = this.serverState?.player2Health ?? payload.player2Health;
+      // Store previous health for damage calculation
+      const prevP1Health = this.serverState?.player1Health ?? payload.player1Health;
+      const prevP2Health = this.serverState?.player2Health ?? payload.player2Health;
 
-    // Store PENDING server state - don't apply to serverState yet!
-    // This prevents UI from showing new HP/energy values before animations complete.
-    // The pendingServerState will be applied when syncUIWithCombatState() is called
-    // after the attack animations finish.
-    this.pendingServerState = {
-      player1Health: payload.player1Health,
-      player1MaxHealth: payload.player1MaxHealth ?? localState.player1.maxHp,
-      player2Health: payload.player2Health,
-      player2MaxHealth: payload.player2MaxHealth ?? localState.player2.maxHp,
-      player1Energy: payload.player1Energy,
-      player1MaxEnergy: payload.player1MaxEnergy ?? localState.player1.maxEnergy,
-      player2Energy: payload.player2Energy,
-      player2MaxEnergy: payload.player2MaxEnergy ?? localState.player2.maxEnergy,
-      player1GuardMeter: payload.player1GuardMeter,
-      player2GuardMeter: payload.player2GuardMeter,
-      player1RoundsWon: payload.player1RoundsWon,
-      player2RoundsWon: payload.player2RoundsWon,
-      currentRound: this.serverState?.currentRound ?? 1,
-      player1IsStunned: payload.player1?.isStunned ?? false,
-      player2IsStunned: payload.player2?.isStunned ?? false,
-    };
+      // Store PENDING server state - don't apply to serverState yet!
+      // This prevents UI from showing new HP/energy values before animations complete.
+      // The pendingServerState will be applied when syncUIWithCombatState() is called
+      // after the attack animations finish.
+      this.pendingServerState = {
+        player1Health: payload.player1Health,
+        player1MaxHealth: payload.player1MaxHealth ?? localState.player1.maxHp,
+        player2Health: payload.player2Health,
+        player2MaxHealth: payload.player2MaxHealth ?? localState.player2.maxHp,
+        player1Energy: payload.player1Energy,
+        player1MaxEnergy: payload.player1MaxEnergy ?? localState.player1.maxEnergy,
+        player2Energy: payload.player2Energy,
+        player2MaxEnergy: payload.player2MaxEnergy ?? localState.player2.maxEnergy,
+        player1GuardMeter: payload.player1GuardMeter,
+        player2GuardMeter: payload.player2GuardMeter,
+        player1RoundsWon: payload.player1RoundsWon,
+        player2RoundsWon: payload.player2RoundsWon,
+        currentRound: this.serverState?.currentRound ?? 1,
+        player1IsStunned: payload.player1?.isStunned ?? false,
+        player2IsStunned: payload.player2?.isStunned ?? false,
+      };
 
-    // Capture stun-at-turn-start state from the last round_starting payload.
-    // This is the authoritative indicator for who must miss THIS turn.
-    const p1StunnedAtTurnStart = Boolean(this.serverState?.player1IsStunned);
-    const p2StunnedAtTurnStart = Boolean(this.serverState?.player2IsStunned);
+      // Capture stun-at-turn-start state from the last round_starting payload.
+      // This is the authoritative indicator for who must miss THIS turn.
+      const p1StunnedAtTurnStart = Boolean(this.serverState?.player1IsStunned);
+      const p2StunnedAtTurnStart = Boolean(this.serverState?.player2IsStunned);
 
-    const p1Char = this.config.player1Character || "dag-warrior";
-    const p2Char = this.config.player2Character || "dag-warrior";
+      const p1Char = this.config.player1Character || "dag-warrior";
+      const p2Char = this.config.player2Character || "dag-warrior";
 
     // Using centralized getAnimationScale(charId, animType) from sprite-config.ts
     // All scale values are managed in MANUAL_SCALE_OVERRIDES or calculated dynamically
 
-    // Store original positions
-    const p1OriginalX = CHARACTER_POSITIONS.PLAYER1.X;
-    const p2OriginalX = CHARACTER_POSITIONS.PLAYER2.X;
-    const meetingPointX = GAME_DIMENSIONS.CENTER_X;
+      // Store original positions
+      const p1OriginalX = CHARACTER_POSITIONS.PLAYER1.X;
+      const p2OriginalX = CHARACTER_POSITIONS.PLAYER2.X;
+      const meetingPointX = GAME_DIMENSIONS.CENTER_X;
 
     // Resolve effective moves for playback.
     // If a player was stunned at turn start, force their move to "stunned"
     // even when payload.move still contains a preplanned choice.
-    const p1Move: MoveType = p1StunnedAtTurnStart ? "stunned" : payload.player1.move;
-    const p2Move: MoveType = p2StunnedAtTurnStart ? "stunned" : payload.player2.move;
+      const p1Move: MoveType = p1StunnedAtTurnStart ? "stunned" : payload.player1.move;
+      const p2Move: MoveType = p2StunnedAtTurnStart ? "stunned" : payload.player2.move;
 
     if ((p1StunnedAtTurnStart && payload.player1.move !== "stunned") || (p2StunnedAtTurnStart && payload.player2.move !== "stunned")) {
       console.warn(
@@ -4677,9 +4710,9 @@ export class FightScene extends Phaser.Scene {
       );
     }
 
-    // Check stun state for this turn's animation flow.
-    const p1IsStunned = p1Move === "stunned" || payload.player1.outcome === "stunned";
-    const p2IsStunned = p2Move === "stunned" || payload.player2.outcome === "stunned";
+      // Check stun state for this turn's animation flow.
+      const p1IsStunned = p1Move === "stunned" || payload.player1.outcome === "stunned";
+      const p2IsStunned = p2Move === "stunned" || payload.player2.outcome === "stunned";
 
     // Prepare targets
     let p1TargetX = meetingPointX - 50;
@@ -4727,20 +4760,20 @@ export class FightScene extends Phaser.Scene {
       this.toggleStunEffect("player2", true);
     }
 
-    // Tween both characters toward targets
-    this.tweens.add({
-      targets: this.player1Sprite,
-      x: p1TargetX,
-      duration: p1IsStunned ? 0 : 600,
-      ease: 'Power2',
-    });
+      // Tween both characters toward targets
+      this.tweens.add({
+        targets: this.player1Sprite,
+        x: p1TargetX,
+        duration: p1IsStunned ? 0 : 600,
+        ease: 'Power2',
+      });
 
-    this.tweens.add({
-      targets: this.player2Sprite,
-      x: p2TargetX,
-      duration: p2IsStunned ? 0 : 600,
-      ease: 'Power2',
-      onComplete: () => {
+      this.tweens.add({
+        targets: this.player2Sprite,
+        x: p2TargetX,
+        duration: p2IsStunned ? 0 : 600,
+        ease: 'Power2',
+        onComplete: () => {
         // Sequential Animation Logic using Promises
         // Calculate actual damage from HP difference (before animations)
         const p1ActualDamage = Math.max(0, prevP1Health - payload.player1Health);
@@ -4979,6 +5012,11 @@ export class FightScene extends Phaser.Scene {
                   console.log("[FightScene] Processing queued match end payload");
                   this.processMatchEnd(this.pendingMatchEndPayload);
                   this.pendingMatchEndPayload = null;
+                } else {
+                  // Fallback: if match_ended broadcast was lost, fetch the final match state
+                  // to trigger game:matchEnded and transition to ResultsScene.
+                  console.warn("[FightScene] No pendingMatchEndPayload on isMatchOver; fetching final match state as fallback");
+                  void this.fetchFinalMatchState();
                 }
                 return;
               }
@@ -5034,6 +5072,15 @@ export class FightScene extends Phaser.Scene {
         })();
       },
     });
+    } catch (err) {
+      console.error("[FightScene] handleServerRoundResolved crashed:", err);
+      this.isResolving = false;
+
+      // If the match was supposed to be over, still attempt to transition.
+      if (payload.isMatchOver) {
+        void this.fetchFinalMatchState();
+      }
+    }
   }
 
   /**

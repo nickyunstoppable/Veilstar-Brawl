@@ -23,6 +23,23 @@ import { createHash } from "node:crypto";
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
 const ZK_REQUIRE_TRANSCRIPT_HASH = (process.env.ZK_REQUIRE_TRANSCRIPT_HASH ?? "true") !== "false";
+const ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS = Number.parseInt(
+    (process.env.ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS ?? "30000").trim(),
+    10,
+);
+const ZK_FINALIZE_VERIFICATION_POLL_MS = Number.parseInt(
+    (process.env.ZK_FINALIZE_VERIFICATION_POLL_MS ?? "2000").trim(),
+    10,
+);
+const ZK_FINALIZE_BACKGROUND_RETRY = (process.env.ZK_FINALIZE_BACKGROUND_RETRY ?? "true") !== "false";
+const ZK_FINALIZE_ENDGAME_RETRY_ATTEMPTS = Number.parseInt(
+    (process.env.ZK_FINALIZE_ENDGAME_RETRY_ATTEMPTS ?? "12").trim(),
+    10,
+);
+const ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS = Number.parseInt(
+    (process.env.ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS ?? "5000").trim(),
+    10,
+);
 
 interface FinalizeBody {
     winnerAddress?: string;
@@ -30,6 +47,168 @@ interface FinalizeBody {
     publicInputs?: unknown;
     transcriptHash?: string;
     broadcast?: boolean;
+}
+
+function sleep(ms: number): Promise<void> {
+    if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toNumber(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "bigint") return Number(value);
+    if (typeof value === "string") {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+function readOnChainVerifiedCounts(state: any): { p1: number | null; p2: number | null } {
+    if (!state || typeof state !== "object") return { p1: null, p2: null };
+
+    const p1 = toNumber(
+        state.player1_zk_verified
+        ?? state.player1ZkVerified
+        ?? state.player1_zkVerified,
+    );
+    const p2 = toNumber(
+        state.player2_zk_verified
+        ?? state.player2ZkVerified
+        ?? state.player2_zkVerified,
+    );
+
+    return { p1, p2 };
+}
+
+async function waitForOnChainZkVerifications(options: {
+    sessionId: number;
+    contractId?: string;
+    timeoutMs: number;
+    pollMs: number;
+}): Promise<{ ok: boolean; waitedMs: number; lastState: any | null; counts: { p1: number | null; p2: number | null } }> {
+    const startedAt = Date.now();
+    let waitedMs = 0;
+    let lastState: any | null = null;
+    let counts = { p1: null as number | null, p2: null as number | null };
+
+    while (waitedMs <= options.timeoutMs) {
+        lastState = await getOnChainMatchStateBySession(options.sessionId, {
+            contractId: options.contractId || undefined,
+        });
+        counts = readOnChainVerifiedCounts(lastState);
+
+        if ((counts.p1 ?? 0) > 0 && (counts.p2 ?? 0) > 0) {
+            return { ok: true, waitedMs, lastState, counts };
+        }
+
+        if (waitedMs >= options.timeoutMs) break;
+        await sleep(options.pollMs);
+        waitedMs = Date.now() - startedAt;
+    }
+
+    return { ok: false, waitedMs, lastState, counts };
+}
+
+async function backgroundRetryEndGame(params: {
+    matchId: string;
+    sessionId: number;
+    contractId?: string;
+    player1Address: string;
+    player2Address: string;
+    winnerAddress: string;
+}): Promise<void> {
+    if (!ZK_FINALIZE_BACKGROUND_RETRY) return;
+
+    console.log(`[ZK Finalize] backgroundRetryEndGame scheduled match=${params.matchId} session=${params.sessionId}`);
+
+    const attempts = Number.isFinite(ZK_FINALIZE_ENDGAME_RETRY_ATTEMPTS)
+        ? Math.max(1, ZK_FINALIZE_ENDGAME_RETRY_ATTEMPTS)
+        : 12;
+    const baseDelayMs = Number.isFinite(ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS)
+        ? Math.max(250, ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS)
+        : 5000;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            console.log(`[ZK Finalize] backgroundRetryEndGame attempt=${attempt}/${attempts} match=${params.matchId}`);
+            const waitResult = await waitForOnChainZkVerifications({
+                sessionId: params.sessionId,
+                contractId: params.contractId,
+                timeoutMs: 0,
+                pollMs: 0,
+            });
+
+            if (!waitResult.ok) {
+                console.log(
+                    `[ZK Finalize] backgroundRetryEndGame waiting verifications match=${params.matchId} p1=${waitResult.counts.p1 ?? "?"} p2=${waitResult.counts.p2 ?? "?"}`,
+                );
+                await broadcastGameEvent(params.matchId, "zk_progress", {
+                    matchId: params.matchId,
+                    stage: "onchain_endgame_waiting_verifications",
+                    message: `Waiting for on-chain verifications (p1=${waitResult.counts.p1 ?? "?"}, p2=${waitResult.counts.p2 ?? "?"})...`,
+                    color: "#f97316",
+                });
+
+                await sleep(baseDelayMs);
+                continue;
+            }
+
+            const onChainResult = await reportMatchResultOnChain(
+                params.matchId,
+                params.player1Address,
+                params.player2Address,
+                params.winnerAddress,
+                {
+                    sessionId: params.sessionId,
+                    contractId: params.contractId,
+                },
+            );
+
+            if (!onChainResult.success) {
+                console.warn(
+                    `[ZK Finalize] backgroundRetryEndGame end_game failed match=${params.matchId} attempt=${attempt}/${attempts}: ${onChainResult.error || "unknown"}`,
+                );
+                await broadcastGameEvent(params.matchId, "zk_progress", {
+                    matchId: params.matchId,
+                    stage: "onchain_endgame_failed",
+                    message: `On-chain end_game failed (attempt ${attempt}/${attempts}).`,
+                    color: "#ef4444",
+                    details: onChainResult.error || null,
+                });
+
+                await sleep(baseDelayMs);
+                continue;
+            }
+
+            const txHash = onChainResult.txHash || null;
+            if (txHash) {
+                const supabase = getSupabase();
+                await supabase
+                    .from("matches")
+                    .update({ onchain_result_tx_hash: txHash })
+                    .eq("id", params.matchId);
+            }
+
+            console.log(`[ZK Finalize] backgroundRetryEndGame end_game OK match=${params.matchId} tx=${txHash || "n/a"}`);
+
+            await broadcastGameEvent(params.matchId, "zk_progress", {
+                matchId: params.matchId,
+                stage: "onchain_endgame_ok",
+                message: "On-chain end_game confirmed.",
+                color: "#22c55e",
+                onChainTxHash: txHash,
+            });
+
+            return;
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[ZK Finalize] backgroundRetryEndGame error match=${params.matchId} attempt=${attempt}/${attempts}: ${msg}`);
+            await sleep(baseDelayMs);
+        }
+    }
+
+    console.warn(`[ZK Finalize] backgroundRetryEndGame exhausted match=${params.matchId} attempts=${attempts}`);
 }
 
 function stableStringify(value: unknown): string {
@@ -178,6 +357,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
 
         let onChainTxHash: string | null = null;
         let onChainOutcomeTxHash: string | null = null;
+        let onChainResultPending = false;
+        let onChainResultError: string | null = null;
         let onChainSessionId = typeof match.onchain_session_id === "number"
             ? match.onchain_session_id
             : null;
@@ -261,37 +442,70 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             }
             onChainOutcomeTxHash = outcomeProofResult.txHash || null;
 
-            console.log(`[ZK Finalize] Reporting on-chain result for match ${matchId}`);
-            const onChainResult = await reportMatchResultOnChain(
-                matchId,
-                match.player1_address,
-                match.player2_address,
-                winnerAddress,
-                {
+            // end_game requires BOTH players to have at least one on-chain verification submitted when ZK gate is enabled.
+            // Verification submission is async during gameplay for UX, so finalize waits briefly for it to land.
+            const waitResult = await waitForOnChainZkVerifications({
+                sessionId: onChainSessionId,
+                contractId: onChainContractId || undefined,
+                timeoutMs: Number.isFinite(ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS) ? ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS : 30000,
+                pollMs: Number.isFinite(ZK_FINALIZE_VERIFICATION_POLL_MS) ? ZK_FINALIZE_VERIFICATION_POLL_MS : 2000,
+            });
+
+            if (!waitResult.ok) {
+                onChainResultPending = true;
+                onChainResultError = `Waiting for on-chain submit_zk_verification (p1=${waitResult.counts.p1 ?? "?"}, p2=${waitResult.counts.p2 ?? "?"})`;
+                console.warn(
+                    `[ZK Finalize] Skipping end_game for now (verifications not yet observed) match=${matchId} waitedMs=${waitResult.waitedMs} p1=${waitResult.counts.p1 ?? "?"} p2=${waitResult.counts.p2 ?? "?"}`,
+                );
+
+                void backgroundRetryEndGame({
+                    matchId,
                     sessionId: onChainSessionId,
                     contractId: onChainContractId || undefined,
-                },
-            );
-
-            if (!onChainResult.success) {
-                return Response.json(
+                    player1Address: match.player1_address,
+                    player2Address: match.player2_address,
+                    winnerAddress,
+                });
+            } else {
+                console.log(`[ZK Finalize] Reporting on-chain result for match ${matchId}`);
+                const onChainResult = await reportMatchResultOnChain(
+                    matchId,
+                    match.player1_address,
+                    match.player2_address,
+                    winnerAddress,
                     {
-                        error: "On-chain result transaction failed",
-                        details: onChainResult.error || null,
+                        sessionId: onChainSessionId,
+                        contractId: onChainContractId || undefined,
                     },
-                    { status: 502 },
                 );
-            }
 
-            onChainTxHash = onChainResult.txHash || null;
+                if (!onChainResult.success) {
+                    // Treat as non-fatal: the proof was submitted, and the off-chain match is completed.
+                    // This prevents strict ZK finalize from wedging the match-end UX.
+                    onChainResultPending = true;
+                    onChainResultError = onChainResult.error || "On-chain end_game failed";
+                    console.warn(`[ZK Finalize] end_game failed (will remain pending) match=${matchId}: ${onChainResultError}`);
 
-            console.log(`[ZK Finalize] On-chain finalize complete for match ${matchId}, tx=${onChainTxHash || "n/a"}`);
+                    void backgroundRetryEndGame({
+                        matchId,
+                        sessionId: onChainSessionId,
+                        contractId: onChainContractId || undefined,
+                        player1Address: match.player1_address,
+                        player2Address: match.player2_address,
+                        winnerAddress,
+                    });
+                } else {
+                    onChainTxHash = onChainResult.txHash || null;
 
-            if (onChainTxHash) {
-                await supabase
-                    .from("matches")
-                    .update({ onchain_result_tx_hash: onChainTxHash })
-                    .eq("id", matchId);
+                    console.log(`[ZK Finalize] On-chain finalize complete for match ${matchId}, tx=${onChainTxHash || "n/a"}`);
+
+                    if (onChainTxHash) {
+                        await supabase
+                            .from("matches")
+                            .update({ onchain_result_tx_hash: onChainTxHash })
+                            .eq("id", matchId);
+                    }
+                }
             }
         }
         else if (strictFinalize) {
@@ -313,6 +527,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                 onChainSessionId: onChainSessionId ?? matchIdToSessionId(matchId),
                 onChainTxHash,
                 onChainOutcomeTxHash,
+                onChainResultPending,
+                onChainResultError,
                 zkProofSubmitted: true,
                 transcriptHash: body.transcriptHash || null,
                 proofPublicInputs: body.publicInputs || null,
@@ -326,6 +542,8 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             onChainTxHash,
             onChainOutcomeTxHash,
             onChainSessionId: onChainSessionId ?? matchIdToSessionId(matchId),
+            onChainResultPending,
+            onChainResultError,
             zkProofAccepted: true,
             zkVerification: {
                 backend: "onchain-groth16",

@@ -14,6 +14,9 @@ bindings/
 .env
 .env.local
 
+# Generated funded fee-payer accounts (contains private keys)
+tmp/fee-payers*.json
+
 # Dependencies
 node_modules/
 bun.lockb
