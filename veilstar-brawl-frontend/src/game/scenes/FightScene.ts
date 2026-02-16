@@ -8,7 +8,7 @@ import { EventBus } from "../EventBus";
 import { GAME_DIMENSIONS, CHARACTER_POSITIONS, UI_POSITIONS } from "../config";
 import { getCharacterScale, getCharacterYOffset, getAnimationScale, getSoundDelay, getSFXKey } from "../config/sprite-config";
 import { CombatEngine, BASE_MOVE_STATS } from "../combat";
-import { calculateSurgeEffects, isBlockDisabled, shouldStunOpponent } from "../combat/SurgeEffects";
+import { calculateSurgeEffects, isBlockDisabled } from "../combat/SurgeEffects";
 import { ChatPanel } from "../ui/ChatPanel";
 import { StickerPicker, STICKER_LIST, type StickerId } from "../ui/StickerPicker";
 import { TransactionToast } from "../ui/TransactionToast";
@@ -25,7 +25,11 @@ import { preloadFightSceneAssets, createCharacterAnimations } from "../utils/ass
 
 type PlayerRole = "player1" | "player2";
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
-const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUND_PLAN_TURNS = 10;
+const PRIVATE_ROUND_SERVER_MAX_ENERGY = 100;
+const PRIVATE_ROUND_SERVER_ENERGY_REGEN = 8;
+const ROUND_MOVE_TIMER_MS = 90000;
 const apiUrl = (path: string): string => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
 /**
@@ -81,6 +85,7 @@ export class FightScene extends Phaser.Scene {
   private countdownText!: Phaser.GameObjects.Text;
   private narrativeText!: Phaser.GameObjects.Text;
   private turnIndicatorText!: Phaser.GameObjects.Text;
+  private privatePlanEnergyText?: Phaser.GameObjects.Text;
 
   // Character sprites
   private player1Sprite!: Phaser.GameObjects.Sprite;
@@ -90,10 +95,12 @@ export class FightScene extends Phaser.Scene {
   private moveButtons: Map<MoveType, Phaser.GameObjects.Container> = new Map();
   // Move selection
   private selectedMove: MoveType | null = null;
+  private privateRoundPlannedMoves: Array<"punch" | "kick" | "block" | "special"> = [];
+  private privateRoundPlanEnergyPreview: number = PRIVATE_ROUND_SERVER_MAX_ENERGY;
 
   // Timer - ALL timers use real-time deadlines (Date.now()) instead of Phaser timers
   // This ensures timers continue counting down even when the browser tab is backgrounded
-  private turnTimer: number = 15;
+  private turnTimer: number = 90;
   // REMOVED: private timerEvent - replaced by update() loop using moveDeadlineAt
 
   // State
@@ -193,6 +200,8 @@ export class FightScene extends Phaser.Scene {
 
   // Transaction toast for showing confirmed transactions
   private activeTransactionToast?: TransactionToast;
+  private moveConfirmedListener?: (data: unknown) => void;
+  private privateRoundCommittedListener?: (data: unknown) => void;
 
   // Pending server state - holds the new HP/energy values during animations
   // This prevents the UI from showing new values before animations complete
@@ -243,6 +252,32 @@ export class FightScene extends Phaser.Scene {
 
   constructor() {
     super({ key: "FightScene" });
+  }
+
+  private isSceneUiReady(): boolean {
+    try {
+      const sysAny = this.sys as any;
+      if (!sysAny || sysAny.isDestroyed) return false;
+
+      const settings = sysAny.settings;
+      const status = settings?.status;
+      if (typeof status === "number" && status >= Phaser.Scenes.SHUTDOWN) {
+        return false;
+      }
+
+      return !!this.add
+        && !!this.tweens
+        && !!this.time
+        && !!sysAny.displayList
+        && !!sysAny.updateList;
+    } catch {
+      return false;
+    }
+  }
+
+  private isActiveText(text: Phaser.GameObjects.Text | undefined): text is Phaser.GameObjects.Text {
+    const anyText = text as any;
+    return !!anyText && !!anyText.active && !!anyText.scene && !!anyText.scene.sys;
   }
 
   /**
@@ -532,6 +567,7 @@ export class FightScene extends Phaser.Scene {
    */
   update(_time: number, _delta: number): void {
     const now = Date.now();
+    this.updatePrivatePlanEnergyText();
 
     // === COUNTDOWN PHASE (3-2-1 FIGHT) ===
     if (this.phase === "countdown" && this.countdownEndsAt > 0) {
@@ -579,6 +615,7 @@ export class FightScene extends Phaser.Scene {
       const remainingMs = this.moveDeadlineAt - now;
       this.turnTimer = Math.max(0, Math.ceil(remainingMs / 1000));
       this.roundTimerText.setText(`${this.turnTimer}s`);
+      this.updatePrivatePlanEnergyText();
 
       if (this.turnTimer <= 5) {
         this.roundTimerText.setColor("#ff4444");
@@ -858,13 +895,13 @@ export class FightScene extends Phaser.Scene {
         if (remainingCountdownMs > 0) {
           // Resume countdown
           const remainingSeconds = Math.ceil(remainingCountdownMs / 1000);
-          const moveDeadlineAt = state.moveDeadlineAt ? new Date(state.moveDeadlineAt).getTime() : now + 20000;
+          const moveDeadlineAt = state.moveDeadlineAt ? new Date(state.moveDeadlineAt).getTime() : now + ROUND_MOVE_TIMER_MS;
           this.phase = "countdown";
           this.moveDeadlineAt = moveDeadlineAt;
           this.showCountdownThenSync(remainingSeconds, moveDeadlineAt);
         } else {
           // Countdown already finished, go to selecting
-          const moveDeadlineAt = state.moveDeadlineAt ? new Date(state.moveDeadlineAt).getTime() : now + 20000;
+          const moveDeadlineAt = state.moveDeadlineAt ? new Date(state.moveDeadlineAt).getTime() : now + ROUND_MOVE_TIMER_MS;
           this.moveDeadlineAt = moveDeadlineAt;
           if (moveDeadlineAt > now) {
             this.startSynchronizedSelectionPhase(moveDeadlineAt);
@@ -915,7 +952,10 @@ export class FightScene extends Phaser.Scene {
           // Wait for animation to finish, then next phase
           this.phase = "resolving";
           this.isResolving = true;
-          this.turnIndicatorText.setText("Resolving turn...");
+          if (PRIVATE_ROUNDS_ENABLED) {
+            this.setMoveButtonsVisible(false);
+          }
+          this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Phase 3/3: Enjoy the fight!" : "Resolving turn...");
           this.turnIndicatorText.setColor("#f97316");
 
           // Set a timeout to request next state after animation completes
@@ -1052,55 +1092,13 @@ export class FightScene extends Phaser.Scene {
   }
 
   /**
-   * Apply stun effects from Power Surge cards immediately after selection.
-   * This updates serverState with stun flags and triggers visual effects.
-   * Called when Power Surge card selection is complete (both players selected or timeout).
+   * Apply immediate post-surge UI effects.
+   * Stun is server-authoritative and must only come from combat resolution
+   * (e.g. punch vs special). Do not mutate stun flags here.
    */
   private applyImmediateSurgeEffects(): void {
-    // Calculate surge effects from both players' selections
-    const surgeResults = calculateSurgeEffects(this.activeSurges.player1, this.activeSurges.player2);
-    const p1Mods = surgeResults.player1Modifiers;
-    const p2Mods = surgeResults.player2Modifiers;
-
-    // Player 1's surge can stun Player 2, and vice versa
-    const p2Stunned = shouldStunOpponent(p1Mods); // P1's card stuns P2
-    const p1Stunned = shouldStunOpponent(p2Mods); // P2's card stuns P1
-
-    if (p1Stunned) {
-      console.log("[FightScene] Player 1 is stunned by opponent's Mempool Congest");
-    }
-    if (p2Stunned) {
-      console.log("[FightScene] Player 2 is stunned by opponent's Mempool Congest");
-    }
-
-    // Update serverState with stun flags (this is what startSynchronizedSelectionPhase reads)
-    if (this.serverState) {
-      this.serverState.player1IsStunned = p1Stunned;
-      this.serverState.player2IsStunned = p2Stunned;
-    }
-
-    // Apply visual stun effects
-    this.toggleStunEffect("player1", p1Stunned);
-    this.toggleStunEffect("player2", p2Stunned);
-
-    // Update button affordability (disables buttons if local player is stunned)
+    // Keep affordability in sync with non-stun surge effects (e.g. block disable).
     this.updateMoveButtonAffordability();
-
-    // Show stun text if local player is stunned
-    const isPlayer1 = this.config.playerRole === "player1";
-    const amIStunned = isPlayer1 ? p1Stunned : p2Stunned;
-    const isOpponentStunned = isPlayer1 ? p2Stunned : p1Stunned;
-
-    if (amIStunned && isOpponentStunned) {
-      this.turnIndicatorText.setText("BOTH PLAYERS STUNNED!");
-      this.turnIndicatorText.setColor("#ff4444");
-    } else if (amIStunned) {
-      this.turnIndicatorText.setText("YOU ARE STUNNED!");
-      this.turnIndicatorText.setColor("#ff4444");
-    } else if (isOpponentStunned) {
-      this.turnIndicatorText.setText("OPPONENT IS STUNNED!");
-      this.turnIndicatorText.setColor("#22c55e");
-    }
   }
 
   /**
@@ -2070,7 +2068,7 @@ export class FightScene extends Phaser.Scene {
 
     // Hover effects
     container.on("pointerover", () => {
-      if (this.phase === "selecting" && this.combatEngine.canAffordMove("player1", move)) {
+      if (this.phase === "selecting" && this.canAffordMoveForSelection(move)) {
         this.playSFX("sfx_hover");
         this.tweens.add({
           targets: container,
@@ -2132,7 +2130,61 @@ export class FightScene extends Phaser.Scene {
       return;
     }
 
-    // Check if affordable using server state energy
+    // Private rounds: Phase 2 is 10-move preplanning, then one submit/sign.
+    if (PRIVATE_ROUNDS_ENABLED) {
+      if (move === "stunned") {
+        this.showFloatingText("Cannot preplan stunned", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
+        return;
+      }
+
+      if (this.privateRoundPlannedMoves.length >= PRIVATE_ROUND_PLAN_TURNS) {
+        return;
+      }
+
+      const moveCost = BASE_MOVE_STATS[move].energyCost;
+      if (this.privateRoundPlanEnergyPreview < moveCost) {
+        this.showFloatingText("Not enough energy for this step", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
+        return;
+      }
+
+      this.privateRoundPlannedMoves.push(move as "punch" | "kick" | "block" | "special");
+      const afterCost = Math.max(0, this.privateRoundPlanEnergyPreview - moveCost);
+      this.privateRoundPlanEnergyPreview = Math.min(
+        PRIVATE_ROUND_SERVER_MAX_ENERGY,
+        afterCost + PRIVATE_ROUND_SERVER_ENERGY_REGEN,
+      );
+
+      this.selectedMove = move;
+      this.updateButtonState(move, true);
+
+      const progress = `${this.privateRoundPlannedMoves.length}/${PRIVATE_ROUND_PLAN_TURNS}`;
+      this.turnIndicatorText.setText(`Phase 2/3: Plan moves (${progress})`);
+      this.turnIndicatorText.setColor("#40e0d0");
+      this.updatePrivatePlanEnergyText();
+      this.updateMoveButtonAffordability();
+
+      if (this.privateRoundPlannedMoves.length >= PRIVATE_ROUND_PLAN_TURNS) {
+        this.isWaitingForOpponent = true;
+        this.localMoveSubmitted = true;
+        this.moveInFlight = true;
+        this.turnIndicatorText.setText("Submitting 10-move plan...");
+        this.turnIndicatorText.setColor("#f97316");
+
+        this.moveButtons.forEach(btn => {
+          btn.disableInteractive();
+          btn.setAlpha(0.5);
+        });
+
+        EventBus.emit("game:submitRoundPlan", {
+          matchId: this.config.matchId,
+          roundNumber: this.serverState?.currentRound ?? 1,
+          movePlan: this.privateRoundPlannedMoves,
+          playerRole: this.config.playerRole,
+        });
+      }
+      return;
+    }
+
     const currentEnergy = role === "player1"
       ? (this.serverState?.player1Energy ?? this.combatEngine.getState().player1.energy)
       : (this.serverState?.player2Energy ?? this.combatEngine.getState().player2.energy);
@@ -2145,20 +2197,16 @@ export class FightScene extends Phaser.Scene {
     }
 
     this.selectedMove = move;
-
-    // Update button visuals
     this.updateButtonState(move, true);
 
-    // Emit event to submit move via API
     this.isWaitingForOpponent = true;
     this.turnIndicatorText.setText("Submitting move...");
     this.turnIndicatorText.setColor("#f97316");
 
-    // Disable all buttons immediately to prevent double submission
     this.moveButtons.forEach(btn => {
       btn.disableInteractive();
       if (btn !== this.moveButtons.get(move)) {
-        btn.setAlpha(0.5); // Dim others
+        btn.setAlpha(0.5);
       }
     });
 
@@ -2169,8 +2217,30 @@ export class FightScene extends Phaser.Scene {
     });
   }
 
+  private getSelectionEnergy(role: "player1" | "player2"): number {
+    if (PRIVATE_ROUNDS_ENABLED && this.phase === "selecting") {
+      return this.privateRoundPlanEnergyPreview;
+    }
+
+    return role === "player1"
+      ? (this.serverState?.player1Energy ?? 0)
+      : (this.serverState?.player2Energy ?? 0);
+  }
+
+  private canAffordMoveForSelection(move: MoveType): boolean {
+    const role = this.config.playerRole;
+    if (!role) return false;
+    const currentEnergy = this.getSelectionEnergy(role);
+    return currentEnergy >= BASE_MOVE_STATS[move].energyCost;
+  }
+
   private updateButtonState(selectedMove: MoveType | null, isSelected: boolean): void {
     const moves: MoveType[] = ["punch", "kick", "block", "special"];
+    const isUsableGraphics = (graphics: Phaser.GameObjects.Graphics | undefined): graphics is Phaser.GameObjects.Graphics => {
+      if (!graphics) return false;
+      const anyGraphics = graphics as any;
+      return !!anyGraphics.active && !!anyGraphics.scene && !!anyGraphics.scene.sys;
+    };
 
     moves.forEach((move) => {
       const button = this.moveButtons.get(move);
@@ -2190,19 +2260,21 @@ export class FightScene extends Phaser.Scene {
 
         // Highlight effect
         const bg = button.list[0] as Phaser.GameObjects.Graphics;
-        bg.clear();
-        bg.fillStyle(0x1a1a2e, 1);
-        bg.fillRoundedRect(-70, -80, 140, 160, 12);
-        bg.lineStyle(4, 0xffffff, 1); // White border for selection
-        bg.strokeRoundedRect(-70, -80, 140, 160, 12);
+        if (isUsableGraphics(bg)) {
+          bg.clear();
+          bg.fillStyle(0x1a1a2e, 1);
+          bg.fillRoundedRect(-70, -80, 140, 160, 12);
+          bg.lineStyle(4, 0xffffff, 1); // White border for selection
+          bg.strokeRoundedRect(-70, -80, 140, 160, 12);
+        }
 
       } else {
         // Unselected state
-        const isAffordable = this.combatEngine.canAffordMove("player1", move);
+        const isAffordable = this.canAffordMoveForSelection(move);
 
         this.tweens.add({
           targets: button,
-          alpha: isAffordable ? (isSelected ? 0.5 : 1) : 0.3, // Dim others if one is selected
+          alpha: isAffordable ? 1 : 0.3,
           scaleX: 1,
           scaleY: 1,
           y: GAME_DIMENSIONS.HEIGHT - 100,
@@ -2219,11 +2291,13 @@ export class FightScene extends Phaser.Scene {
         if (move === "special") color = 0xa855f7;
 
         const bg = button.list[0] as Phaser.GameObjects.Graphics;
-        bg.clear();
-        bg.fillStyle(0x1a1a2e, 0.9);
-        bg.fillRoundedRect(-70, -80, 140, 160, 12);
-        bg.lineStyle(2, color, 0.8);
-        bg.strokeRoundedRect(-70, -80, 140, 160, 12);
+        if (isUsableGraphics(bg)) {
+          bg.clear();
+          bg.fillStyle(0x1a1a2e, 0.9);
+          bg.fillRoundedRect(-70, -80, 140, 160, 12);
+          bg.lineStyle(2, color, 0.8);
+          bg.strokeRoundedRect(-70, -80, 140, 160, 12);
+        }
       }
     });
   }
@@ -2231,27 +2305,42 @@ export class FightScene extends Phaser.Scene {
   private updateMoveButtonAffordability(): void {
     if (this.config.isSpectator || !this.config.playerRole || !this.serverState) return;
 
+    const staleMoves: string[] = [];
+    const isUsableButton = (button: Phaser.GameObjects.Container | undefined): button is Phaser.GameObjects.Container => {
+      if (!button) return false;
+      const anyButton = button as any;
+      return !!anyButton.active && !!anyButton.scene && !!anyButton.scene.sys;
+    };
+
     // Strict disable if stunned or waiting for opponent
     const role = this.config.playerRole;
     const isStunned = (role === "player1" && this.serverState.player1IsStunned) ||
       (role === "player2" && this.serverState.player2IsStunned);
 
     if (isStunned || this.isWaitingForOpponent) {
-      this.moveButtons.forEach((button) => {
+      this.moveButtons.forEach((button, move) => {
+        if (!isUsableButton(button)) {
+          staleMoves.push(String(move));
+          return;
+        }
         button.setAlpha(0.3);
-        button.disableInteractive();
+        try {
+          button.disableInteractive();
+        } catch {
+          staleMoves.push(String(move));
+          return;
+        }
         // Tint children (Image, Text)
         button.list.forEach((child: any) => {
-          if (child.setTint) child.setTint(0x555555);
+          if (child?.setTint && child?.active) child.setTint(0x555555);
         });
       });
+      staleMoves.forEach((move) => this.moveButtons.delete(move as MoveType));
       return;
     }
 
-    // Get current energy from server state
-    const currentEnergy = role === "player1"
-      ? (this.serverState.player1Energy ?? 0)
-      : (this.serverState.player2Energy ?? 0);
+    // During private preplan, use projected energy after planned picks.
+    const currentEnergy = this.getSelectionEnergy(role);
 
     // Check if block is disabled due to opponent's pruned-rage surge
     const surgeEffects = calculateSurgeEffects(
@@ -2264,6 +2353,11 @@ export class FightScene extends Phaser.Scene {
 
     // Update each move button based on affordability
     this.moveButtons.forEach((button, move) => {
+      if (!isUsableButton(button)) {
+        staleMoves.push(String(move));
+        return;
+      }
+
       const moveCost = BASE_MOVE_STATS[move].energyCost;
       const isAffordable = currentEnergy >= moveCost;
 
@@ -2273,20 +2367,32 @@ export class FightScene extends Phaser.Scene {
       // Apply visual feedback for unaffordable/disabled moves (same as stunned)
       if (shouldDisable) {
         button.setAlpha(0.3);
-        button.disableInteractive();
+        try {
+          button.disableInteractive();
+        } catch {
+          staleMoves.push(String(move));
+          return;
+        }
         // Tint children to grayscale
         button.list.forEach((child: any) => {
-          if (child.setTint) child.setTint(0x555555);
+          if (child?.setTint && child?.active) child.setTint(0x555555);
         });
       } else {
         button.setAlpha(1);
-        button.setInteractive();
+        try {
+          button.setInteractive();
+        } catch {
+          staleMoves.push(String(move));
+          return;
+        }
         // Clear tint
         button.list.forEach((child: any) => {
-          if (child.clearTint) child.clearTint();
+          if (child?.clearTint && child?.active) child.clearTint();
         });
       }
     });
+
+    staleMoves.forEach((move) => this.moveButtons.delete(move as MoveType));
   }
 
   // ===========================================================================
@@ -2309,6 +2415,41 @@ export class FightScene extends Phaser.Scene {
       130,
       "Select your move!"
     ).setOrigin(0.5);
+
+    this.privatePlanEnergyText = TextFactory.createSubtitle(
+      this,
+      GAME_DIMENSIONS.CENTER_X,
+      158,
+      "",
+    ).setOrigin(0.5).setVisible(false);
+  }
+
+  private updatePrivatePlanEnergyText(): void {
+    if (!this.privatePlanEnergyText) return;
+
+    const shouldShow = PRIVATE_ROUNDS_ENABLED && this.phase === "selecting";
+    if (!shouldShow) {
+      this.privatePlanEnergyText.setVisible(false);
+      return;
+    }
+
+    this.privatePlanEnergyText.setVisible(true);
+    this.privatePlanEnergyText.setText(`Plan Energy: ${this.privateRoundPlanEnergyPreview}`);
+    this.privatePlanEnergyText.setColor(this.privateRoundPlanEnergyPreview < BASE_MOVE_STATS.special.energyCost ? "#f59e0b" : "#3b82f6");
+  }
+
+  private setMoveButtonsVisible(visible: boolean): void {
+    this.moveButtons.forEach((button) => {
+      this.tweens.killTweensOf(button);
+      button.setVisible(visible);
+      if (!visible) {
+        try {
+          button.disableInteractive();
+        } catch {
+          // ignore stale/destroyed button
+        }
+      }
+    });
   }
 
   // ===========================================================================
@@ -2353,7 +2494,7 @@ export class FightScene extends Phaser.Scene {
     const now = Date.now();
     this.countdownEndsAt = now + 3300; // 3 seconds + 300ms delay
     this.countdownPhaseNumber = 0;
-    this.moveDeadlineAt = now + 3300 + 20000; // Countdown + 20s selection time
+    this.moveDeadlineAt = now + 3300 + ROUND_MOVE_TIMER_MS; // Countdown + selection time
   }
 
   // showCountdown() method is deprecated - countdown is now handled by update() loop
@@ -2365,8 +2506,9 @@ export class FightScene extends Phaser.Scene {
 
   private startSelectionPhase(): void {
     this.phase = "selecting";
+    this.setMoveButtonsVisible(true);
     this.selectedMove = null;
-    this.turnTimer = 20;
+    this.turnTimer = Math.floor(ROUND_MOVE_TIMER_MS / 1000);
     this.localMoveSubmitted = false;
     this.moveInFlight = false;
     this.isWaitingForOpponent = false;
@@ -2387,8 +2529,16 @@ export class FightScene extends Phaser.Scene {
   }
 
   private resetButtonVisuals(): void {
+    if (!this.isSceneUiReady()) return;
+
     const moves: MoveType[] = ["punch", "kick", "block", "special"];
     const y = GAME_DIMENSIONS.HEIGHT - 100;
+
+    const isUsableGraphics = (graphics: Phaser.GameObjects.Graphics | undefined): graphics is Phaser.GameObjects.Graphics => {
+      if (!graphics) return false;
+      const anyGraphics = graphics as any;
+      return !!anyGraphics.active && !!anyGraphics.scene && !!anyGraphics.scene.sys;
+    };
 
     moves.forEach((move) => {
       const button = this.moveButtons.get(move);
@@ -2413,6 +2563,7 @@ export class FightScene extends Phaser.Scene {
       if (move === "special") color = 0xa855f7;
 
       const bg = button.list[0] as Phaser.GameObjects.Graphics;
+  if (!isUsableGraphics(bg)) return;
       bg.clear();
       bg.fillStyle(0x1a1a2e, 0.9);
       bg.fillRoundedRect(-70, -80, 140, 160, 12);
@@ -2435,14 +2586,29 @@ export class FightScene extends Phaser.Scene {
 
     if (PRIVATE_ROUNDS_ENABLED) {
       if (!this.localMoveSubmitted && !this.moveInFlight) {
-        const fallbackMove: MoveType = "block";
-        this.turnIndicatorText.setText("Time's up. Submitting fallback move...");
+        while (this.privateRoundPlannedMoves.length < PRIVATE_ROUND_PLAN_TURNS) {
+          this.privateRoundPlannedMoves.push("block");
+        }
+
+        this.localMoveSubmitted = true;
+        this.moveInFlight = true;
+        this.turnIndicatorText.setText("Time's up. Submitting fallback plan...");
         this.turnIndicatorText.setColor("#f97316");
         this.isWaitingForOpponent = true;
 
-        this.handleSubmitMove({
+        EventBus.emit("game:submitRoundPlan", {
           matchId: this.config.matchId,
-          moveType: fallbackMove,
+          roundNumber: this.serverState?.currentRound ?? 1,
+          movePlan: this.privateRoundPlannedMoves,
+          playerRole: this.config.playerRole,
+        });
+      } else if (this.localMoveSubmitted && !this.moveInFlight && this.privateRoundPlannedMoves.length === PRIVATE_ROUND_PLAN_TURNS) {
+        this.turnIndicatorText.setText("Opponent timed out. Finalizing round...");
+        this.turnIndicatorText.setColor("#f97316");
+        EventBus.emit("game:submitRoundPlan", {
+          matchId: this.config.matchId,
+          roundNumber: this.serverState?.currentRound ?? 1,
+          movePlan: this.privateRoundPlannedMoves,
           playerRole: this.config.playerRole,
         });
       }
@@ -2969,7 +3135,10 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for move confirmation (when player signs transaction)
-    EventBus.on("game:moveConfirmed", (data: unknown) => {
+    this.moveConfirmedListener = (data: unknown) => {
+      if (!this.isSceneUiReady()) return;
+      if (!this.isActiveText(this.turnIndicatorText)) return;
+
       const payload = data as { player: string; txId?: string; onChainTxHash?: string };
 
       // If we confirmed our move, update UI but KEEP the timer running
@@ -2988,12 +3157,15 @@ export class FightScene extends Phaser.Scene {
         if (txId) {
           this.showTransactionToast(txId);
         }
-
       }
-    });
+    };
+    EventBus.on("game:moveConfirmed", this.moveConfirmedListener, this);
 
     // Private turn flow status updates (ZK commit/reveal each turn)
-    EventBus.on("game:privateRoundCommitted", (data: unknown) => {
+    this.privateRoundCommittedListener = (data: unknown) => {
+      if (!this.isSceneUiReady()) return;
+      if (!this.isActiveText(this.turnIndicatorText)) return;
+
       const payload = data as {
         bothCommitted?: boolean;
         bothRevealed?: boolean;
@@ -3004,22 +3176,51 @@ export class FightScene extends Phaser.Scene {
       if (this.phase !== "selecting") return;
 
       if (payload.bothRevealed) {
-        this.turnIndicatorText.setText("Both moves submitted. Resolving turn...");
-        this.turnIndicatorText.setColor("#22c55e");
+        if (PRIVATE_ROUNDS_ENABLED) {
+          this.phase = "resolving";
+          this.isWaitingForOpponent = true;
+          this.time.delayedCall(0, () => {
+            if (this.isSceneUiReady()) this.setMoveButtonsVisible(false);
+          });
+          this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+          this.turnIndicatorText.setColor("#22c55e");
+          if (this.isActiveText(this.roundTimerText)) {
+            this.roundTimerText.setText("✓");
+            this.roundTimerText.setColor("#22c55e");
+          }
+        } else {
+          this.turnIndicatorText.setText("Both moves submitted. Resolving turn...");
+          this.turnIndicatorText.setColor("#22c55e");
+        }
         return;
       }
 
       if (payload.bothCommitted) {
-        this.turnIndicatorText.setText("Both moves committed. Waiting to resolve...");
-        this.turnIndicatorText.setColor("#22c55e");
+        if (PRIVATE_ROUNDS_ENABLED) {
+          this.phase = "resolving";
+          this.isWaitingForOpponent = true;
+          this.time.delayedCall(0, () => {
+            if (this.isSceneUiReady()) this.setMoveButtonsVisible(false);
+          });
+          this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+          this.turnIndicatorText.setColor("#22c55e");
+          if (this.isActiveText(this.roundTimerText)) {
+            this.roundTimerText.setText("✓");
+            this.roundTimerText.setColor("#22c55e");
+          }
+        } else {
+          this.turnIndicatorText.setText("Both moves committed. Waiting to resolve...");
+          this.turnIndicatorText.setColor("#22c55e");
+        }
         return;
       }
 
       if (payload.player1Committed || payload.player2Committed) {
-        this.turnIndicatorText.setText("Move committed. Waiting for opponent...");
-        this.turnIndicatorText.setColor("#f97316");
+        this.turnIndicatorText.setText("Waiting for opponent...");
+        this.turnIndicatorText.setColor("#22c55e");
       }
-    });
+    };
+    EventBus.on("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
 
     // Listen for round resolution (from server combat resolver)
     EventBus.on("game:roundResolved", (data: unknown) => {
@@ -3474,6 +3675,8 @@ export class FightScene extends Phaser.Scene {
    * Show transaction toast notification
    */
   private showTransactionToast(txId: string): void {
+    if (!this.isSceneUiReady()) return;
+
     // Close any existing toast first
     if (this.activeTransactionToast) {
       this.activeTransactionToast.close();
@@ -3489,17 +3692,22 @@ export class FightScene extends Phaser.Scene {
     const toastX = GAME_DIMENSIONS.WIDTH - 180;
     const toastY = 180;
 
-    this.activeTransactionToast = new TransactionToast({
-      scene: this,
-      x: toastX,
-      y: toastY,
-      txId: txId,
-      playerAddress: playerAddress,
-      duration: 3000, // 3 seconds
-      onClose: () => {
-        this.activeTransactionToast = undefined;
-      },
-    });
+    try {
+      this.activeTransactionToast = new TransactionToast({
+        scene: this,
+        x: toastX,
+        y: toastY,
+        txId: txId,
+        playerAddress: playerAddress,
+        duration: 3000, // 3 seconds
+        onClose: () => {
+          this.activeTransactionToast = undefined;
+        },
+      });
+    } catch (error) {
+      console.warn("[FightScene] Skipping transaction toast due to scene teardown race", error);
+      this.activeTransactionToast = undefined;
+    }
   }
 
   /**
@@ -3748,9 +3956,14 @@ export class FightScene extends Phaser.Scene {
     this.isWaitingForOpponent = false;
     this.localMoveSubmitted = false;
     this.moveInFlight = false;
+    this.privateRoundPlannedMoves = [];
+    this.privateRoundPlanEnergyPreview = PRIVATE_ROUND_SERVER_MAX_ENERGY;
 
     // Store the deadline for synchronized timing
     this.moveDeadlineAt = payload.moveDeadlineAt;
+    this.turnTimer = Math.floor(ROUND_MOVE_TIMER_MS / 1000);
+    this.roundTimerText.setText(`${this.turnTimer}s`);
+    this.roundTimerText.setColor("#40e0d0");
 
     // Get max values from local engine initially (server should provide these)
     const localState = this.combatEngine.getState();
@@ -3962,24 +4175,39 @@ export class FightScene extends Phaser.Scene {
     }
 
     this.phase = "selecting";
+    this.setMoveButtonsVisible(true);
     this.selectedMove = null;
     this.isWaitingForOpponent = false;
     this.localMoveSubmitted = false; // Reset for new round
     this.moveInFlight = false;
-    this.turnIndicatorText.setText("Select your move!");
+    this.privateRoundPlannedMoves = [];
+    this.privateRoundPlanEnergyPreview = this.config.playerRole === "player1"
+      ? (this.serverState?.player1Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY)
+      : (this.serverState?.player2Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY);
+
+    this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Phase 2/3: Plan moves (0/10)" : "Select your move!");
     this.turnIndicatorText.setColor("#40e0d0");
+    this.updatePrivatePlanEnergyText();
 
     // React UI handles button state and affordability
 
     // SAFETY FALLBACK: Protects against clock sync issues or edge cases
     // Server now only adds Power Surge time (15s) on the first turn of each round.
     const now = Date.now();
-    const remainingMs = moveDeadlineAt - now;
+    let remainingMs = moveDeadlineAt - now;
+    const currentTurn = this.combatEngine?.getState()?.currentTurn ?? 1;
+
+    if (PRIVATE_ROUNDS_ENABLED && currentTurn === 1 && remainingMs < ROUND_MOVE_TIMER_MS - 5000) {
+      console.warn(`[FightScene] *** Rebased round-start timer from ${Math.floor(remainingMs / 1000)}s to full ${Math.floor(ROUND_MOVE_TIMER_MS / 1000)}s`);
+      moveDeadlineAt = now + ROUND_MOVE_TIMER_MS;
+      remainingMs = ROUND_MOVE_TIMER_MS;
+    }
 
     // If less than 15 seconds remaining (shouldn't happen with proper server timing), extend the deadline
     if (remainingMs < 15000) {
       console.warn(`[FightScene] *** SAFETY FALLBACK: Deadline too close (${Math.floor(remainingMs / 1000)}s), extending by 20s`);
-      moveDeadlineAt = now + 20000; // Give full 20 seconds
+      moveDeadlineAt = now + ROUND_MOVE_TIMER_MS; // Give full move timer
+      remainingMs = ROUND_MOVE_TIMER_MS;
     }
 
     this.turnTimer = Math.max(1, Math.floor((moveDeadlineAt - now) / 1000));
@@ -4109,8 +4337,13 @@ export class FightScene extends Phaser.Scene {
       this.toggleStunEffect(opponentRole, true);
     } else {
       // Normal state
-      this.turnIndicatorText.setText("Select your move!");
-      this.turnIndicatorText.setColor("#40e0d0");
+      if (PRIVATE_ROUNDS_ENABLED) {
+        this.turnIndicatorText.setText("Phase 2/3: Plan moves (0/10)");
+        this.turnIndicatorText.setColor("#40e0d0");
+      } else {
+        this.turnIndicatorText.setText("Select your move!");
+        this.turnIndicatorText.setColor("#40e0d0");
+      }
     }
 
     // Apply visual stun effect based on SERVER-CONFIRMED stun state only
@@ -4135,6 +4368,7 @@ export class FightScene extends Phaser.Scene {
 
     this.roundTimerText.setText(`${this.turnTimer}s`);
     this.roundTimerText.setColor("#40e0d0");
+    this.updatePrivatePlanEnergyText();
 
 
   }
@@ -4145,8 +4379,8 @@ export class FightScene extends Phaser.Scene {
   private handleServerRoundResolved(payload: {
     roundNumber?: number;
     turnNumber?: number;
-    player1: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; hpRegen?: number; lifesteal?: number; energyDrained?: number };
-    player2: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; hpRegen?: number; lifesteal?: number; energyDrained?: number };
+    player1: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; isStunned?: boolean; hpRegen?: number; lifesteal?: number; energyDrained?: number };
+    player2: { move: MoveType; damageDealt: number; damageTaken: number; outcome?: string; isStunned?: boolean; hpRegen?: number; lifesteal?: number; energyDrained?: number };
     player1Health: number;
     player2Health: number;
     player1MaxHealth?: number;
@@ -4171,6 +4405,11 @@ export class FightScene extends Phaser.Scene {
     // Set resolving flag to prevent match end from interrupting animations
     this.isResolving = true;
     this.phase = "resolving";
+    if (PRIVATE_ROUNDS_ENABLED) {
+      this.setMoveButtonsVisible(false);
+      this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+      this.turnIndicatorText.setColor("#f97316");
+    }
 
     // Clear any pending deadline-based timers to prevent them firing during animations
     this.timerExpiredHandled = true;
@@ -4202,7 +4441,14 @@ export class FightScene extends Phaser.Scene {
       player1RoundsWon: payload.player1RoundsWon,
       player2RoundsWon: payload.player2RoundsWon,
       currentRound: this.serverState?.currentRound ?? 1,
+      player1IsStunned: payload.player1?.isStunned ?? false,
+      player2IsStunned: payload.player2?.isStunned ?? false,
     };
+
+    // Capture stun-at-turn-start state from the last round_starting payload.
+    // This is the authoritative indicator for who must miss THIS turn.
+    const p1StunnedAtTurnStart = Boolean(this.serverState?.player1IsStunned);
+    const p2StunnedAtTurnStart = Boolean(this.serverState?.player2IsStunned);
 
     const p1Char = this.config.player1Character || "dag-warrior";
     const p2Char = this.config.player2Character || "dag-warrior";
@@ -4215,9 +4461,22 @@ export class FightScene extends Phaser.Scene {
     const p2OriginalX = CHARACTER_POSITIONS.PLAYER2.X;
     const meetingPointX = GAME_DIMENSIONS.CENTER_X;
 
-    // Check stun state from outcomes
-    const p1IsStunned = payload.player1.outcome === "stunned";
-    const p2IsStunned = payload.player2.outcome === "stunned";
+    // Resolve effective moves for playback.
+    // If a player was stunned at turn start, force their move to "stunned"
+    // even when payload.move still contains a preplanned choice.
+    const p1Move: MoveType = p1StunnedAtTurnStart ? "stunned" : payload.player1.move;
+    const p2Move: MoveType = p2StunnedAtTurnStart ? "stunned" : payload.player2.move;
+
+    if ((p1StunnedAtTurnStart && payload.player1.move !== "stunned") || (p2StunnedAtTurnStart && payload.player2.move !== "stunned")) {
+      console.warn(
+        `[FightScene] Applying local stun move override for playback (turn-start stun): ` +
+        `p1 ${payload.player1.move} -> ${p1Move}, p2 ${payload.player2.move} -> ${p2Move}`
+      );
+    }
+
+    // Check stun state for this turn's animation flow.
+    const p1IsStunned = p1Move === "stunned" || payload.player1.outcome === "stunned";
+    const p2IsStunned = p2Move === "stunned" || payload.player2.outcome === "stunned";
 
     // Prepare targets
     let p1TargetX = meetingPointX - 50;
@@ -4280,9 +4539,6 @@ export class FightScene extends Phaser.Scene {
       ease: 'Power2',
       onComplete: () => {
         // Sequential Animation Logic using Promises
-        const p1Move = payload.player1.move;
-        const p2Move = payload.player2.move;
-
         // Calculate actual damage from HP difference (before animations)
         const p1ActualDamage = Math.max(0, prevP1Health - payload.player1Health);
         const p2ActualDamage = Math.max(0, prevP2Health - payload.player2Health);
@@ -4903,7 +5159,7 @@ export class FightScene extends Phaser.Scene {
       return;
     }
 
-    this.turnIndicatorText.setText("Phase 1/2: Pick your Power Surge");
+    this.turnIndicatorText.setText("Phase 1/3: Pick your Power Surge");
     this.turnIndicatorText.setColor("#fbbf24");
 
     // Fetch surge cards from API or generate locally
@@ -5484,6 +5740,17 @@ export class FightScene extends Phaser.Scene {
       duration: 500
     });
 
+    if (PRIVATE_ROUNDS_ENABLED) {
+      const fallbackPlan: Array<"punch" | "kick" | "block" | "special"> = Array(PRIVATE_ROUND_PLAN_TURNS).fill("block");
+      EventBus.emit("game:submitRoundPlan", {
+        matchId: this.config.matchId,
+        roundNumber: this.serverState?.currentRound ?? 1,
+        movePlan: fallbackPlan,
+        playerRole: this.config.playerRole,
+      });
+      return;
+    }
+
     // Submit stunned move via API - no transaction required
     fetch(apiUrl(`/api/matches/${this.config.matchId}/submit-stunned-move`), {
       method: "POST",
@@ -5526,6 +5793,17 @@ export class FightScene extends Phaser.Scene {
       alpha: 0,
       duration: 500
     });
+
+    if (PRIVATE_ROUNDS_ENABLED) {
+      const fallbackPlan: Array<"punch" | "kick" | "block" | "special"> = Array(PRIVATE_ROUND_PLAN_TURNS).fill("block");
+      EventBus.emit("game:submitRoundPlan", {
+        matchId: this.config.matchId,
+        roundNumber: this.serverState?.currentRound ?? 1,
+        movePlan: fallbackPlan,
+        playerRole: this.config.playerRole,
+      });
+      return;
+    }
 
     // Call API to skip the stunned turn - no transaction required
     fetch(apiUrl(`/api/matches/${this.config.matchId}/skip-stunned-turn`), {
@@ -5596,6 +5874,21 @@ export class FightScene extends Phaser.Scene {
     if (this.visibilityChangeHandler) {
       document.removeEventListener("visibilitychange", this.visibilityChangeHandler);
       this.visibilityChangeHandler = undefined;
+    }
+
+    if (this.moveConfirmedListener) {
+      EventBus.off("game:moveConfirmed", this.moveConfirmedListener, this);
+      this.moveConfirmedListener = undefined;
+    }
+
+    if (this.privateRoundCommittedListener) {
+      EventBus.off("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
+      this.privateRoundCommittedListener = undefined;
+    }
+
+    if (this.activeTransactionToast) {
+      this.activeTransactionToast.close();
+      this.activeTransactionToast = undefined;
     }
   }
 }

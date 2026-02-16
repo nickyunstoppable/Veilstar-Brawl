@@ -9,7 +9,7 @@ import { PhaserGame } from "@/game/PhaserGame";
 import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
 import { useOnChainRegistration } from "@/hooks/useOnChainRegistration";
-import { commitPrivateRoundPlan, provePrivateRoundPlan, resolvePrivateRound } from "@/lib/zkPrivateRoundClient";
+import { commitPrivateRoundPlan, preparePrivateRoundCommit, provePrivateRoundPlan, resolvePrivateRound } from "@/lib/zkPrivateRoundClient";
 
 import { getSupabaseClient } from "@/lib/supabase/client";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -29,7 +29,7 @@ interface CharacterSelectClientProps {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const USE_OFFCHAIN_ACTIONS = (import.meta.env.VITE_ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
-const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const STROOPS_PER_XLM = 10_000_000;
 
 interface StakeGateState {
@@ -47,6 +47,7 @@ interface StakeGateState {
 
 interface PrivateRoundPlanState {
     moveType?: string;
+    movePlan?: Array<"punch" | "kick" | "block" | "special" | "stunned">;
     surgeCardId?: string;
     sharedRoundProof?: string;
     commitment?: string;
@@ -1196,7 +1197,17 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         };
 
         const isRetryableOnChainError = (raw: string): boolean => {
-            return /txBadSeq|TRY_AGAIN_LATER/i.test(raw);
+            return /txBadSeq|TRY_AGAIN_LATER|\bDUPLICATE\b|temporar|timeout|network failed|Sending the transaction to the network failed/i.test(raw);
+        };
+
+        const makePrivateCommitTraceId = (params: {
+            matchId: string;
+            roundNumber: number;
+            turnNumber: number;
+            address: string;
+        }): string => {
+            const rand = Math.random().toString(36).slice(2, 8);
+            return `zkc:${params.matchId.slice(0, 8)}:r${params.roundNumber}:t${params.turnNumber}:${params.address.slice(0, 6)}:${Date.now()}:${rand}`;
         };
 
         const maybeCommitAndRevealPrivateRound = async (params: {
@@ -1216,15 +1227,16 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 EventBus.emit("game:moveError", { error: roundPlan.fatalError });
                 return;
             }
-            if (!roundPlan.moveType || !roundPlan.surgeCardId) {
+            const movePlan = Array.isArray(roundPlan.movePlan)
+                ? roundPlan.movePlan.filter((move): move is "punch" | "kick" | "block" | "special" | "stunned" => !!move)
+                : [];
+            const primaryMove = (movePlan[0] || roundPlan.moveType || "block") as "punch" | "kick" | "block" | "special" | "stunned";
+            const surgeCardId = typeof roundPlan.surgeCardId === "undefined" ? null : roundPlan.surgeCardId;
+
+            if (movePlan.length === 0) {
                 EventBus.emit("game:moveInFlight", {
                     player: params.playerRole,
                     cancelled: true,
-                });
-                EventBus.emit("game:moveError", {
-                    error: !roundPlan.surgeCardId
-                        ? "Power Surge selection is required before submitting a move"
-                        : "Move selection is missing",
                 });
                 return;
             }
@@ -1242,8 +1254,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         address: params.address,
                         roundNumber: params.roundNumber,
                         turnNumber: params.turnNumber,
-                        move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
-                        surgeCardId: roundPlan.surgeCardId,
+                        move: primaryMove,
+                        movePlan,
+                        surgeCardId,
                         nonce,
                     });
 
@@ -1258,8 +1271,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 }
 
                 const encryptedPlan = btoa(JSON.stringify({
-                    move: roundPlan.moveType,
-                    surgeCardId: roundPlan.surgeCardId,
+                    move: primaryMove,
+                    movePlan,
+                    surgeCardId,
                 }));
 
                 if (!roundPlan.walletSignature || !roundPlan.walletSignedMessage) {
@@ -1268,8 +1282,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         matchId: params.matchId,
                         roundNumber: params.roundNumber,
                         turnNumber: params.turnNumber,
-                        move: roundPlan.moveType,
-                        surgeCardId: roundPlan.surgeCardId,
+                        move: primaryMove,
+                        movePlan,
+                        surgeCardId,
                         commitment,
                         timestamp: Date.now(),
                     });
@@ -1280,18 +1295,109 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 }
 
                 if (!roundPlan.commitSubmitted) {
-                    const commitRes = await commitPrivateRoundPlan(params.matchId, {
-                        address: params.address,
+                    const maxCommitAttempts = 3;
+                    let commitRes: any = null;
+                    let lastCommitError: Error | null = null;
+                    const baseTraceId = makePrivateCommitTraceId({
+                        matchId: params.matchId,
                         roundNumber: params.roundNumber,
                         turnNumber: params.turnNumber,
-                        commitment,
-                        proof: sharedRoundProof,
-                        publicInputs: proofPublicInputs,
-                        transcriptHash: nonce,
-                        encryptedPlan,
+                        address: params.address,
                     });
 
+                    console.info("[CharacterSelectClient] private-commit:start", {
+                        traceId: baseTraceId,
+                        matchId: params.matchId,
+                        roundNumber: params.roundNumber,
+                        turnNumber: params.turnNumber,
+                        role: params.playerRole,
+                        player: `${params.address.slice(0, 6)}…${params.address.slice(-4)}`,
+                        movePlanLength: movePlan.length,
+                        hasProof: Boolean(sharedRoundProof),
+                        hasCommitment: Boolean(commitment),
+                    });
+
+                    for (let attempt = 1; attempt <= maxCommitAttempts; attempt++) {
+                        const attemptTraceId = `${baseTraceId}:a${attempt}`;
+                        try {
+                            console.info("[CharacterSelectClient] private-commit:prepare", {
+                                traceId: attemptTraceId,
+                                attempt,
+                                maxCommitAttempts,
+                            });
+
+                            const preparedCommit = await preparePrivateRoundCommit(params.matchId, {
+                                clientTraceId: attemptTraceId,
+                                address: params.address,
+                                roundNumber: params.roundNumber,
+                                turnNumber: params.turnNumber,
+                                commitment,
+                            });
+
+                            if (!preparedCommit?.authEntryXdr || !preparedCommit?.transactionXdr) {
+                                throw new Error("Private round commit prepare did not return auth entry or transaction");
+                            }
+
+                            const signedAuthEntryXdr = await signSorobanAuthEntry(preparedCommit.authEntryXdr, params.address);
+                            const transactionXdr = preparedCommit.transactionXdr;
+
+                            console.info("[CharacterSelectClient] private-commit:submit", {
+                                traceId: attemptTraceId,
+                                hasSignedAuthEntryXdr: Boolean(signedAuthEntryXdr),
+                                signedAuthEntryXdrLen: signedAuthEntryXdr?.length || 0,
+                                hasTransactionXdr: Boolean(transactionXdr),
+                                transactionXdrLen: transactionXdr?.length || 0,
+                            });
+
+                            commitRes = await commitPrivateRoundPlan(params.matchId, {
+                                clientTraceId: attemptTraceId,
+                                address: params.address,
+                                roundNumber: params.roundNumber,
+                                turnNumber: params.turnNumber,
+                                commitment,
+                                proof: sharedRoundProof,
+                                publicInputs: proofPublicInputs,
+                                transcriptHash: nonce,
+                                encryptedPlan,
+                                signedAuthEntryXdr,
+                                transactionXdr,
+                            });
+
+                            console.info("[CharacterSelectClient] private-commit:success", {
+                                traceId: attemptTraceId,
+                                bothCommitted: Boolean(commitRes?.bothCommitted),
+                                player1Committed: Boolean(commitRes?.player1Committed),
+                                player2Committed: Boolean(commitRes?.player2Committed),
+                                onChainCommitTxHash: commitRes?.onChainCommitTxHash || null,
+                                onChainVerificationTxHash: commitRes?.onChainVerificationTxHash || null,
+                            });
+
+                            lastCommitError = null;
+                            break;
+                        } catch (commitErr) {
+                            const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
+                            lastCommitError = commitErr instanceof Error ? commitErr : new Error(msg);
+                            const retryable = isRetryableOnChainError(msg);
+                            if (!retryable || attempt === maxCommitAttempts) {
+                                throw lastCommitError;
+                            }
+                            const backoffMs = 250 * attempt;
+                            console.warn(`[CharacterSelectClient] Retryable private commit error (attempt ${attempt}/${maxCommitAttempts}), retrying in ${backoffMs}ms: ${msg}`);
+                            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+                        }
+                    }
+
+                    if (!commitRes) {
+                        throw lastCommitError || new Error("Private round commit failed");
+                    }
+
                     roundPlan.commitSubmitted = true;
+
+                    console.info("[CharacterSelectClient] private-commit:emit-moveConfirmed", {
+                        traceId: baseTraceId,
+                        role: params.playerRole,
+                        txId: commitRes?.onChainCommitTxHash || null,
+                    });
 
                     EventBus.emit("game:privateRoundCommitted", {
                         matchId: params.matchId,
@@ -1311,21 +1417,29 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                 if (!roundPlan.revealSubmitted) {
                     try {
-                        await resolvePrivateRound(params.matchId, {
+                        const resolveResult = await resolvePrivateRound(params.matchId, {
                             address: params.address,
                             roundNumber: params.roundNumber,
                             turnNumber: params.turnNumber,
-                            move: roundPlan.moveType as "punch" | "kick" | "block" | "special" | "stunned",
-                            surgeCardId: roundPlan.surgeCardId,
+                            move: primaryMove,
+                            movePlan,
+                            surgeCardId,
                             proof: sharedRoundProof,
                             publicInputs: proofPublicInputs,
                             transcriptHash: nonce,
                         });
-                        roundPlan.revealSubmitted = true;
+
+                        if (resolveResult?.awaitingOpponent) {
+                            console.log("[CharacterSelectClient] Private reveal accepted; awaiting opponent reveal");
+                            roundPlan.revealSubmitted = false;
+                        } else {
+                            roundPlan.revealSubmitted = true;
+                        }
                     } catch (revealErr) {
                         const revealMessage = revealErr instanceof Error ? revealErr.message : String(revealErr);
                         if (/both players have not committed yet/i.test(revealMessage)) {
                             console.log("[CharacterSelectClient] Private reveal deferred until both commits are present");
+                            roundPlan.revealSubmitted = false;
                         } else {
                             throw revealErr;
                         }
@@ -1452,18 +1566,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const plan = privateRoundPlansRef.current[roundNumber] || {};
 
                     if (!plan.moveSigned) {
-                        await signActionMessage(
-                            JSON.stringify({
-                                type: "zk_private_move_select",
-                                matchId: payload.matchId,
-                                roundNumber,
-                                move: payload.moveType,
-                                playerAddress: address,
-                                timestamp: Date.now(),
-                            }),
-                            address,
-                            { forceWalletSignature: walletType === "wallet" },
-                        );
                         plan.moveSigned = true;
                     }
 
@@ -1553,6 +1655,56 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 });
                 EventBus.emit("game:moveError", {
                     error: err instanceof Error ? err.message : "Move signing failed",
+                });
+            }
+        };
+
+        const handleSubmitRoundPlan = async (data: unknown) => {
+            const payload = data as {
+                matchId: string;
+                roundNumber?: number;
+                movePlan: Array<"punch" | "kick" | "block" | "special">;
+                playerRole: string;
+            };
+
+            if (!PRIVATE_ROUNDS_ENABLED) return;
+
+            try {
+                const address = publicKey;
+                if (!address) return;
+
+                const normalizedPlan = (payload.movePlan || []).filter(Boolean) as Array<"punch" | "kick" | "block" | "special">;
+                if (normalizedPlan.length !== 10) {
+                    EventBus.emit("game:moveError", { error: "Plan must contain exactly 10 moves" });
+                    return;
+                }
+
+                EventBus.emit("game:moveInFlight", { player: payload.playerRole });
+
+                const roundNumber = Number(payload.roundNumber || currentRoundRef.current || 1);
+                const turnNumber = 1;
+                const plan = privateRoundPlansRef.current[roundNumber] || {};
+
+                plan.movePlan = normalizedPlan;
+                plan.moveType = normalizedPlan[0];
+                plan.moveSigned = true;
+                privateRoundPlansRef.current[roundNumber] = plan;
+
+                await maybeCommitAndRevealPrivateRound({
+                    matchId: payload.matchId,
+                    playerRole: payload.playerRole,
+                    address,
+                    roundNumber,
+                    turnNumber,
+                });
+            } catch (err) {
+                console.error("[CharacterSelectClient] Failed to submit private round plan:", err);
+                EventBus.emit("game:moveInFlight", {
+                    player: payload.playerRole,
+                    cancelled: true,
+                });
+                EventBus.emit("game:moveError", {
+                    error: err instanceof Error ? err.message : "Round plan signing failed",
                 });
             }
         };
@@ -1651,6 +1803,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     surgeCardId: existing.surgeCardId,
                     surgeSigned: existing.surgeSigned,
                     moveType: undefined,
+                    movePlan: undefined,
                     sharedRoundProof: undefined,
                     commitment: undefined,
                     proofPublicInputs: undefined,
@@ -1676,12 +1829,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 player1Committed?: boolean;
                 player2Committed?: boolean;
                 bothCommitted?: boolean;
+                bothRevealed?: boolean;
             };
 
             const bothCommitted = !!payload?.bothCommitted
                 || (!!payload?.player1Committed && !!payload?.player2Committed);
+            const bothRevealed = !!payload?.bothRevealed;
 
-            if (!bothCommitted) return;
+            if (!bothCommitted && !bothRevealed) return;
 
             const roundNumber = Number(payload?.roundNumber ?? currentRoundRef.current ?? 1);
             const plan = privateRoundPlansRef.current[roundNumber];
@@ -1796,7 +1951,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         player2GuardMeter: 0,
                         player1IsStunned: false,
                         player2IsStunned: false,
-                        moveDeadlineAt: Date.now() + 20000,
+                        moveDeadlineAt: Date.now() + 90000,
                         countdownEndsAt: Date.now() + 3000,
                     });
                     return;
@@ -1813,7 +1968,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     player2GuardMeter: row.player2_guard_meter ?? 0,
                     player1IsStunned: !!row.player1_is_stunned,
                     player2IsStunned: !!row.player2_is_stunned,
-                    moveDeadlineAt: row.move_deadline_at ? new Date(row.move_deadline_at).getTime() : Date.now() + 20000,
+                    moveDeadlineAt: row.move_deadline_at ? new Date(row.move_deadline_at).getTime() : Date.now() + 90000,
                     countdownEndsAt: row.countdown_ends_at ? new Date(row.countdown_ends_at).getTime() : Date.now() + 3000,
                 });
             } catch (err) {
@@ -1852,18 +2007,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     const plan = privateRoundPlansRef.current[roundNumber] || {};
 
                     if (!plan.surgeSigned) {
-                        await signActionMessage(
-                            JSON.stringify({
-                                type: "zk_private_surge_select",
-                                matchId: payload.matchId,
-                                roundNumber,
-                                cardId: payload.cardId,
-                                playerAddress: payload.playerAddress,
-                                timestamp: Date.now(),
-                            }),
-                            payload.playerAddress,
-                            { forceWalletSignature: walletType === "wallet" },
-                        );
                         plan.surgeSigned = true;
                     }
 
@@ -1890,14 +2033,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                     EventBus.emit("game:powerSurgeSelected", {
                         ...selectedPayload,
-                    });
-
-                    await maybeCommitAndRevealPrivateRound({
-                        matchId: payload.matchId,
-                        playerRole: payload.playerRole,
-                        address: payload.playerAddress,
-                        roundNumber,
-                        turnNumber: currentTurnRef.current || 1,
                     });
 
                     return;
@@ -2036,6 +2171,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         EventBus.on("fight:matchResult", handleMatchResult);
         EventBus.on("fight:submitMove", handleSubmitMove);
         EventBus.on("game:submitMove", handleGameSubmitMove);
+        EventBus.on("game:submitRoundPlan", handleSubmitRoundPlan);
         EventBus.on("fight:forfeit", handleForfeit);
         EventBus.on("fight:selectPowerSurge", handleSelectPowerSurge);
         EventBus.on("fight:requestRoundState", handleRequestRoundState);
@@ -2055,6 +2191,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             EventBus.off("fight:matchResult", handleMatchResult);
             EventBus.off("fight:submitMove", handleSubmitMove);
             EventBus.off("game:submitMove", handleGameSubmitMove);
+            EventBus.off("game:submitRoundPlan", handleSubmitRoundPlan);
             EventBus.off("fight:forfeit", handleForfeit);
             EventBus.off("fight:selectPowerSurge", handleSelectPowerSurge);
             EventBus.off("fight:requestRoundState", handleRequestRoundState);

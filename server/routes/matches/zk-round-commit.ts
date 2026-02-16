@@ -2,20 +2,26 @@ import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { verifyNoirProof } from "../../lib/zk-proof";
 import { isValidMove } from "../../lib/round-resolver";
-import type { MoveType } from "../../lib/game-types";
+import { GAME_CONSTANTS, type MoveType } from "../../lib/game-types";
 import { isPowerSurgeCardId, type PowerSurgeCardId } from "../../lib/power-surge";
 import { resolveTurn } from "../../lib/combat-resolver";
-import { isOnChainRegistrationConfigured, setZkGateRequiredOnChain, setZkVerifierContractOnChain, setZkVerifierVkIdOnChain, submitZkCommitOnChain, submitZkVerificationOnChain } from "../../lib/stellar-contract";
+import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setZkGateRequiredOnChain, setZkVerifierContractOnChain, setZkVerifierVkIdOnChain, submitSignedZkCommitOnChain, submitZkCommitOnChain, submitZkVerificationOnChain } from "../../lib/stellar-contract";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
 const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
 const ZK_GROTH16_VK_ID = (process.env.ZK_GROTH16_VK_ID || "").trim();
 const privateRoundResolveLocks = new Set<string>();
 const RESOLVE_LOCK_STALE_SECONDS = Number(process.env.ZK_RESOLVE_LOCK_STALE_SECONDS ?? "45");
 const RESOLVE_LOCK_OWNER = `${process.env.FLY_ALLOC_ID || process.env.HOSTNAME || "local"}:${process.pid}`;
+const onChainSetupCache = new Map<string, {
+    gateEnabled?: boolean;
+    verifierConfigured?: boolean;
+    vkConfigured?: boolean;
+}>();
 
 interface CommitPrivateRoundBody {
+    clientTraceId?: string;
     address?: string;
     roundNumber?: number;
     turnNumber?: number;
@@ -25,6 +31,16 @@ interface CommitPrivateRoundBody {
     transcriptHash?: string;
     encryptedPlan?: string;
     onChainCommitTxHash?: string;
+    signedAuthEntryXdr?: string;
+    transactionXdr?: string;
+}
+
+interface PrepareCommitPrivateRoundBody {
+    clientTraceId?: string;
+    address?: string;
+    roundNumber?: number;
+    turnNumber?: number;
+    commitment?: string;
 }
 
 interface ResolvePrivateRoundBody {
@@ -32,6 +48,7 @@ interface ResolvePrivateRoundBody {
     roundNumber?: number;
     turnNumber?: number;
     move?: MoveType;
+    movePlan?: MoveType[];
     surgeCardId?: PowerSurgeCardId | null;
     proof?: string;
     publicInputs?: unknown;
@@ -41,10 +58,48 @@ interface ResolvePrivateRoundBody {
 
 interface PrivateRoundPlanPayload {
     move?: MoveType;
+    movePlan?: MoveType[];
     surgeCardId?: PowerSurgeCardId | null;
 }
 
+const PRIVATE_ROUND_PLAN_TURNS = 10;
+
 type ResolveLockState = "acquired" | "in_progress" | "resolved";
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableSetupError(raw: string): boolean {
+    return /TRY_AGAIN_LATER|txBadSeq|\bDUPLICATE\b|temporar|timeout|network failed|Sending the transaction to the network failed/i.test(raw);
+}
+
+async function runSetupWithRetry(
+    label: string,
+    fn: () => Promise<{ success: boolean; error?: string | null }>,
+    maxAttempts: number = 4,
+): Promise<{ success: boolean; error?: string | null }> {
+    let lastError: string | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const result = await fn();
+        if (result.success) {
+            return { success: true };
+        }
+
+        const errorText = String(result.error || "");
+        lastError = errorText;
+        if (!isRetryableSetupError(errorText) || attempt === maxAttempts) {
+            return { success: false, error: errorText };
+        }
+
+        const backoffMs = 200 * attempt;
+        console.warn(`[ZK Round Commit] Retryable setup error for ${label} (attempt ${attempt}/${maxAttempts}) - retrying in ${backoffMs}ms: ${errorText}`);
+        await sleep(backoffMs);
+    }
+
+    return { success: false, error: lastError };
+}
 
 async function getResolvedRoundIdFromCommits(
     matchId: string,
@@ -172,50 +227,28 @@ function privateModeGuard(): Response | null {
     return null;
 }
 
-async function getOrCreateRound(matchId: string, roundNumber: number) {
+async function getOrCreateRoundTurn(matchId: string, roundNumber: number, turnNumber: number) {
     const supabase = getSupabase();
     const { data: existing } = await supabase
         .from("rounds")
         .select("*")
         .eq("match_id", matchId)
         .eq("round_number", roundNumber)
-        .order("turn_number", { ascending: false })
+        .eq("turn_number", turnNumber)
         .limit(1)
         .maybeSingle();
 
     if (existing) {
-        const alreadyFilled = !!existing.player1_move && !!existing.player2_move;
-        if (!alreadyFilled) {
-            return existing;
-        }
-
-        const moveDeadlineAt = new Date(Date.now() + 20_000).toISOString();
-        const { data: nextTurn, error: nextTurnError } = await supabase
-            .from("rounds")
-            .insert({
-                match_id: matchId,
-                round_number: roundNumber,
-                turn_number: (existing.turn_number || 1) + 1,
-                move_deadline_at: moveDeadlineAt,
-                countdown_seconds: 0,
-            })
-            .select("*")
-            .single();
-
-        if (nextTurnError || !nextTurn) {
-            throw new Error("Failed to create next private round turn");
-        }
-
-        return nextTurn;
+        return existing;
     }
 
-    const moveDeadlineAt = new Date(Date.now() + 20_000).toISOString();
+    const moveDeadlineAt = new Date(Date.now() + GAME_CONSTANTS.MOVE_TIMER_SECONDS * 1000).toISOString();
     const { data: created, error } = await supabase
         .from("rounds")
         .insert({
             match_id: matchId,
             round_number: roundNumber,
-            turn_number: 1,
+            turn_number: turnNumber,
             move_deadline_at: moveDeadlineAt,
             countdown_seconds: 0,
         })
@@ -235,6 +268,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         if (guard) return guard;
 
         const body = await req.json() as CommitPrivateRoundBody;
+        const clientTraceId = (body.clientTraceId || "").trim() || null;
         const address = body.address?.trim();
         const commitment = body.commitment?.trim();
         const proof = body.proof?.trim();
@@ -242,7 +276,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         const turnNumber = Number(body.turnNumber ?? 1);
 
         console.log(
-            `[ZK Round Commit] Request match=${matchId} round=${roundNumber} player=${address?.slice(0, 6) || "n/a"}…${address?.slice(-4) || "n/a"}`,
+            `[ZK Round Commit] Request match=${matchId} round=${roundNumber} turn=${turnNumber} trace=${clientTraceId || "n/a"} player=${address?.slice(0, 6) || "n/a"}…${address?.slice(-4) || "n/a"} signedAuth=${body.signedAuthEntryXdr ? "yes" : "no"} txXdr=${body.transactionXdr ? "yes" : "no"}`,
         );
 
         if (
@@ -355,31 +389,75 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             }
 
             if (isOnChainRegistrationConfigured()) {
-                const gateEnableResult = await setZkGateRequiredOnChain(true, {
-                    contractId: match.onchain_contract_id || undefined,
-                });
+                const setupKey = String(match.onchain_contract_id || "default");
+                const setupState = onChainSetupCache.get(setupKey) || {};
 
-                if (!gateEnableResult.success && strictMode) {
-                    return Response.json(
-                        {
-                            error: "Failed to enable on-chain ZK gate",
-                            details: gateEnableResult.error || null,
-                        },
-                        { status: 502 },
+                if (!setupState.gateEnabled) {
+                    const gateEnableResult = await runSetupWithRetry(
+                        "set_zk_gate_required",
+                        () => setZkGateRequiredOnChain(true, {
+                            contractId: match.onchain_contract_id || undefined,
+                        }),
                     );
+
+                    if (!gateEnableResult.success && strictMode) {
+                        return Response.json(
+                            {
+                                error: "Failed to enable on-chain ZK gate",
+                                details: gateEnableResult.error || null,
+                            },
+                            { status: 502 },
+                        );
+                    }
+
+                    if (gateEnableResult.success) {
+                        setupState.gateEnabled = true;
+                        onChainSetupCache.set(setupKey, setupState);
+                    }
                 }
 
-                const onChainCommit = await submitZkCommitOnChain(
-                    matchId,
-                    address,
-                    roundNumber,
-                    turnNumber,
-                    commitment,
-                    {
-                        contractId: match.onchain_contract_id || undefined,
-                        sessionId: onChainSessionId ?? undefined,
-                    },
+                const onChainCommit = body.signedAuthEntryXdr && body.transactionXdr
+                    ? await submitSignedZkCommitOnChain(
+                        matchId,
+                        address,
+                        roundNumber,
+                        turnNumber,
+                        commitment,
+                        body.signedAuthEntryXdr,
+                        body.transactionXdr,
+                        {
+                            contractId: match.onchain_contract_id || undefined,
+                            sessionId: onChainSessionId ?? undefined,
+                        },
+                    )
+                    : await submitZkCommitOnChain(
+                        matchId,
+                        address,
+                        roundNumber,
+                        turnNumber,
+                        commitment,
+                        {
+                            contractId: match.onchain_contract_id || undefined,
+                            sessionId: onChainSessionId ?? undefined,
+                        },
+                    );
+
+                console.log(
+                    `[ZK Round Commit] On-chain commit result match=${matchId} round=${roundNumber} trace=${clientTraceId || "n/a"} success=${onChainCommit.success} tx=${onChainCommit.txHash || "n/a"} strict=${strictMode} error=${onChainCommit.error || "n/a"}`,
                 );
+
+                if (!onChainCommit.success && strictMode && !body.signedAuthEntryXdr) {
+                    const commitError = String(onChainCommit.error || "");
+                    if (/No keypair for|Stellar contract not configured|Auth|require_auth/i.test(commitError)) {
+                    return Response.json(
+                        {
+                            error: "On-chain ZK commitment requires wallet auth entry signing",
+                            details: commitError || "Call /api/matches/:matchId/zk/round/commit/prepare and resubmit commit with signedAuthEntryXdr + transactionXdr",
+                        },
+                        { status: 409 },
+                    );
+                    }
+                }
 
                 if (!onChainCommit.success && strictMode) {
                     return Response.json(
@@ -403,19 +481,29 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         );
                     }
                 } else {
-                    const setVerifierResult = await setZkVerifierContractOnChain(
-                        ZK_GROTH16_VERIFIER_CONTRACT_ID,
-                        { contractId: match.onchain_contract_id || undefined },
-                    );
-
-                    if (!setVerifierResult.success && strictMode) {
-                        return Response.json(
-                            {
-                                error: "Failed to configure on-chain verifier contract",
-                                details: setVerifierResult.error || null,
-                            },
-                            { status: 502 },
+                    if (!setupState.verifierConfigured) {
+                        const setVerifierResult = await runSetupWithRetry(
+                            "set_zk_verifier_contract",
+                            () => setZkVerifierContractOnChain(
+                                ZK_GROTH16_VERIFIER_CONTRACT_ID,
+                                { contractId: match.onchain_contract_id || undefined },
+                            ),
                         );
+
+                        if (!setVerifierResult.success && strictMode) {
+                            return Response.json(
+                                {
+                                    error: "Failed to configure on-chain verifier contract",
+                                    details: setVerifierResult.error || null,
+                                },
+                                { status: 502 },
+                            );
+                        }
+
+                        if (setVerifierResult.success) {
+                            setupState.verifierConfigured = true;
+                            onChainSetupCache.set(setupKey, setupState);
+                        }
                     }
                 }
 
@@ -427,19 +515,29 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         );
                     }
                 } else {
-                    const setVkIdResult = await setZkVerifierVkIdOnChain(
-                        ZK_GROTH16_VK_ID,
-                        { contractId: match.onchain_contract_id || undefined },
-                    );
-
-                    if (!setVkIdResult.success && strictMode) {
-                        return Response.json(
-                            {
-                                error: "Failed to configure on-chain verifier vk id",
-                                details: setVkIdResult.error || null,
-                            },
-                            { status: 502 },
+                    if (!setupState.vkConfigured) {
+                        const setVkIdResult = await runSetupWithRetry(
+                            "set_zk_verifier_vk_id",
+                            () => setZkVerifierVkIdOnChain(
+                                ZK_GROTH16_VK_ID,
+                                { contractId: match.onchain_contract_id || undefined },
+                            ),
                         );
+
+                        if (!setVkIdResult.success && strictMode) {
+                            return Response.json(
+                                {
+                                    error: "Failed to configure on-chain verifier vk id",
+                                    details: setVkIdResult.error || null,
+                                },
+                                { status: 502 },
+                            );
+                        }
+
+                        if (setVkIdResult.success) {
+                            setupState.vkConfigured = true;
+                            onChainSetupCache.set(setupKey, setupState);
+                        }
                     }
                 }
 
@@ -518,7 +616,11 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         round_number: roundNumber,
                         player_address: opponentAddress,
                         commitment: `auto-stunned:${matchId}:${roundNumber}:${opponentAddress}`,
-                        encrypted_plan: JSON.stringify({ move: "stunned", surgeCardId: null }),
+                        encrypted_plan: JSON.stringify({
+                            move: "stunned",
+                            movePlan: Array(PRIVATE_ROUND_PLAN_TURNS).fill("stunned"),
+                            surgeCardId: null,
+                        }),
                         proof_public_inputs: null,
                         transcript_hash: null,
                         onchain_commit_tx_hash: null,
@@ -543,6 +645,12 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         const player2Committed = committedPlayers.has(match.player2_address);
         const bothCommitted = player1Committed && player2Committed;
 
+        if (!bothCommitted) {
+            console.warn(
+                `[ZK Round Commit] Waiting for opponent commit match=${matchId} round=${roundNumber} trace=${clientTraceId || "n/a"} p1Committed=${player1Committed} p2Committed=${player2Committed}`,
+            );
+        }
+
         await broadcastGameEvent(matchId, "round_plan_committed", {
             matchId,
             roundNumber,
@@ -563,6 +671,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
 
         return Response.json({
             success: true,
+            clientTraceId,
             roundNumber,
             player1Committed,
             player2Committed,
@@ -619,6 +728,16 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             );
         }
 
+        const incomingMovePlan = Array.isArray(body.movePlan)
+            ? body.movePlan.filter((move): move is MoveType => isValidMove(String(move)))
+            : null;
+        if (!incomingMovePlan || incomingMovePlan.length !== PRIVATE_ROUND_PLAN_TURNS) {
+            return Response.json(
+                { error: `Missing/invalid movePlan. Exactly ${PRIVATE_ROUND_PLAN_TURNS} moves are required.` },
+                { status: 400 },
+            );
+        }
+
         if (body.surgeCardId && !isPowerSurgeCardId(body.surgeCardId)) {
             return Response.json({ error: "Invalid surgeCardId" }, { status: 400 });
         }
@@ -668,7 +787,22 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         }
 
         if (!submitterCommit) {
-            return Response.json({ error: "No unresolved private commitment found for player" }, { status: 409 });
+            const resolvedRoundId = await getResolvedRoundIdFromCommits(matchId, roundNumber);
+            if (resolvedRoundId) {
+                return Response.json({
+                    success: true,
+                    roundNumber,
+                    alreadyResolved: true,
+                    resolvedRoundId,
+                });
+            }
+
+            return Response.json({
+                success: true,
+                roundNumber,
+                awaitingOpponent: true,
+                reason: "no_unresolved_commit_for_player",
+            });
         }
 
         const opponentAddress = isPlayer1 ? match.player2_address : match.player1_address;
@@ -689,22 +823,29 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             .eq("match_id", matchId)
             .maybeSingle();
 
-        const submitterIsStunned = isPlayer1
-            ? Boolean(stunSnapshot?.player1_is_stunned)
-            : Boolean(stunSnapshot?.player2_is_stunned);
-        const resolvedMove = submitterIsStunned ? "stunned" : body.move;
-
         const committedPlan = parseStoredPlan((submitterCommit as any).encrypted_plan);
         const committedMove = committedPlan.move;
+        const committedMovePlan = Array.isArray(committedPlan.movePlan)
+            ? committedPlan.movePlan.filter((move): move is MoveType => isValidMove(String(move)))
+            : [];
         const committedSurge = committedPlan.surgeCardId ?? null;
 
-        if (!committedMove || !isValidMove(committedMove)) {
-            return Response.json({ error: "Committed private plan is missing a valid move" }, { status: 409 });
+        if (committedMovePlan.length !== PRIVATE_ROUND_PLAN_TURNS) {
+            return Response.json(
+                { error: `Committed private plan is missing a valid ${PRIVATE_ROUND_PLAN_TURNS}-move plan` },
+                { status: 409 },
+            );
         }
 
         const resolvedSurge = body.surgeCardId || null;
-        if (committedMove !== resolvedMove) {
+        if (committedMove && isValidMove(committedMove) && committedMove !== body.move) {
             return Response.json({ error: "Reveal move does not match committed private plan" }, { status: 409 });
+        }
+
+        for (let index = 0; index < PRIVATE_ROUND_PLAN_TURNS; index += 1) {
+            if (committedMovePlan[index] !== incomingMovePlan[index]) {
+                return Response.json({ error: "Reveal movePlan does not match committed private plan" }, { status: 409 });
+            }
         }
 
         if ((committedSurge || null) !== resolvedSurge) {
@@ -740,7 +881,11 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                         round_number: roundNumber,
                         player_address: opponentAddress,
                         commitment: `auto-stunned:${matchId}:${roundNumber}:${opponentAddress}`,
-                        encrypted_plan: JSON.stringify({ move: "stunned", surgeCardId: null }),
+                        encrypted_plan: JSON.stringify({
+                            move: "stunned",
+                            movePlan: Array(PRIVATE_ROUND_PLAN_TURNS).fill("stunned"),
+                            surgeCardId: null,
+                        }),
                         proof_public_inputs: null,
                         transcript_hash: null,
                         onchain_commit_tx_hash: null,
@@ -760,12 +905,65 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             .eq("round_number", roundNumber)
             .is("resolved_round_id", null);
 
-        const committedPlayers = new Set((commitsAfterAuto || []).map((row: any) => row.player_address));
-        if (!committedPlayers.has(match.player1_address) || !committedPlayers.has(match.player2_address)) {
-            return Response.json(
-                { error: "Cannot resolve: both players have not committed yet" },
-                { status: 409 },
+        const roundForTimeout = await getOrCreateRoundTurn(matchId, roundNumber, turnNumber);
+        const roundDeadlineMs = roundForTimeout?.move_deadline_at
+            ? new Date(roundForTimeout.move_deadline_at).getTime()
+            : 0;
+        const isDeadlinePassed = roundDeadlineMs > 0 && Date.now() > roundDeadlineMs;
+
+        let committedPlayers = new Set((commitsAfterAuto || []).map((row: any) => row.player_address));
+
+        if ((!committedPlayers.has(match.player1_address) || !committedPlayers.has(match.player2_address)) && isDeadlinePassed) {
+            const missingAddress = committedPlayers.has(match.player1_address)
+                ? match.player2_address
+                : match.player1_address;
+
+            await supabase
+                .from("round_private_commits")
+                .upsert(
+                    {
+                        match_id: matchId,
+                        round_number: roundNumber,
+                        player_address: missingAddress,
+                        commitment: `auto-timeout:${matchId}:${roundNumber}:${missingAddress}`,
+                        encrypted_plan: JSON.stringify({
+                            move: "stunned",
+                            movePlan: Array(PRIVATE_ROUND_PLAN_TURNS).fill("stunned"),
+                            surgeCardId: null,
+                        }),
+                        proof_public_inputs: null,
+                        transcript_hash: null,
+                        onchain_commit_tx_hash: null,
+                        verified_at: new Date().toISOString(),
+                        resolved_at: null,
+                        resolved_round_id: null,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "match_id,round_number,player_address" },
+                );
+
+            const { data: commitsAfterTimeout } = await supabase
+                .from("round_private_commits")
+                .select("player_address")
+                .eq("match_id", matchId)
+                .eq("round_number", roundNumber)
+                .is("resolved_round_id", null);
+
+            committedPlayers = new Set((commitsAfterTimeout || []).map((row: any) => row.player_address));
+            console.warn(
+                `[ZK Round Resolve] Auto-timeout commit inserted match=${matchId} round=${roundNumber} missing=${missingAddress}`,
             );
+        }
+
+        if (!committedPlayers.has(match.player1_address) || !committedPlayers.has(match.player2_address)) {
+            return Response.json({
+                success: true,
+                roundNumber,
+                awaitingOpponent: true,
+                reason: "awaiting_both_commits",
+                player1Committed: committedPlayers.has(match.player1_address),
+                player2Committed: committedPlayers.has(match.player2_address),
+            });
         }
 
         const verification = await verifyNoirProof({
@@ -803,9 +1001,9 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             .eq("round_number", roundNumber)
             .is("resolved_round_id", null);
 
-        const parsePlan = (raw: unknown): { move?: MoveType; surgeCardId?: PowerSurgeCardId | null } => parseStoredPlan(raw);
+        const parsePlan = (raw: unknown): { move?: MoveType; movePlan?: MoveType[]; surgeCardId?: PowerSurgeCardId | null } => parseStoredPlan(raw);
 
-        const byAddress = new Map<string, { move?: MoveType; surgeCardId?: PowerSurgeCardId | null }>();
+        const byAddress = new Map<string, { move?: MoveType; movePlan?: MoveType[]; surgeCardId?: PowerSurgeCardId | null }>();
         for (const row of revealRows || []) {
             byAddress.set(row.player_address, parsePlan((row as any).encrypted_plan));
         }
@@ -813,24 +1011,22 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         const p1RawPlan = byAddress.get(match.player1_address) || {};
         const p2RawPlan = byAddress.get(match.player2_address) || {};
 
-        const p1Move = (p1RawPlan.move && isValidMove(p1RawPlan.move))
-            ? p1RawPlan.move
-            : (stunSnapshot?.player1_is_stunned ? "stunned" : undefined);
-        const p2Move = (p2RawPlan.move && isValidMove(p2RawPlan.move))
-            ? p2RawPlan.move
-            : (stunSnapshot?.player2_is_stunned ? "stunned" : undefined);
-
+        const fallbackStunnedPlan = Array(PRIVATE_ROUND_PLAN_TURNS).fill("stunned") as MoveType[];
         const p1Plan = {
             ...p1RawPlan,
-            move: p1Move,
+            movePlan: (Array.isArray(p1RawPlan.movePlan) && p1RawPlan.movePlan.length === PRIVATE_ROUND_PLAN_TURNS)
+                ? p1RawPlan.movePlan
+                : (stunSnapshot?.player1_is_stunned ? fallbackStunnedPlan : undefined),
         };
         const p2Plan = {
             ...p2RawPlan,
-            move: p2Move,
+            movePlan: (Array.isArray(p2RawPlan.movePlan) && p2RawPlan.movePlan.length === PRIVATE_ROUND_PLAN_TURNS)
+                ? p2RawPlan.movePlan
+                : (stunSnapshot?.player2_is_stunned ? fallbackStunnedPlan : undefined),
         };
 
-        const p1Revealed = !!(p1Plan.move && isValidMove(p1Plan.move));
-        const p2Revealed = !!(p2Plan.move && isValidMove(p2Plan.move));
+        const p1Revealed = !!(p1Plan.movePlan && p1Plan.movePlan.length === PRIVATE_ROUND_PLAN_TURNS);
+        const p2Revealed = !!(p2Plan.movePlan && p2Plan.movePlan.length === PRIVATE_ROUND_PLAN_TURNS);
         const bothRevealed = p1Revealed && p2Revealed;
 
         await broadcastGameEvent(matchId, "round_plan_revealed", {
@@ -921,7 +1117,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
         try {
 
-            await supabase
+            const { error: powerSurgeSyncError } = await supabase
                 .from("power_surges")
                 .upsert(
                     {
@@ -934,51 +1130,102 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                     { onConflict: "match_id,round_number" },
                 );
 
-            const round = await getOrCreateRound(matchId, roundNumber);
+            if (powerSurgeSyncError) {
+                console.warn(
+                    `[ZK Round Resolve] Non-fatal power_surges sync error match=${matchId} round=${roundNumber}: ${powerSurgeSyncError.message}`,
+                );
+            }
 
-            const p1FirstMove = p1Plan.move;
-            const p2FirstMove = p2Plan.move;
+            let finalResolution: any = null;
+            let finalResolvedRoundId: string | null = null;
+            let carryP1Stunned = Boolean(stunSnapshot?.player1_is_stunned);
+            let carryP2Stunned = Boolean(stunSnapshot?.player2_is_stunned);
 
-            await supabase
-                .from("rounds")
-                .update({
-                    player1_move: p1FirstMove,
-                    player2_move: p2FirstMove,
-                })
-                .eq("id", round.id);
+            for (let turn = 1; turn <= PRIVATE_ROUND_PLAN_TURNS; turn += 1) {
+                const round = await getOrCreateRoundTurn(matchId, roundNumber, turn);
+                const plannedP1Move = p1Plan.movePlan?.[turn - 1] || "block";
+                const plannedP2Move = p2Plan.movePlan?.[turn - 1] || "block";
 
-            await supabase
-                .from("fight_state_snapshots")
-                .update({
-                    player1_has_submitted_move: true,
-                    player2_has_submitted_move: true,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("match_id", matchId);
+                const p1Move = carryP1Stunned ? "stunned" : plannedP1Move;
+                const p2Move = carryP2Stunned ? "stunned" : plannedP2Move;
 
-            const resolution = await resolveTurn(matchId, round.id);
+                if (p1Move !== plannedP1Move || p2Move !== plannedP2Move) {
+                    console.log(
+                        `[ZK Round Resolve] Stun override applied match=${matchId} round=${roundNumber} turn=${turn} carry=(${carryP1Stunned},${carryP2Stunned}) planned=(${plannedP1Move},${plannedP2Move}) effective=(${p1Move},${p2Move})`,
+                    );
+                }
 
-            console.log(
-                `[ZK Round Resolve] Turn resolved match=${matchId} round=${roundNumber} turnId=${round.id} matchWinner=${resolution.matchWinner || "n/a"}`,
-            );
+                await supabase
+                    .from("rounds")
+                    .update({
+                        player1_move: p1Move,
+                        player2_move: p2Move,
+                    })
+                    .eq("id", round.id);
+
+                await supabase
+                    .from("fight_state_snapshots")
+                    .update({
+                        player1_has_submitted_move: true,
+                        player2_has_submitted_move: true,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("match_id", matchId);
+
+                const resolution = await resolveTurn(matchId, round.id, {
+                    suppressNextTurnBroadcastOnly: true,
+                });
+                finalResolution = resolution;
+                finalResolvedRoundId = round.id;
+
+                const resolvedCarryP1 = typeof resolution.player1IsStunnedNext === "boolean"
+                    ? resolution.player1IsStunnedNext
+                    : undefined;
+                const resolvedCarryP2 = typeof resolution.player2IsStunnedNext === "boolean"
+                    ? resolution.player2IsStunnedNext
+                    : undefined;
+
+                const { data: postTurnStunSnapshot } = await supabase
+                    .from("fight_state_snapshots")
+                    .select("player1_is_stunned, player2_is_stunned")
+                    .eq("match_id", matchId)
+                    .maybeSingle();
+
+                carryP1Stunned = resolvedCarryP1 ?? Boolean(postTurnStunSnapshot?.player1_is_stunned);
+                carryP2Stunned = resolvedCarryP2 ?? Boolean(postTurnStunSnapshot?.player2_is_stunned);
+
+                console.log(
+                    `[ZK Round Resolve] Auto turn resolved match=${matchId} round=${roundNumber} turn=${turn} roundId=${round.id} matchWinner=${resolution.matchWinner || "n/a"} nextCarry=(${carryP1Stunned},${carryP2Stunned})`,
+                );
+
+                if (resolution.isRoundOver || resolution.isMatchOver) {
+                    break;
+                }
+
+                await sleep(2600);
+            }
+
+            if (!finalResolution || !finalResolvedRoundId) {
+                throw new Error("Private round auto-resolution failed to produce a turn result");
+            }
 
             await supabase
                 .from("round_private_commits")
                 .update({
                     resolved_at: new Date().toISOString(),
-                    resolved_round_id: round.id,
+                    resolved_round_id: finalResolvedRoundId,
                     updated_at: new Date().toISOString(),
                 })
                 .eq("match_id", matchId)
                 .eq("round_number", roundNumber)
                 .is("resolved_round_id", null);
 
-            await markDistributedResolveLockResolved(matchId, roundNumber, round.id);
+            await markDistributedResolveLockResolved(matchId, roundNumber, finalResolvedRoundId);
 
             return Response.json({
                 success: true,
                 roundNumber,
-                resolution,
+                resolution: finalResolution,
                 zkVerification: {
                     backend: verification.backend,
                     command: verification.command,
@@ -1010,8 +1257,12 @@ function parseStoredPlan(raw: unknown): PrivateRoundPlanPayload {
 
     const parseJsonPlan = (jsonText: string) => {
         const parsed = JSON.parse(jsonText) as PrivateRoundPlanPayload;
+        const movePlan = Array.isArray((parsed as any).movePlan)
+            ? (parsed as any).movePlan.filter((value: unknown): value is MoveType => isValidMove(String(value)))
+            : undefined;
         return {
             move: parsed.move,
+            movePlan,
             surgeCardId: parsed.surgeCardId ?? null,
         };
     };
@@ -1025,5 +1276,94 @@ function parseStoredPlan(raw: unknown): PrivateRoundPlanPayload {
         } catch {
             return {};
         }
+    }
+}
+
+export async function handlePreparePrivateRoundCommit(matchId: string, req: Request): Promise<Response> {
+    try {
+        const guard = privateModeGuard();
+        if (guard) return guard;
+
+        const body = await req.json() as PrepareCommitPrivateRoundBody;
+        const clientTraceId = (body.clientTraceId || "").trim() || null;
+        const address = body.address?.trim();
+        const commitment = body.commitment?.trim();
+        const roundNumber = Number(body.roundNumber ?? 1);
+        const turnNumber = Number(body.turnNumber ?? 1);
+        const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+
+        if (!address || !commitment || !Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+            return Response.json(
+                { error: "Missing/invalid address, roundNumber, turnNumber, or commitment" },
+                { status: 400 },
+            );
+        }
+
+        if (!/^0x[0-9a-fA-F]+$/.test(commitment)) {
+            return Response.json({ error: "Invalid commitment format" }, { status: 400 });
+        }
+
+        console.log(
+            `[ZK Round Commit Prepare] Request match=${matchId} round=${roundNumber} turn=${turnNumber} trace=${clientTraceId || "n/a"} player=${address.slice(0, 6)}…${address.slice(-4)}`,
+        );
+
+        const supabase = getSupabase();
+        const { data: match, error: matchError } = await supabase
+            .from("matches")
+            .select("id, status, player1_address, player2_address, onchain_contract_id, onchain_session_id")
+            .eq("id", matchId)
+            .single();
+
+        if (matchError || !match) {
+            return Response.json({ error: "Match not found" }, { status: 404 });
+        }
+
+        if (match.status !== "in_progress") {
+            return Response.json(
+                { error: `Match is not in progress (status: ${match.status})` },
+                { status: 400 },
+            );
+        }
+
+        if (address !== match.player1_address && address !== match.player2_address) {
+            return Response.json({ error: "Not a participant in this match" }, { status: 403 });
+        }
+
+        const onChainSessionId = typeof (match as any).onchain_session_id === "number"
+            ? (match as any).onchain_session_id
+            : null;
+
+        if (strictMode && onChainSessionId === null) {
+            return Response.json(
+                { error: "On-chain ZK commit gate requires persisted onchain_session_id from registration" },
+                { status: 409 },
+            );
+        }
+
+        const prepared = await prepareZkCommitOnChain(
+            matchId,
+            address,
+            roundNumber,
+            turnNumber,
+            commitment,
+            {
+                contractId: match.onchain_contract_id || undefined,
+                sessionId: onChainSessionId ?? undefined,
+            },
+        );
+
+        return Response.json({
+            success: true,
+            clientTraceId,
+            sessionId: prepared.sessionId,
+            authEntryXdr: prepared.authEntryXdr,
+            transactionXdr: prepared.transactionXdr,
+        });
+    } catch (err) {
+        console.error("[ZK Round Commit Prepare] Error:", err);
+        return Response.json(
+            { error: err instanceof Error ? err.message : "Failed to prepare private round commit" },
+            { status: 500 },
+        );
     }
 }

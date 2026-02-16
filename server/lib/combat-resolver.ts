@@ -25,7 +25,7 @@ import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } fro
 import { proveAndFinalizeMatch, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
 import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type PowerSurgeCardId } from "./power-surge";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
 
 // =============================================================================
@@ -46,6 +46,8 @@ export interface CombatResolutionResult {
     player2EnergyAfter: number;
     player1GuardAfter: number;
     player2GuardAfter: number;
+    player1IsStunnedNext?: boolean;
+    player2IsStunnedNext?: boolean;
     isRoundOver: boolean;
     roundWinner: "player1" | "player2" | "draw" | null;
     isMatchOver: boolean;
@@ -56,6 +58,7 @@ export interface CombatResolutionResult {
 
 interface PrivateRoundPlanPayload {
     move?: MoveType;
+    surgeCardId?: PowerSurgeCardId | null;
 }
 
 function parsePrivateRoundPlan(raw: unknown): PrivateRoundPlanPayload {
@@ -63,6 +66,9 @@ function parsePrivateRoundPlan(raw: unknown): PrivateRoundPlanPayload {
 
     const normalize = (parsed: PrivateRoundPlanPayload): PrivateRoundPlanPayload => ({
         move: parsed.move && isValidMove(parsed.move) ? parsed.move : undefined,
+        surgeCardId: parsed.surgeCardId && isPowerSurgeCardId(parsed.surgeCardId)
+            ? parsed.surgeCardId
+            : null,
     });
 
     try {
@@ -75,6 +81,33 @@ function parsePrivateRoundPlan(raw: unknown): PrivateRoundPlanPayload {
             return {};
         }
     }
+}
+
+async function getPrivateSurgesForRound(params: {
+    matchId: string;
+    roundNumber: number;
+    player1Address: string;
+    player2Address: string;
+}): Promise<{ player1Surge: PowerSurgeCardId | null; player2Surge: PowerSurgeCardId | null }> {
+    const supabase = getSupabase();
+    const { data: commitRows } = await supabase
+        .from("round_private_commits")
+        .select("player_address, encrypted_plan")
+        .eq("match_id", params.matchId)
+        .eq("round_number", params.roundNumber);
+
+    const byAddress = new Map<string, PrivateRoundPlanPayload>();
+    for (const row of commitRows || []) {
+        byAddress.set(row.player_address, parsePrivateRoundPlan((row as any).encrypted_plan));
+    }
+
+    const p1Plan = byAddress.get(params.player1Address) || {};
+    const p2Plan = byAddress.get(params.player2Address) || {};
+
+    return {
+        player1Surge: p1Plan.surgeCardId ?? null,
+        player2Surge: p2Plan.surgeCardId ?? null,
+    };
 }
 
 function getPlannedMoveForTurn(plan: PrivateRoundPlanPayload, turnNumber: number): MoveType | null {
@@ -162,7 +195,11 @@ async function getOrCreateRoundTurn(params: {
  */
 export async function resolveTurn(
     matchId: string,
-    roundId: string
+    roundId: string,
+    options?: {
+        suppressPostTurnBroadcasts?: boolean;
+        suppressNextTurnBroadcastOnly?: boolean;
+    },
 ): Promise<CombatResolutionResult> {
     const supabase = getSupabase();
 
@@ -240,6 +277,17 @@ export async function resolveTurn(
             }
             if (!p2Surge && isPowerSurgeCardId(p2FromRow)) {
                 p2Surge = p2FromRow;
+            }
+
+            if (!p1Surge || !p2Surge) {
+                const fromCommits = await getPrivateSurgesForRound({
+                    matchId,
+                    roundNumber: currentRound.round_number,
+                    player1Address: match.player1_address,
+                    player2Address: match.player2_address,
+                });
+                if (!p1Surge && fromCommits.player1Surge) p1Surge = fromCommits.player1Surge;
+                if (!p2Surge && fromCommits.player2Surge) p2Surge = fromCommits.player2Surge;
             }
         }
 
@@ -385,6 +433,8 @@ export async function resolveTurn(
             player2EnergyAfter: resolution.player2EnergyAfter,
             player1GuardAfter: resolution.player1GuardAfter,
             player2GuardAfter: resolution.player2GuardAfter,
+            player1IsStunnedNext: resolution.player1IsStunnedNext,
+            player2IsStunnedNext: resolution.player2IsStunnedNext,
             isRoundOver: roundOver,
             roundWinner: roundWinner,
             isMatchOver: matchOver,
@@ -426,7 +476,7 @@ export async function resolveTurn(
         });
 
         // If match is over, report result on-chain and broadcast match ended
-        if (matchOver && matchWinner) {
+        if (!options?.suppressPostTurnBroadcasts && matchOver && matchWinner) {
             const winnerAddr = matchWinner === "player1"
                 ? match.player1_address
                 : match.player2_address;
@@ -507,7 +557,7 @@ export async function resolveTurn(
                 zkFinalizeFailedReason,
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
-        } else if (roundOver) {
+        } else if (!options?.suppressPostTurnBroadcasts && roundOver) {
             // Broadcast round end, then next round start after delay
             await broadcastGameEvent(matchId, "round_ended", {
                 roundNumber: currentRound.round_number,
@@ -541,7 +591,7 @@ export async function resolveTurn(
                     console.error("[CombatResolver] Failed to broadcast round_starting:", err);
                 }
             }, 3000);
-        } else if (!matchOver) {
+        } else if (!options?.suppressPostTurnBroadcasts && !options?.suppressNextTurnBroadcastOnly && !matchOver) {
             // Same round, next turn — broadcast round_starting after animation delay
             const nextTurn = (currentRound.turn_number || 1) + 1;
             const animDelay = 2500; // Allow resolution animation to play
@@ -663,6 +713,17 @@ async function replayToCurrentState(
             const privateRoundSurges = privateSurgesByRound.get(round.round_number);
             if (!p1Surge) p1Surge = privateRoundSurges?.player1 ?? null;
             if (!p2Surge) p2Surge = privateRoundSurges?.player2 ?? null;
+
+            if (!p1Surge || !p2Surge) {
+                const fromCommits = await getPrivateSurgesForRound({
+                    matchId,
+                    roundNumber: round.round_number,
+                    player1Address: match.player1_address,
+                    player2Address: match.player2_address,
+                });
+                if (!p1Surge && fromCommits.player1Surge) p1Surge = fromCommits.player1Surge;
+                if (!p2Surge && fromCommits.player2Surge) p2Surge = fromCommits.player2Surge;
+            }
         }
 
         const input: RoundResolutionInput = {

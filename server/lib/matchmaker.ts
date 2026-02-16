@@ -482,11 +482,43 @@ async function sendBroadcast(channel: any, event: string, payload: Record<string
         return;
     }
 
-    await channel.send({
+    const waitForSubscribed = () => new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error("Realtime subscribe timeout before broadcast"));
+        }, 2000);
+
+        channel.subscribe((status: string) => {
+            if (settled) return;
+
+            if (status === "SUBSCRIBED") {
+                settled = true;
+                clearTimeout(timeout);
+                resolve();
+                return;
+            }
+
+            if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+                settled = true;
+                clearTimeout(timeout);
+                reject(new Error(`Realtime channel subscribe failed: ${status}`));
+            }
+        });
+    });
+
+    await waitForSubscribed();
+
+    const result = await channel.send({
         type: "broadcast",
         event,
         payload,
     });
+
+    if (result !== "ok") {
+        throw new Error(`Realtime broadcast send failed: ${result}`);
+    }
 }
 
 export async function broadcastMatchFound(

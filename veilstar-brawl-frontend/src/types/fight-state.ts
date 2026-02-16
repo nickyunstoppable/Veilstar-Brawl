@@ -202,7 +202,7 @@ export function parseFightStateResponse(data: any): FightStateSnapshot {
  */
 export const ANIMATION_TIMING = {
     COUNTDOWN_SECONDS: 3,
-    MOVE_TIMER_MS: 20000,
+    MOVE_TIMER_MS: 90000,
     RUN_TO_CENTER_MS: 600,
     ATTACK_ANIMATION_MS: 1200,
     RUN_BACK_MS: 600,

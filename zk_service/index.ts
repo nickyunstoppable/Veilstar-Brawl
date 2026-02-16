@@ -1,5 +1,5 @@
 import { ensureEnvLoaded } from "../server/lib/env";
-import { handleCommitPrivateRoundPlan, handleResolvePrivateRound } from "../server/routes/matches/zk-round-commit";
+import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleResolvePrivateRound } from "../server/routes/matches/zk-round-commit";
 import { handleProvePrivateRoundPlan } from "../server/routes/matches/zk-round-prove";
 import { handleFinalizeWithZkProof } from "../server/routes/matches/zk-finalize";
 import { handleProveAndFinalize } from "../server/routes/matches/zk-prove-finalize";
@@ -64,6 +64,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
     const matchId = extractMatchId(pathname);
     if (matchId) {
+        if (pathname === `/api/matches/${matchId}/zk/round/commit/prepare` && method === "POST") {
+            return withCors(await handlePreparePrivateRoundCommit(matchId, req), req);
+        }
+
         if (pathname === `/api/matches/${matchId}/zk/round/commit` && method === "POST") {
             return withCors(await handleCommitPrivateRoundPlan(matchId, req), req);
         }

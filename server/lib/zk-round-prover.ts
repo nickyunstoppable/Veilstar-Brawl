@@ -101,7 +101,8 @@ function resolveCircuitDir(): string {
     return resolve(process.cwd(), "zk_circuits", "veilstar_round_plan_groth16");
 }
 
-function toSurgeCode(cardId: PowerSurgeCardId): number {
+function toSurgeCode(cardId?: PowerSurgeCardId | null): number {
+    if (!cardId) return 0;
     const idx = POWER_SURGE_CARD_IDS.indexOf(cardId);
     if (idx < 0) return 0;
     return idx + 1;
@@ -242,7 +243,7 @@ export interface ProvePrivateRoundPlanParams {
     roundNumber: number;
     turnNumber: number;
     move: MoveType;
-    surgeCardId: PowerSurgeCardId;
+    surgeCardId?: PowerSurgeCardId | null;
     nonce?: string;
 }
 

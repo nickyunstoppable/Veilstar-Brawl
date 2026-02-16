@@ -2,14 +2,14 @@ import type { MoveType } from "../../lib/game-types";
 import { isPowerSurgeCardId } from "../../lib/power-surge";
 import { provePrivateRoundPlan } from "../../lib/zk-round-prover";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 
 interface ProveRoundBody {
     address?: string;
     roundNumber?: number;
     turnNumber?: number;
     move?: MoveType;
-    surgeCardId?: string;
+    surgeCardId?: string | null;
     nonce?: string;
 }
 
@@ -43,7 +43,7 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             return Response.json({ error: "Missing/invalid move" }, { status: 400 });
         }
 
-        if (!isPowerSurgeCardId(body.surgeCardId)) {
+        if (body.surgeCardId != null && !isPowerSurgeCardId(body.surgeCardId)) {
             return Response.json({ error: "Missing/invalid surgeCardId" }, { status: 400 });
         }
 
@@ -53,7 +53,7 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             roundNumber,
             turnNumber,
             move: body.move,
-            surgeCardId: body.surgeCardId,
+            surgeCardId: body.surgeCardId ?? null,
             nonce: body.nonce,
         });
 

@@ -105,6 +105,51 @@ function normalizeOutcomeForInvisibleMove(
     return outcome;
 }
 
+function applyPriorityClashResolution(params: {
+    player1Move: MoveType;
+    player2Move: MoveType;
+    player1Outcome: MoveOutcome;
+    player2Outcome: MoveOutcome;
+    player1Mods: ReturnType<typeof calculateSurgeEffects>["player1Modifiers"] | null;
+    player2Mods: ReturnType<typeof calculateSurgeEffects>["player1Modifiers"] | null;
+}): { player1Outcome: MoveOutcome; player2Outcome: MoveOutcome } {
+    const {
+        player1Move,
+        player2Move,
+        player1Outcome,
+        player2Outcome,
+        player1Mods,
+        player2Mods,
+    } = params;
+
+    if (!player1Mods || !player2Mods) {
+        return { player1Outcome, player2Outcome };
+    }
+
+    const bothCanTrade =
+        player1Outcome === "hit"
+        && player2Outcome === "hit"
+        && player1Move !== "stunned"
+        && player2Move !== "stunned";
+
+    if (!bothCanTrade) {
+        return { player1Outcome, player2Outcome };
+    }
+
+    const p1Priority = player1Mods.priorityBoost ?? 0;
+    const p2Priority = player2Mods.priorityBoost ?? 0;
+
+    if (p1Priority === p2Priority) {
+        return { player1Outcome, player2Outcome };
+    }
+
+    if (p1Priority > p2Priority) {
+        return { player1Outcome: "hit", player2Outcome: "staggered" };
+    }
+
+    return { player1Outcome: "staggered", player2Outcome: "hit" };
+}
+
 function calculateDamageWithSurges(params: {
     attackerMove: MoveType;
     defenderMove: MoveType;
@@ -208,6 +253,28 @@ export function calculateGuardAfter(
     return Math.max(0, Math.min(GAME_CONSTANTS.MAX_GUARD, guard));
 }
 
+function didGuardBreakThisTurn(
+    currentGuard: number,
+    myMove: MoveType,
+    opponentMove: MoveType,
+    myOutcome: MoveOutcome,
+): boolean {
+    if (myMove !== "block") return false;
+
+    // Direct guard break interaction (e.g. block shattered by special)
+    if (myOutcome === "shattered") return true;
+
+    if (myOutcome !== "guarding") return false;
+
+    let projectedGuard = currentGuard + COMBAT_CONSTANTS.GUARD_BUILDUP_ON_BLOCK;
+    if (opponentMove !== "block" && opponentMove !== "stunned") {
+        projectedGuard += COMBAT_CONSTANTS.GUARD_BUILDUP_ON_HIT;
+    }
+
+    // Meter reaches threshold and snaps to 0 => guard break
+    return projectedGuard >= GAME_CONSTANTS.MAX_GUARD;
+}
+
 // =============================================================================
 // ROUND RESOLUTION
 // =============================================================================
@@ -230,30 +297,50 @@ export function resolveRound(
         player1Guard, player2Guard,
     } = input;
 
+    const player1PlannedMove: MoveType = hasEnoughEnergy(player1Energy, player1Move)
+        ? player1Move
+        : (player1Move === "stunned" ? "stunned" : "block");
+    const player2PlannedMove: MoveType = hasEnoughEnergy(player2Energy, player2Move)
+        ? player2Move
+        : (player2Move === "stunned" ? "stunned" : "block");
+
     const surges = ctx ? calculateSurgeEffects(ctx.player1Surge, ctx.player2Surge) : null;
     const p1Mods = surges ? surges.player1Modifiers : null;
     const p2Mods = surges ? surges.player2Modifiers : null;
 
     // Block disabled behavior: if a player's block is disabled by opponent, treat it as stunned for resolution.
     const p1EffectiveMove: MoveType =
-        surges && player1Move === "block" && isBlockDisabled(p1Mods!, p2Mods!)
+        surges && player1PlannedMove === "block" && isBlockDisabled(p1Mods!, p2Mods!)
             ? "stunned"
-            : player1Move;
+            : player1PlannedMove;
     const p2EffectiveMove: MoveType =
-        surges && player2Move === "block" && isBlockDisabled(p2Mods!, p1Mods!)
+        surges && player2PlannedMove === "block" && isBlockDisabled(p2Mods!, p1Mods!)
             ? "stunned"
-            : player2Move;
+            : player2PlannedMove;
 
-    const p1Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
+    let p1Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
         RESOLUTION_MATRIX[p1EffectiveMove][p2EffectiveMove],
         p1EffectiveMove,
         p1Mods ?? null
     );
-    const p2Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
+    let p2Outcome: MoveOutcome = normalizeOutcomeForInvisibleMove(
         RESOLUTION_MATRIX[p2EffectiveMove][p1EffectiveMove],
         p2EffectiveMove,
         p2Mods ?? null
     );
+
+    if (surges) {
+        const priorityResolved = applyPriorityClashResolution({
+            player1Move: p1EffectiveMove,
+            player2Move: p2EffectiveMove,
+            player1Outcome: p1Outcome,
+            player2Outcome: p2Outcome,
+            player1Mods: p1Mods,
+            player2Mods: p2Mods,
+        });
+        p1Outcome = priorityResolved.player1Outcome;
+        p2Outcome = priorityResolved.player2Outcome;
+    }
 
     const p1CounterHit = isCounterHit(p1EffectiveMove, p2EffectiveMove);
     const p2CounterHit = isCounterHit(p2EffectiveMove, p1EffectiveMove);
@@ -360,8 +447,8 @@ export function resolveRound(
         if (p2Dodged) p2DamageTaken = 0;
     }
 
-    const p1Damage = Math.max(0, Math.round(p1DamageBase));
-    const p2Damage = Math.max(0, Math.round(p2DamageBase));
+    const p1Damage = p1Outcome === "hit" ? Math.max(0, Math.round(p1DamageBase)) : 0;
+    const p2Damage = p2Outcome === "hit" ? Math.max(0, Math.round(p2DamageBase)) : 0;
 
     // Apply damage
     let p1HealthAfter = Math.max(0, player1Health - p1DamageTaken);
@@ -415,8 +502,8 @@ export function resolveRound(
         p2EnergyAfter = p2EnergyAfter - p1EnergyEffects.energyBurned - p1EnergyEffects.energyStolen + p2EnergyEffects.energyStolen;
 
         // Finality Fist extra special energy cost
-        if (player1Move === "special" && p1Mods!.specialEnergyCost > 0) p1EnergyAfter -= p1Mods!.specialEnergyCost;
-        if (player2Move === "special" && p2Mods!.specialEnergyCost > 0) p2EnergyAfter -= p2Mods!.specialEnergyCost;
+        if (player1PlannedMove === "special" && p1Mods!.specialEnergyCost > 0) p1EnergyAfter -= p1Mods!.specialEnergyCost;
+        if (player2PlannedMove === "special" && p2Mods!.specialEnergyCost > 0) p2EnergyAfter -= p2Mods!.specialEnergyCost;
 
         // Regen bonus
         p1EnergyAfter += p1EnergyEffects.energyRegenBonus;
@@ -432,7 +519,7 @@ export function resolveRound(
     const p2GuardAfter = calculateGuardAfter(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
 
     // Determine advantage
-    const advantage = getMoveAdvantage(player1Move, player2Move);
+    const advantage = getMoveAdvantage(player1PlannedMove, player2PlannedMove);
 
     // Determine round winner (only if knockout)
     let winner: RoundWinner = null;
@@ -450,14 +537,17 @@ export function resolveRound(
     }
 
     // Generate narrative
-    const narrative = generateNarrative(player1Move, player2Move, p1Damage, p2Damage, advantage);
+    const narrative = generateNarrative(player1PlannedMove, player2PlannedMove, p1Damage, p2Damage, advantage);
 
-    const player1IsStunnedNext = p1Outcome === "missed";
-    const player2IsStunnedNext = p2Outcome === "missed";
+    const p1GuardBroke = didGuardBreakThisTurn(player1Guard, p1EffectiveMove, p2EffectiveMove, p1Outcome);
+    const p2GuardBroke = didGuardBreakThisTurn(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
+
+    const player1IsStunnedNext = p1Outcome === "missed" || p1GuardBroke;
+    const player2IsStunnedNext = p2Outcome === "missed" || p2GuardBroke;
 
     return {
         player1: {
-            move: player1Move,
+            move: player1PlannedMove,
             damageDealt: p1Damage,
             damageTaken: p1DamageTaken,
             moveSuccess: advantage >= 0,
@@ -467,7 +557,7 @@ export function resolveRound(
             energyDrained: p1EnergyDrained,
         },
         player2: {
-            move: player2Move,
+            move: player2PlannedMove,
             damageDealt: p2Damage,
             damageTaken: p2DamageTaken,
             moveSuccess: advantage <= 0,

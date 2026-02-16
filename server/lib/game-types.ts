@@ -154,7 +154,7 @@ export const GAME_CONSTANTS = {
     /** Rounds needed to win best-of-5 */
     ROUNDS_TO_WIN_BEST_OF_5: 3,
     /** Seconds for move selection */
-    MOVE_TIMER_SECONDS: 30,
+    MOVE_TIMER_SECONDS: 90,
     /** Seconds for character selection */
     CHARACTER_SELECT_SECONDS: 30,
     /** Countdown before round starts */

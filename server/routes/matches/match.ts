@@ -5,6 +5,12 @@
 
 import { getSupabase } from "../../lib/supabase";
 
+const NO_STORE_HEADERS: Record<string, string> = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+    Pragma: "no-cache",
+    Expires: "0",
+};
+
 export async function handleGetMatch(matchId: string, req?: Request): Promise<Response> {
     try {
         const supabase = getSupabase();
@@ -37,11 +43,14 @@ export async function handleGetMatch(matchId: string, req?: Request): Promise<Re
             .maybeSingle();
 
         if (lite) {
-            return Response.json({
-                match,
-                fightState: fightState ?? null,
-                rounds: [],
-            });
+            return Response.json(
+                {
+                    match,
+                    fightState: fightState ?? null,
+                    rounds: [],
+                },
+                { headers: NO_STORE_HEADERS }
+            );
         }
 
         // Fetch rounds
@@ -52,11 +61,14 @@ export async function handleGetMatch(matchId: string, req?: Request): Promise<Re
             .order("round_number", { ascending: true })
             .order("turn_number", { ascending: true });
 
-        return Response.json({
-            match,
-            fightState: fightState ?? null,
-            rounds: rounds ?? [],
-        });
+        return Response.json(
+            {
+                match,
+                fightState: fightState ?? null,
+                rounds: rounds ?? [],
+            },
+            { headers: NO_STORE_HEADERS }
+        );
     } catch (err) {
         console.error("[Match GET] Error:", err);
         return Response.json(

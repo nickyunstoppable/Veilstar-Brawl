@@ -190,6 +190,30 @@ function sleep(ms: number): Promise<void> {
 }
 
 const STAKE_SUBMISSION_LOCKS = new Map<string, Promise<void>>();
+const ADMIN_SUBMISSION_LOCKS = new Map<string, Promise<void>>();
+const ADMIN_LOCK_WAIT_WARN_MS = Number(process.env.STELLAR_ADMIN_LOCK_WAIT_WARN_MS ?? "2000");
+const STELLAR_TX_SEND_TIMEOUT_MS = Number(process.env.STELLAR_TX_SEND_TIMEOUT_MS ?? "45000");
+
+function truncateLockKey(lockKey: string): string {
+    if (lockKey.length <= 72) return lockKey;
+    return `${lockKey.slice(0, 48)}…${lockKey.slice(-16)}`;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<T>((_, reject) => {
+                timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
 
 async function withStakeSubmissionLock<T>(lockKey: string, fn: () => Promise<T>): Promise<T> {
     const previous = STAKE_SUBMISSION_LOCKS.get(lockKey) || Promise.resolve();
@@ -212,12 +236,45 @@ async function withStakeSubmissionLock<T>(lockKey: string, fn: () => Promise<T>)
     }
 }
 
+async function withAdminSubmissionLock<T>(lockKey: string, fn: () => Promise<T>): Promise<T> {
+    const previous = ADMIN_SUBMISSION_LOCKS.get(lockKey) || Promise.resolve();
+    const waitStartedAt = Date.now();
+
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+
+    ADMIN_SUBMISSION_LOCKS.set(lockKey, previous.then(() => current));
+    await previous;
+
+    const waitedMs = Date.now() - waitStartedAt;
+    if (waitedMs >= ADMIN_LOCK_WAIT_WARN_MS) {
+        console.warn(`[Stellar][admin-lock] wait=${waitedMs}ms key=${truncateLockKey(lockKey)}`);
+    }
+
+    const heldStartedAt = Date.now();
+    console.log(`[Stellar][admin-lock] acquired key=${truncateLockKey(lockKey)}`);
+
+    try {
+        return await fn();
+    } finally {
+        const heldMs = Date.now() - heldStartedAt;
+        console.log(`[Stellar][admin-lock] released key=${truncateLockKey(lockKey)} held=${heldMs}ms`);
+        release();
+        if (ADMIN_SUBMISSION_LOCKS.get(lockKey) === current) {
+            ADMIN_SUBMISSION_LOCKS.delete(lockKey);
+        }
+    }
+}
+
 function isTransientSubmissionError(err: any): boolean {
     const message = String(err?.message || "");
     const responseText = String(err?.response?.data || "");
     const combined = `${message}\n${responseText}`;
 
     return (
+        /txBadSeq/i.test(combined) ||
         /TRY_AGAIN_LATER/i.test(combined) ||
         /temporar/i.test(combined) ||
         /timeout/i.test(combined) ||
@@ -270,10 +327,18 @@ async function signAndSendTx(tx: any): Promise<{ sentTx: any; txHash?: string }>
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             try {
-                sentTx = await tx.signAndSend();
+                sentTx = await withTimeout(
+                    tx.signAndSend(),
+                    STELLAR_TX_SEND_TIMEOUT_MS,
+                    `signAndSend timed out after ${STELLAR_TX_SEND_TIMEOUT_MS}ms`,
+                );
             } catch (err: any) {
                 if (err?.message?.includes("NoSignatureNeeded") || err?.message?.includes("read call")) {
-                    sentTx = await tx.signAndSend({ force: true });
+                    sentTx = await withTimeout(
+                        tx.signAndSend({ force: true }),
+                        STELLAR_TX_SEND_TIMEOUT_MS,
+                        `signAndSend(force=true) timed out after ${STELLAR_TX_SEND_TIMEOUT_MS}ms`,
+                    );
                 } else {
                     throw err;
                 }
@@ -869,6 +934,177 @@ export async function prepareMoveOnChain(
 }
 
 /**
+ * Prepare a private round ZK commit transaction where the player must sign auth.
+ */
+export async function prepareZkCommitOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    turnNumber: number,
+    commitmentHex: string,
+    options?: { contractId?: string; sessionId?: number },
+): Promise<PreparedPlayerAction> {
+    if (!isClientSignedActionConfigured()) {
+        throw new Error("Client-signed action flow is not configured");
+    }
+
+    if (!Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+        throw new Error("roundNumber and turnNumber must be positive integers");
+    }
+
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
+
+    const adminClient = await createAdminContractClient(options?.contractId || undefined);
+    const submitZkCommit = (adminClient as any).submit_zk_commit;
+    if (typeof submitZkCommit !== "function") {
+        throw new Error("Deployed contract does not expose submit_zk_commit");
+    }
+
+    const tx = await submitZkCommit({
+        session_id: sessionId,
+        player: playerAddress,
+        round: roundNumber,
+        turn: turnNumber,
+        commitment: commitmentBytes,
+    });
+
+    const authEntryXdr = getPlayerAuthEntryXdr(tx.simulationData?.result?.auth, playerAddress);
+    const transactionXdr = tx.toXDR();
+
+    return { sessionId, transactionXdr, authEntryXdr };
+}
+
+/**
+ * Submit a previously prepared private round ZK commit transaction with signed auth.
+ */
+export async function submitSignedZkCommitOnChain(
+    matchId: string,
+    playerAddress: string,
+    roundNumber: number,
+    turnNumber: number,
+    commitmentHex: string,
+    signedAuthEntryXdr: string,
+    transactionXdr: string,
+    options?: { contractId?: string; sessionId?: number },
+): Promise<OnChainResult> {
+    if (!isClientSignedActionConfigured()) {
+        return { success: false, error: "Client-signed action flow is not configured" };
+    }
+
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+
+    const adminKeypair = getAdminKeypair();
+    if (!adminKeypair) {
+        return { success: false, error: "Admin keypair not available", sessionId };
+    }
+
+    if (!Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
+        return { success: false, error: "roundNumber and turnNumber must be positive integers", sessionId };
+    }
+
+    const lockKey = `admin:${options?.contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    return withAdminSubmissionLock(lockKey, async () => {
+        const playerShort = `${playerAddress.slice(0, 6)}…${playerAddress.slice(-4)}`;
+        console.log(
+            `[Stellar][submitSignedZkCommitOnChain] start match=${matchId} session=${sessionId} round=${roundNumber} turn=${turnNumber} player=${playerShort} txXdrLen=${transactionXdr?.length || 0} authXdrLen=${signedAuthEntryXdr?.length || 0}`,
+        );
+
+        const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
+
+        const submitWithXdr = async (xdrToSubmit: string): Promise<{ success: boolean; txHash?: string; error?: string }> => {
+            try {
+                const adminClient = await createAdminContractClient(options?.contractId || undefined);
+                const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(xdrToSubmit, {
+                    [addressKey(playerAddress)]: signedAuthEntryXdr,
+                });
+
+                if (replacedCount === 0) {
+                    console.warn(
+                        `[Stellar][submitSignedZkCommitOnChain] auth injection replacedCount=0 match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}`,
+                    );
+                    return { success: false, error: "Signed auth entry did not match transaction auth entries" };
+                }
+
+                console.log(
+                    `[Stellar][submitSignedZkCommitOnChain] auth injected match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort} replacedCount=${replacedCount}`,
+                );
+
+                const tx = adminClient.txFromXDR(updatedXdr);
+                await withTimeout(
+                    tx.simulate(),
+                    STELLAR_TX_SEND_TIMEOUT_MS,
+                    `tx.simulate() timed out after ${STELLAR_TX_SEND_TIMEOUT_MS}ms`,
+                );
+                const { txHash } = await signAndSendTx(tx);
+                console.log(
+                    `[Stellar][submitSignedZkCommitOnChain] send success match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort} txHash=${txHash || "n/a"}`,
+                );
+                return { success: true, txHash };
+            } catch (err: any) {
+                const baseMessage = err instanceof Error ? err.message : String(err);
+                const decoded = withDecodedResult(err, baseMessage);
+                console.warn(
+                    `[Stellar][submitSignedZkCommitOnChain] send error match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort} error=${decoded}`,
+                );
+                return { success: false, error: decoded };
+            }
+        };
+
+        const buildFreshCommitXdr = async (): Promise<string> => {
+            const adminClient = await createAdminContractClient(options?.contractId || undefined);
+            const submitZkCommit = (adminClient as any).submit_zk_commit;
+            if (typeof submitZkCommit !== "function") {
+                throw new Error("Deployed contract does not expose submit_zk_commit");
+            }
+
+            const freshTx = await submitZkCommit({
+                session_id: sessionId,
+                player: playerAddress,
+                round: roundNumber,
+                turn: turnNumber,
+                commitment: commitmentBytes,
+            });
+
+            return freshTx.toXDR();
+        };
+
+        try {
+            const maxAttempts = 5;
+            let xdrToSubmit = transactionXdr;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                console.log(
+                    `[Stellar][submitSignedZkCommitOnChain] attempt=${attempt}/${maxAttempts} match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}`,
+                );
+                const result = await submitWithXdr(xdrToSubmit);
+                if (result.success) {
+                    return { success: true, txHash: result.txHash, sessionId };
+                }
+
+                const errorText = String(result.error || "");
+                const retryable = /txBadSeq|TRY_AGAIN_LATER|temporar|timeout|Sending the transaction to the network failed/i.test(errorText);
+                if (!retryable || attempt === maxAttempts) {
+                    console.warn(
+                        `[Stellar][submitSignedZkCommitOnChain] giving up attempt=${attempt} retryable=${retryable} match=${matchId} round=${roundNumber} turn=${turnNumber} player=${playerShort}`,
+                    );
+                    return { success: false, error: errorText || "Failed to submit signed zk commit", sessionId };
+                }
+
+                const backoffMs = 150 * attempt;
+                await sleep(backoffMs);
+                xdrToSubmit = await buildFreshCommitXdr();
+            }
+
+            return { success: false, error: "Failed to submit signed zk commit after retries", sessionId };
+        } catch (err: any) {
+            const baseMessage = err instanceof Error ? err.message : String(err);
+            return { success: false, error: withDecodedResult(err, baseMessage), sessionId };
+        }
+    });
+}
+
+/**
  * Submit a previously prepared move transaction with the player's signed auth entry.
  */
 export async function submitSignedMoveOnChain(
@@ -1303,23 +1539,29 @@ export async function setZkGateRequiredOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    try {
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const setZkGateRequired = (client as any).set_zk_gate_required;
-        if (typeof setZkGateRequired !== "function") {
-            return {
-                success: false,
-                error: "Deployed contract does not expose set_zk_gate_required. Redeploy the updated veilstar-brawl contract and restart server.",
-            };
-        }
+    const lockKey = `admin-gate:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    return withAdminSubmissionLock(lockKey, async () => {
+        try {
+            const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+            const setZkGateRequired = (client as any).set_zk_gate_required;
+            if (typeof setZkGateRequired !== "function") {
+                return {
+                    success: false,
+                    error: "Deployed contract does not expose set_zk_gate_required. Redeploy the updated veilstar-brawl contract and restart server.",
+                };
+            }
 
-        const tx = await setZkGateRequired({ required });
-        const { txHash } = await signAndSendTx(tx);
-        return { success: true, txHash };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-    }
+            const tx = await setZkGateRequired({ required });
+            const { txHash } = await signAndSendTx(tx);
+            return { success: true, txHash };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (/"status"\s*:\s*"DUPLICATE"|\bDUPLICATE\b/i.test(message)) {
+                return { success: true };
+            }
+            return { success: false, error: message };
+        }
+    });
 }
 
 export async function submitZkCommitOnChain(
@@ -1402,6 +1644,8 @@ export async function submitZkVerificationOnChain(
         return { success: false, error: "Admin keypair not available", sessionId };
     }
 
+    const lockKey = `admin-zk-verify:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    return withAdminSubmissionLock(lockKey, async () => {
     try {
         const commitmentBytes = normalizeCommitmentHexToBytes32(commitmentHex);
         const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
@@ -1451,6 +1695,7 @@ export async function submitZkVerificationOnChain(
         const message = err instanceof Error ? err.message : String(err);
         return { success: false, error: message, sessionId };
     }
+    });
 }
 
 export async function submitZkMatchOutcomeOnChain(
@@ -1607,23 +1852,29 @@ export async function setZkVerifierContractOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    try {
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const setVerifier = (client as any).set_zk_verifier_contract;
-        if (typeof setVerifier !== "function") {
-            return {
-                success: false,
-                error: "Deployed contract does not expose set_zk_verifier_contract. Redeploy veilstar-brawl and restart server.",
-            };
-        }
+    const lockKey = `admin-zk-setverifier:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    return withAdminSubmissionLock(lockKey, async () => {
+        try {
+            const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+            const setVerifier = (client as any).set_zk_verifier_contract;
+            if (typeof setVerifier !== "function") {
+                return {
+                    success: false,
+                    error: "Deployed contract does not expose set_zk_verifier_contract. Redeploy veilstar-brawl and restart server.",
+                };
+            }
 
-        const tx = await setVerifier({ verifier_contract: verifierContractAddress });
-        const { txHash } = await signAndSendTx(tx);
-        return { success: true, txHash };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-    }
+            const tx = await setVerifier({ verifier_contract: verifierContractAddress });
+            const { txHash } = await signAndSendTx(tx);
+            return { success: true, txHash };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (/"status"\s*:\s*"DUPLICATE"|\bDUPLICATE\b/i.test(message)) {
+                return { success: true };
+            }
+            return { success: false, error: message };
+        }
+    });
 }
 
 export async function setZkVerifierVkIdOnChain(
@@ -1640,24 +1891,30 @@ export async function setZkVerifierVkIdOnChain(
         return { success: false, error: "Admin keypair not available" };
     }
 
-    try {
-        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
-        const setVkId = (client as any).set_zk_verifier_vk_id;
-        if (typeof setVkId !== "function") {
-            return {
-                success: false,
-                error: "Deployed contract does not expose set_zk_verifier_vk_id. Redeploy veilstar-brawl and restart server.",
-            };
-        }
+    const lockKey = `admin-zk-setvk:${contractId || CONTRACT_ID}:${adminKeypair.publicKey()}`;
+    return withAdminSubmissionLock(lockKey, async () => {
+        try {
+            const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+            const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+            const setVkId = (client as any).set_zk_verifier_vk_id;
+            if (typeof setVkId !== "function") {
+                return {
+                    success: false,
+                    error: "Deployed contract does not expose set_zk_verifier_vk_id. Redeploy veilstar-brawl and restart server.",
+                };
+            }
 
-        const tx = await setVkId({ vk_id: vkIdBytes });
-        const { txHash } = await signAndSendTx(tx);
-        return { success: true, txHash };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-    }
+            const tx = await setVkId({ vk_id: vkIdBytes });
+            const { txHash } = await signAndSendTx(tx);
+            return { success: true, txHash };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (/"status"\s*:\s*"DUPLICATE"|\bDUPLICATE\b/i.test(message)) {
+                return { success: true };
+            }
+            return { success: false, error: message };
+        }
+    });
 }
 
 function fieldToBytes32(value: string, label: string): Buffer {

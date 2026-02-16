@@ -2,6 +2,35 @@ import { describe, expect, it } from "bun:test";
 import { resolveRound } from "./round-resolver";
 
 describe("round-resolver power surge integration", () => {
+  it("applies tx-storm priority boost to break simultaneous-hit clashes", () => {
+    const result = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "punch",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-priority",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "tx-storm",
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player2.outcome).toBe("staggered");
+    expect(result.player1.damageDealt).toBe(10);
+    expect(result.player2.damageDealt).toBe(0);
+    expect(result.player1HealthAfter).toBe(100);
+    expect(result.player2HealthAfter).toBe(90);
+  });
+
   it("applies pruned-rage to bypass block and increase punch damage", () => {
     const result = resolveRound(
       {
@@ -54,15 +83,15 @@ describe("round-resolver power surge integration", () => {
     expect(result.player1HealthAfter).toBe(85);
   });
 
-  it("applies vaultbreaker steal + mempool-congest drain to character energy", () => {
+  it("applies converted vaultbreaker kick double-hit behavior", () => {
     const result = resolveRound(
       {
-        player1Move: "punch",
-        player2Move: "special",
+        player1Move: "kick",
+        player2Move: "punch",
         player1Health: 100,
         player2Health: 100,
-        player1Energy: 10,
-        player2Energy: 40,
+        player1Energy: 100,
+        player2Energy: 100,
         player1Guard: 0,
         player2Guard: 0,
       },
@@ -71,17 +100,17 @@ describe("round-resolver power surge integration", () => {
         roundNumber: 1,
         turnNumber: 1,
         player1Surge: "vaultbreaker",
-        player2Surge: "mempool-congest",
+        player2Surge: null,
       }
     );
 
-    expect(result.player1EnergyAfter).toBe(48);
-    expect(result.player2EnergyAfter).toBe(0);
-    expect(result.player2.energyDrained).toBe(40);
-    expect(result.player1.energyDrained).toBe(10);
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player2.outcome).toBe("staggered");
+    expect(result.player1.damageDealt).toBe(30);
+    expect(result.player2HealthAfter).toBe(70);
   });
 
-  it("applies finality-fist extra special energy cost", () => {
+  it("applies finality-fist crit without extra special energy cost", () => {
     const result = resolveRound(
       {
         player1Move: "special",
@@ -102,7 +131,8 @@ describe("round-resolver power surge integration", () => {
       }
     );
 
-    expect(result.player1EnergyAfter).toBe(34);
+    expect(result.player1.damageDealt).toBe(42);
+    expect(result.player1EnergyAfter).toBe(58);
   });
 
   it("ghost-dag prevents special from being counter-missed by punch", () => {
@@ -209,5 +239,57 @@ describe("round-resolver power surge integration", () => {
     expect(result.player1.outcome).toBe("hit");
     expect(result.player1HealthAfter).toBe(100);
     expect(result.player2HealthAfter).toBe(92);
+  });
+
+  it("applies next-turn stun when block is shattered by special", () => {
+    const result = resolveRound(
+      {
+        player1Move: "special",
+        player2Move: "block",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-guard-shattered-stun",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player2.outcome).toBe("shattered");
+    expect(result.player2IsStunnedNext).toBe(true);
+    expect(result.player1IsStunnedNext).toBe(false);
+  });
+
+  it("applies next-turn stun when guard meter overflows to break", () => {
+    const result = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "block",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 90,
+      },
+      {
+        matchId: "m-guard-meter-break-stun",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player2.outcome).toBe("guarding");
+    expect(result.player2GuardAfter).toBe(0);
+    expect(result.player2IsStunnedNext).toBe(true);
   });
 });

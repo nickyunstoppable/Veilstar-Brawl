@@ -73,13 +73,13 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "tx-storm": {
     id: "tx-storm",
-    effectType: "energy_regen_with_cost",
-    effectParams: { energyRegenBonus: 25, hpCost: 4 },
+    effectType: "priority_boost",
+    effectParams: { priorityBoost: 2 },
   },
   "mempool-congest": {
     id: "mempool-congest",
-    effectType: "energy_drain",
-    effectParams: { energyDrain: 35 },
+    effectType: "damage_reflect",
+    effectParams: { reflectPercent: 0.75 },
   },
   "blue-set-heal": {
     id: "blue-set-heal",
@@ -93,8 +93,8 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "10bps-barrage": {
     id: "10bps-barrage",
-    effectType: "energy_regen",
-    effectParams: { energyRegenBonus: 20 },
+    effectType: "double_hit",
+    effectParams: { affectedMoves: ["punch"] },
   },
   "pruned-rage": {
     id: "pruned-rage",
@@ -119,7 +119,7 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   "finality-fist": {
     id: "finality-fist",
     effectType: "critical_special",
-    effectParams: { damageMultiplier: 1.7, energyCostBonus: 24 },
+    effectParams: { damageMultiplier: 1.7 },
   },
   "bps-blitz": {
     id: "bps-blitz",
@@ -128,8 +128,8 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "vaultbreaker": {
     id: "vaultbreaker",
-    effectType: "energy_steal",
-    effectParams: { energySteal: 50 },
+    effectType: "double_hit",
+    effectParams: { affectedMoves: ["kick"] },
   },
   "chainbreaker": {
     id: "chainbreaker",
@@ -270,7 +270,7 @@ function calculateCardModifiers(card: SurgeCardDefinition | null): SurgeModifier
     case "critical_special":
       mods.criticalHit = true;
       mods.damageMultiplier = params.damageMultiplier ?? 1.7;
-      mods.specialEnergyCost = params.energyCostBonus ?? 12;
+      mods.specialEnergyCost = params.energyCostBonus ?? 0;
       break;
     case "energy_regen":
       mods.energyRegenBonus = params.energyRegenBonus ?? 18;

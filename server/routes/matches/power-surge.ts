@@ -16,7 +16,6 @@ import {
 const USE_OFFCHAIN_ACTIONS = (process.env.ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 import {
-  computeStunFlags,
   getOrCreateRoundDeck,
   isPowerSurgeCardId,
   type PowerSurgeCardId,
@@ -264,28 +263,6 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
       selectedAt: Date.now(),
       onChainTxHash,
       onChainSkippedReason: null,
-    });
-
-    // Compute legacy stun flags and sync fight_state_snapshot immediately.
-    // Current surge deck has no stun card, so these remain false.
-    const { player1Stunned, player2Stunned } = computeStunFlags(round.player1Selection, round.player2Selection);
-
-    await supabase
-      .from("fight_state_snapshots")
-      .update({
-        player1_is_stunned: player1Stunned,
-        player2_is_stunned: player2Stunned,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("match_id", matchId);
-
-    await broadcastGameEvent(matchId, "fight_state_update", {
-      matchId,
-      update: {
-        player1IsStunned: player1Stunned,
-        player2IsStunned: player2Stunned,
-      },
-      timestamp: Date.now(),
     });
 
     return Response.json({ success: true, onChainTxHash, onChainSkippedReason: null });

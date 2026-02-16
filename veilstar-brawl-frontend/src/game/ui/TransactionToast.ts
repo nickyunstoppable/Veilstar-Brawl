@@ -39,6 +39,22 @@ interface TransactionToastConfig {
   onClose?: () => void;
 }
 
+function isSceneUsable(scene: Phaser.Scene): boolean {
+  const sysAny = scene.sys as any;
+  if (!scene || !sysAny || sysAny.isDestroyed) return false;
+
+  const status = sysAny.settings?.status;
+  if (typeof status === "number" && status >= Phaser.Scenes.SHUTDOWN) {
+    return false;
+  }
+
+  return !!scene.add
+    && !!scene.tweens
+    && !!scene.time
+    && !!sysAny.displayList
+    && !!sysAny.updateList;
+}
+
 /**
  * TransactionToast class - Phaser container for transaction confirmation notifications
  */
@@ -59,6 +75,10 @@ export class TransactionToast extends Phaser.GameObjects.Container {
   constructor(config: TransactionToastConfig) {
     super(config.scene, config.x, config.y);
     this.config = { duration: 3000, ...config };
+
+    if (!isSceneUsable(config.scene)) {
+      return;
+    }
 
     this.createBackground();
     this.createContent();
@@ -229,6 +249,8 @@ export class TransactionToast extends Phaser.GameObjects.Container {
    * Setup auto-close timer
    */
   private setupAutoClose(): void {
+    if (!isSceneUsable(this.scene)) return;
+
     this.autoCloseTimer = this.scene.time.delayedCall(
       this.config.duration!,
       () => {
@@ -241,6 +263,8 @@ export class TransactionToast extends Phaser.GameObjects.Container {
    * Animate the toast sliding in
    */
   private animateIn(): void {
+    if (!isSceneUsable(this.scene)) return;
+
     // Start from right side off-screen
     this.setAlpha(0);
     this.setX(this.config.x + 100);
@@ -262,6 +286,12 @@ export class TransactionToast extends Phaser.GameObjects.Container {
     if (this.autoCloseTimer) {
       this.autoCloseTimer.destroy();
       this.autoCloseTimer = undefined;
+    }
+
+    if (!isSceneUsable(this.scene)) {
+      this.config.onClose?.();
+      this.destroy();
+      return;
     }
 
     // Animate out

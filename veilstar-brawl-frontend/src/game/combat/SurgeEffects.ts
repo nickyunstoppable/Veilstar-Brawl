@@ -206,7 +206,7 @@ function calculateCardModifiers(card: PowerSurgeCard | null): SurgeModifiers {
     case "critical_special":
       mods.criticalHit = true;
       mods.damageMultiplier = params.damageMultiplier ?? 1.7;
-      mods.specialEnergyCost = params.energyCostBonus ?? 12;
+      mods.specialEnergyCost = params.energyCostBonus ?? 0;
       break;
 
     case "energy_regen":

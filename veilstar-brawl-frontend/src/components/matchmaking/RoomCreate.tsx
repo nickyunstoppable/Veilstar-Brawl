@@ -36,6 +36,7 @@ export default function RoomCreate({ onRoomCreated, onCancel }: RoomCreateProps)
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const roomChannelRef = useRef<RealtimeChannel | null>(null);
+  const hasNavigatedRef = useRef(false);
 
   const numericStake = useMemo(() => {
     const parsed = Number(stakeAmount);
@@ -49,6 +50,19 @@ export default function RoomCreate({ onRoomCreated, onCancel }: RoomCreateProps)
     if (!matchId) return;
 
     const supabase = getSupabaseClient();
+    let isUnmounted = false;
+
+    hasNavigatedRef.current = false;
+
+    const navigateToMatch = () => {
+      if (hasNavigatedRef.current || isUnmounted) return;
+      hasNavigatedRef.current = true;
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+      navigateTo(`/match/${matchId}`);
+    };
 
     if (roomChannelRef.current) {
       supabase.removeChannel(roomChannelRef.current);
@@ -58,28 +72,41 @@ export default function RoomCreate({ onRoomCreated, onCancel }: RoomCreateProps)
     const roomChannel = supabase
       .channel(`game:${matchId}`, { config: { broadcast: { self: true } } })
       .on("broadcast", { event: "room_joined" }, () => {
-        if (pollingRef.current) {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
-        }
-        navigateTo(`/match/${matchId}`);
+        navigateToMatch();
       })
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "matches",
+          filter: `id=eq.${matchId}`,
+        },
+        (payload) => {
+          const next = payload.new as { player2_address?: string | null; status?: string | null };
+          if (next?.player2_address || (next?.status && next.status !== "waiting")) {
+            navigateToMatch();
+          }
+        }
+      )
       .subscribe();
 
     roomChannelRef.current = roomChannel;
 
     const poll = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/matches/${matchId}?lite=1`);
+        const res = await fetch(`${API_BASE}/api/matches/${matchId}?lite=1&t=${Date.now()}`, {
+          cache: "no-store",
+          headers: {
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            Pragma: "no-cache",
+          },
+        });
         if (!res.ok) return;
         const data = await res.json();
         const match = data?.match;
-        if (match?.player2_address) {
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-          }
-          navigateTo(`/match/${matchId}`);
+        if (match?.player2_address || (match?.status && match.status !== "waiting")) {
+          navigateToMatch();
         }
       } catch {
         // keep polling
@@ -87,9 +114,10 @@ export default function RoomCreate({ onRoomCreated, onCancel }: RoomCreateProps)
     };
 
     poll();
-    pollingRef.current = setInterval(poll, 2000);
+    pollingRef.current = setInterval(poll, 1000);
 
     return () => {
+      isUnmounted = true;
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
         pollingRef.current = null;

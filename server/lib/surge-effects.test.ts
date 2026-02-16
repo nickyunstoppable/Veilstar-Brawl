@@ -19,22 +19,25 @@ describe("surge-effects", () => {
 
     expect(finality.criticalHit).toBe(true);
     expect(finality.damageMultiplier).toBe(1.7);
-    expect(finality.specialEnergyCost).toBe(24);
+    expect(finality.specialEnergyCost).toBe(0);
   });
 
-  it("applies vaultbreaker and mempool-congest energy logic correctly", () => {
-    const { player1Modifiers: vault, player2Modifiers: drain } = calculateSurgeEffects(
+  it("applies converted non-energy card logic correctly", () => {
+    const { player1Modifiers: vault, player2Modifiers: mempool } = calculateSurgeEffects(
       "vaultbreaker",
-      "mempool-congest"
+      "mempool-congest",
     );
 
-    const vaultHit = applyEnergyEffects(vault, 40, true);
-    expect(vaultHit.energyStolen).toBe(40);
-    expect(vaultHit.energyBurned).toBe(0);
+    expect(vault.doubleHit).toBe(true);
+    expect(vault.doubleHitMoves).toEqual(["kick"]);
 
-    const drainNoHit = applyEnergyEffects(drain, 80, false);
-    expect(drainNoHit.energyBurned).toBe(35);
-    expect(drainNoHit.energyStolen).toBe(0);
+    const reflected = applyDefensiveModifiers(20, mempool, true);
+    expect(reflected.actualDamage).toBe(20);
+    expect(reflected.reflectedDamage).toBe(15);
+
+    const noEnergySideEffect = applyEnergyEffects(vault, 80, true);
+    expect(noEnergySideEffect.energyBurned).toBe(0);
+    expect(noEnergySideEffect.energyStolen).toBe(0);
   });
 
   it("applies damage, defense, and hp effects in isolation", () => {
