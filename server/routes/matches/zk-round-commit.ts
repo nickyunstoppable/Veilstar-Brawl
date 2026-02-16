@@ -9,8 +9,12 @@ import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setZkGateRequi
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
+const ZK_VERIFY_COMMIT_PROOF = (process.env.ZK_VERIFY_COMMIT_PROOF ?? "true") === "true";
+const ZK_SYNC_ONCHAIN_VERIFY = (process.env.ZK_SYNC_ONCHAIN_VERIFY ?? "true") === "true";
+const ZK_REVERIFY_ON_RESOLVE = (process.env.ZK_REVERIFY_ON_RESOLVE ?? "false") === "true";
 const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
 const ZK_GROTH16_VK_ID = (process.env.ZK_GROTH16_VK_ID || "").trim();
+const PRIVATE_ROUND_TURN_DELAY_MS = Number(process.env.ZK_PRIVATE_ROUND_TURN_DELAY_MS ?? "1200");
 const privateRoundResolveLocks = new Set<string>();
 const RESOLVE_LOCK_STALE_SECONDS = Number(process.env.ZK_RESOLVE_LOCK_STALE_SECONDS ?? "45");
 const RESOLVE_LOCK_OWNER = `${process.env.FLY_ALLOC_ID || process.env.HOSTNAME || "local"}:${process.pid}`;
@@ -19,6 +23,7 @@ const onChainSetupCache = new Map<string, {
     verifierConfigured?: boolean;
     vkConfigured?: boolean;
 }>();
+const onChainSetupInFlight = new Map<string, Promise<{ success: boolean; error?: string | null }>>();
 
 interface CommitPrivateRoundBody {
     clientTraceId?: string;
@@ -99,6 +104,113 @@ async function runSetupWithRetry(
     }
 
     return { success: false, error: lastError };
+}
+
+async function runOnChainSetup(params: {
+    setupKey: string;
+    contractId?: string;
+    strictMode: boolean;
+}): Promise<{ success: boolean; error?: string | null }> {
+    const { setupKey, contractId, strictMode } = params;
+    const setupState = onChainSetupCache.get(setupKey) || {};
+
+    if (!setupState.gateEnabled) {
+        const gateEnableResult = await runSetupWithRetry(
+            "set_zk_gate_required",
+            () => setZkGateRequiredOnChain(true, { contractId }),
+        );
+
+        if (!gateEnableResult.success && strictMode) {
+            return {
+                success: false,
+                error: `Failed to enable on-chain ZK gate: ${gateEnableResult.error || "unknown"}`,
+            };
+        }
+
+        if (gateEnableResult.success) {
+            setupState.gateEnabled = true;
+            onChainSetupCache.set(setupKey, setupState);
+        }
+    }
+
+    if (!ZK_GROTH16_VERIFIER_CONTRACT_ID) {
+        if (strictMode) {
+            return {
+                success: false,
+                error: "ZK_GROTH16_VERIFIER_CONTRACT_ID is required in strict mode",
+            };
+        }
+    } else if (!setupState.verifierConfigured) {
+        const setVerifierResult = await runSetupWithRetry(
+            "set_zk_verifier_contract",
+            () => setZkVerifierContractOnChain(
+                ZK_GROTH16_VERIFIER_CONTRACT_ID,
+                { contractId },
+            ),
+        );
+
+        if (!setVerifierResult.success && strictMode) {
+            return {
+                success: false,
+                error: `Failed to configure on-chain verifier contract: ${setVerifierResult.error || "unknown"}`,
+            };
+        }
+
+        if (setVerifierResult.success) {
+            setupState.verifierConfigured = true;
+            onChainSetupCache.set(setupKey, setupState);
+        }
+    }
+
+    if (!ZK_GROTH16_VK_ID) {
+        if (strictMode) {
+            return {
+                success: false,
+                error: "ZK_GROTH16_VK_ID is required in strict mode",
+            };
+        }
+    } else if (!setupState.vkConfigured) {
+        const setVkIdResult = await runSetupWithRetry(
+            "set_zk_verifier_vk_id",
+            () => setZkVerifierVkIdOnChain(
+                ZK_GROTH16_VK_ID,
+                { contractId },
+            ),
+        );
+
+        if (!setVkIdResult.success && strictMode) {
+            return {
+                success: false,
+                error: `Failed to configure on-chain verifier vk id: ${setVkIdResult.error || "unknown"}`,
+            };
+        }
+
+        if (setVkIdResult.success) {
+            setupState.vkConfigured = true;
+            onChainSetupCache.set(setupKey, setupState);
+        }
+    }
+
+    return { success: true };
+}
+
+async function ensureOnChainSetupSingleFlight(params: {
+    setupKey: string;
+    contractId?: string;
+    strictMode: boolean;
+}): Promise<{ success: boolean; error?: string | null }> {
+    const existing = onChainSetupInFlight.get(params.setupKey);
+    if (existing) {
+        return existing;
+    }
+
+    const promise = runOnChainSetup(params)
+        .finally(() => {
+            onChainSetupInFlight.delete(params.setupKey);
+        });
+
+    onChainSetupInFlight.set(params.setupKey, promise);
+    return promise;
 }
 
 async function getResolvedRoundIdFromCommits(
@@ -347,23 +459,28 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             );
         }
 
-        const verification = await verifyNoirProof({
-            proof,
-            publicInputs: body.publicInputs,
-            transcriptHash: body.transcriptHash,
-            matchId,
-            winnerAddress: address,
-        });
+        let verification: Awaited<ReturnType<typeof verifyNoirProof>> | null = null;
+        if (ZK_VERIFY_COMMIT_PROOF) {
+            verification = await verifyNoirProof({
+                proof,
+                publicInputs: body.publicInputs,
+                transcriptHash: body.transcriptHash,
+                matchId,
+                winnerAddress: address,
+            });
 
-        if (!verification.ok) {
-            return Response.json({ error: "Commit proof verification failed" }, { status: 400 });
+            if (!verification.ok) {
+                return Response.json({ error: "Commit proof verification failed" }, { status: 400 });
+            }
+
+            if ((process.env.ZK_STRICT_FINALIZE ?? "true") !== "false" && verification.backend === "disabled") {
+                return Response.json({ error: "Strict ZK mode requires proof verification to be enabled" }, { status: 409 });
+            }
+
+            console.log(`[ZK Round Commit] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+        } else {
+            console.log(`[ZK Round Commit] Commit proof verification deferred to resolve match=${matchId} round=${roundNumber}`);
         }
-
-        if ((process.env.ZK_STRICT_FINALIZE ?? "true") !== "false" && verification.backend === "disabled") {
-            return Response.json({ error: "Strict ZK mode requires proof verification to be enabled" }, { status: 409 });
-        }
-
-        console.log(`[ZK Round Commit] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
 
         let onChainCommitTxHash = body.onChainCommitTxHash || null;
         let onChainVerificationTxHash: string | null = null;
@@ -390,30 +507,20 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
 
             if (isOnChainRegistrationConfigured()) {
                 const setupKey = String(match.onchain_contract_id || "default");
-                const setupState = onChainSetupCache.get(setupKey) || {};
+                const setupResult = await ensureOnChainSetupSingleFlight({
+                    setupKey,
+                    contractId: match.onchain_contract_id || undefined,
+                    strictMode,
+                });
 
-                if (!setupState.gateEnabled) {
-                    const gateEnableResult = await runSetupWithRetry(
-                        "set_zk_gate_required",
-                        () => setZkGateRequiredOnChain(true, {
-                            contractId: match.onchain_contract_id || undefined,
-                        }),
+                if (!setupResult.success && strictMode) {
+                    return Response.json(
+                        {
+                            error: "Failed to initialize on-chain ZK setup",
+                            details: setupResult.error || null,
+                        },
+                        { status: 502 },
                     );
-
-                    if (!gateEnableResult.success && strictMode) {
-                        return Response.json(
-                            {
-                                error: "Failed to enable on-chain ZK gate",
-                                details: gateEnableResult.error || null,
-                            },
-                            { status: 502 },
-                        );
-                    }
-
-                    if (gateEnableResult.success) {
-                        setupState.gateEnabled = true;
-                        onChainSetupCache.set(setupKey, setupState);
-                    }
                 }
 
                 const onChainCommit = body.signedAuthEntryXdr && body.transactionXdr
@@ -473,75 +580,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                     onChainCommitTxHash = onChainCommit.txHash;
                 }
 
-                if (!ZK_GROTH16_VERIFIER_CONTRACT_ID) {
-                    if (strictMode) {
-                        return Response.json(
-                            { error: "ZK_GROTH16_VERIFIER_CONTRACT_ID is required in strict mode" },
-                            { status: 503 },
-                        );
-                    }
-                } else {
-                    if (!setupState.verifierConfigured) {
-                        const setVerifierResult = await runSetupWithRetry(
-                            "set_zk_verifier_contract",
-                            () => setZkVerifierContractOnChain(
-                                ZK_GROTH16_VERIFIER_CONTRACT_ID,
-                                { contractId: match.onchain_contract_id || undefined },
-                            ),
-                        );
-
-                        if (!setVerifierResult.success && strictMode) {
-                            return Response.json(
-                                {
-                                    error: "Failed to configure on-chain verifier contract",
-                                    details: setVerifierResult.error || null,
-                                },
-                                { status: 502 },
-                            );
-                        }
-
-                        if (setVerifierResult.success) {
-                            setupState.verifierConfigured = true;
-                            onChainSetupCache.set(setupKey, setupState);
-                        }
-                    }
-                }
-
-                if (!ZK_GROTH16_VK_ID) {
-                    if (strictMode) {
-                        return Response.json(
-                            { error: "ZK_GROTH16_VK_ID is required in strict mode" },
-                            { status: 503 },
-                        );
-                    }
-                } else {
-                    if (!setupState.vkConfigured) {
-                        const setVkIdResult = await runSetupWithRetry(
-                            "set_zk_verifier_vk_id",
-                            () => setZkVerifierVkIdOnChain(
-                                ZK_GROTH16_VK_ID,
-                                { contractId: match.onchain_contract_id || undefined },
-                            ),
-                        );
-
-                        if (!setVkIdResult.success && strictMode) {
-                            return Response.json(
-                                {
-                                    error: "Failed to configure on-chain verifier vk id",
-                                    details: setVkIdResult.error || null,
-                                },
-                                { status: 502 },
-                            );
-                        }
-
-                        if (setVkIdResult.success) {
-                            setupState.vkConfigured = true;
-                            onChainSetupCache.set(setupKey, setupState);
-                        }
-                    }
-                }
-
-                const onChainVerification = await submitZkVerificationOnChain(
+                const runOnChainVerification = async () => submitZkVerificationOnChain(
                     matchId,
                     address,
                     roundNumber,
@@ -556,18 +595,44 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                     },
                 );
 
-                if (!onChainVerification.success && strictMode) {
-                    return Response.json(
-                        {
-                            error: "On-chain ZK verification failed",
-                            details: onChainVerification.error || null,
-                        },
-                        { status: 502 },
-                    );
-                }
+                if (ZK_SYNC_ONCHAIN_VERIFY) {
+                    const onChainVerification = await runOnChainVerification();
 
-                if (onChainVerification.success && onChainVerification.txHash) {
-                    onChainVerificationTxHash = onChainVerification.txHash;
+                    if (!onChainVerification.success && strictMode) {
+                        return Response.json(
+                            {
+                                error: "On-chain ZK verification failed",
+                                details: onChainVerification.error || null,
+                            },
+                            { status: 502 },
+                        );
+                    }
+
+                    if (onChainVerification.success && onChainVerification.txHash) {
+                        onChainVerificationTxHash = onChainVerification.txHash;
+                    }
+                } else {
+                    void runOnChainVerification()
+                        .then((onChainVerification) => {
+                            if (!onChainVerification.success) {
+                                console.error(
+                                    `[ZK Round Commit] Async on-chain verification failed match=${matchId} round=${roundNumber} player=${address}: ${onChainVerification.error || "unknown"}`,
+                                );
+                                return;
+                            }
+
+                            if (onChainVerification.txHash) {
+                                console.log(
+                                    `[ZK Round Commit] Async on-chain verification confirmed match=${matchId} round=${roundNumber} tx=${onChainVerification.txHash}`,
+                                );
+                            }
+                        })
+                        .catch((verifyErr) => {
+                            const msg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+                            console.error(
+                                `[ZK Round Commit] Async on-chain verification exception match=${matchId} round=${roundNumber}: ${msg}`,
+                            );
+                        });
                 }
             }
         }
@@ -584,7 +649,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                     proof_public_inputs: body.publicInputs ?? null,
                     transcript_hash: body.transcriptHash ?? null,
                     onchain_commit_tx_hash: onChainCommitTxHash,
-                    verified_at: new Date().toISOString(),
+                    verified_at: verification ? new Date().toISOString() : null,
                     resolved_at: null,
                     resolved_round_id: null,
                     updated_at: new Date().toISOString(),
@@ -679,8 +744,8 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             onChainCommitTxHash,
             onChainVerificationTxHash,
             zkVerification: {
-                backend: verification.backend,
-                command: verification.command,
+                backend: verification?.backend || "deferred_to_resolve",
+                command: verification?.command || null,
             },
         });
     } catch (err) {
@@ -772,7 +837,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
         const { data: submitterCommit, error: submitterCommitError } = await supabase
             .from("round_private_commits")
-            .select("commitment, encrypted_plan, proof_public_inputs, transcript_hash")
+            .select("commitment, encrypted_plan, proof_public_inputs, transcript_hash, verified_at")
             .eq("match_id", matchId)
             .eq("round_number", roundNumber)
             .eq("player_address", address)
@@ -966,23 +1031,62 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             });
         }
 
-        const verification = await verifyNoirProof({
-            proof,
-            publicInputs: body.publicInputs,
-            transcriptHash: body.transcriptHash,
-            matchId,
-            winnerAddress: body.expectedWinnerAddress?.trim() || address,
-        });
+        const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+        let verificationBackend = "commit_verified";
+        let verificationCommand: string | null = null;
+        let shouldRunResolveVerification = ZK_REVERIFY_ON_RESOLVE;
 
-        if (!verification.ok) {
-            return Response.json({ error: "Round resolution proof verification failed" }, { status: 400 });
+        if (!shouldRunResolveVerification && ZK_VERIFY_COMMIT_PROOF) {
+            const submitterVerifiedAt = (submitterCommit as any)?.verified_at;
+            if (!submitterVerifiedAt) {
+                shouldRunResolveVerification = true;
+                console.warn(
+                    `[ZK Round Resolve] Missing commit verification marker for submitter; falling back to resolve verification match=${matchId} round=${roundNumber}`,
+                );
+            } else {
+                const { data: verificationRows } = await supabase
+                    .from("round_private_commits")
+                    .select("player_address, verified_at")
+                    .eq("match_id", matchId)
+                    .eq("round_number", roundNumber)
+                    .is("resolved_round_id", null);
+
+                const verifiedMap = new Map((verificationRows || []).map((row: any) => [row.player_address, row.verified_at]));
+                const p1Verified = !!verifiedMap.get(match.player1_address);
+                const p2Verified = !!verifiedMap.get(match.player2_address);
+
+                if (strictMode && (!p1Verified || !p2Verified)) {
+                    shouldRunResolveVerification = true;
+                    console.warn(
+                        `[ZK Round Resolve] One or both commits unverified; falling back to resolve verification match=${matchId} round=${roundNumber} p1Verified=${p1Verified} p2Verified=${p2Verified}`,
+                    );
+                }
+            }
         }
 
-        if ((process.env.ZK_STRICT_FINALIZE ?? "true") !== "false" && verification.backend === "disabled") {
-            return Response.json({ error: "Strict ZK mode requires proof verification to be enabled" }, { status: 409 });
-        }
+        if (shouldRunResolveVerification) {
+            const verification = await verifyNoirProof({
+                proof,
+                publicInputs: body.publicInputs,
+                transcriptHash: body.transcriptHash,
+                matchId,
+                winnerAddress: body.expectedWinnerAddress?.trim() || address,
+            });
 
-        console.log(`[ZK Round Resolve] Proof verified match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+            if (!verification.ok) {
+                return Response.json({ error: "Round resolution proof verification failed" }, { status: 400 });
+            }
+
+            if (strictMode && verification.backend === "disabled") {
+                return Response.json({ error: "Strict ZK mode requires proof verification to be enabled" }, { status: 409 });
+            }
+
+            verificationBackend = verification.backend;
+            verificationCommand = verification.command;
+            console.log(`[ZK Round Resolve] Proof verified at resolve match=${matchId} round=${roundNumber} backend=${verification.backend}`);
+        } else {
+            console.log(`[ZK Round Resolve] Using verified commit proof match=${matchId} round=${roundNumber}`);
+        }
 
         await supabase
             .from("round_private_commits")
@@ -1047,8 +1151,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 player1Revealed: p1Revealed,
                 player2Revealed: p2Revealed,
                 zkVerification: {
-                    backend: verification.backend,
-                    command: verification.command,
+                    backend: verificationBackend,
+                    command: verificationCommand,
                 },
             });
         }
@@ -1061,8 +1165,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 alreadyResolved: true,
                 resolvedRoundId: existingResolvedRoundId,
                 zkVerification: {
-                    backend: verification.backend,
-                    command: verification.command,
+                    backend: verificationBackend,
+                    command: verificationCommand,
                 },
             });
         }
@@ -1075,8 +1179,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 alreadyResolved: true,
                 resolvedRoundId: resolveLockResult.resolvedRoundId || null,
                 zkVerification: {
-                    backend: verification.backend,
-                    command: verification.command,
+                    backend: verificationBackend,
+                    command: verificationCommand,
                 },
             });
         }
@@ -1089,8 +1193,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 awaitingResolver: true,
                 resolver: "in_progress",
                 zkVerification: {
-                    backend: verification.backend,
-                    command: verification.command,
+                    backend: verificationBackend,
+                    command: verificationCommand,
                 },
             });
         }
@@ -1106,8 +1210,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                     awaitingResolver: true,
                     resolver: "in_progress",
                     zkVerification: {
-                        backend: verification.backend,
-                        command: verification.command,
+                        backend: verificationBackend,
+                        command: verificationCommand,
                     },
                 });
             }
@@ -1202,7 +1306,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                     break;
                 }
 
-                await sleep(2600);
+                await sleep(Math.max(0, PRIVATE_ROUND_TURN_DELAY_MS));
             }
 
             if (!finalResolution || !finalResolvedRoundId) {
@@ -1227,8 +1331,8 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
                 roundNumber,
                 resolution: finalResolution,
                 zkVerification: {
-                    backend: verification.backend,
-                    command: verification.command,
+                    backend: verificationBackend,
+                    command: verificationCommand,
                 },
             });
         } finally {

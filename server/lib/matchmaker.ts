@@ -7,6 +7,15 @@
 import { getSupabase } from "./supabase";
 import { GAME_CONSTANTS } from "./game-types";
 
+type ChannelCacheEntry = {
+    channel: any;
+    ready: Promise<void>;
+    lastUsedAt: number;
+};
+
+const CHANNEL_CACHE_TTL_MS = Number(process.env.REALTIME_CHANNEL_CACHE_TTL_MS ?? "300000");
+const channelCache = new Map<string, ChannelCacheEntry>();
+
 export interface QueuedPlayer {
     address: string;
     rating: number;
@@ -521,6 +530,96 @@ async function sendBroadcast(channel: any, event: string, payload: Record<string
     }
 }
 
+function pruneStaleChannels(): void {
+    const now = Date.now();
+    for (const [key, entry] of channelCache.entries()) {
+        if (now - entry.lastUsedAt <= CHANNEL_CACHE_TTL_MS) continue;
+        channelCache.delete(key);
+        void getSupabase().removeChannel(entry.channel).catch(() => {
+            // best effort cleanup
+        });
+    }
+}
+
+function createReadyPromise(channel: any): Promise<void> {
+    if (typeof channel.httpSend === "function") {
+        return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error("Realtime subscribe timeout before broadcast"));
+        }, 2500);
+
+        channel.subscribe((status: string) => {
+            if (settled) return;
+
+            if (status === "SUBSCRIBED") {
+                settled = true;
+                clearTimeout(timeout);
+                resolve();
+                return;
+            }
+
+            if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+                settled = true;
+                clearTimeout(timeout);
+                reject(new Error(`Realtime channel subscribe failed: ${status}`));
+            }
+        });
+    });
+}
+
+function invalidateChannelCache(channelName: string): void {
+    const existing = channelCache.get(channelName);
+    if (!existing) return;
+    channelCache.delete(channelName);
+    void getSupabase().removeChannel(existing.channel).catch(() => {
+        // best effort cleanup
+    });
+}
+
+function getOrCreateCachedChannel(channelName: string): ChannelCacheEntry {
+    pruneStaleChannels();
+
+    const existing = channelCache.get(channelName);
+    if (existing) {
+        existing.lastUsedAt = Date.now();
+        return existing;
+    }
+
+    const supabase = getSupabase();
+    const channel = supabase.channel(channelName);
+    const entry: ChannelCacheEntry = {
+        channel,
+        ready: createReadyPromise(channel),
+        lastUsedAt: Date.now(),
+    };
+
+    channelCache.set(channelName, entry);
+    return entry;
+}
+
+async function broadcastViaCachedChannel(channelName: string, event: string, payload: Record<string, unknown>): Promise<void> {
+    const entry = getOrCreateCachedChannel(channelName);
+
+    try {
+        await entry.ready;
+        await sendBroadcast(entry.channel, event, payload);
+        entry.lastUsedAt = Date.now();
+    } catch (err) {
+        // stale/broken channel once: reset and retry once with a fresh channel
+        invalidateChannelCache(channelName);
+        const retryEntry = getOrCreateCachedChannel(channelName);
+        await retryEntry.ready;
+        await sendBroadcast(retryEntry.channel, event, payload);
+        retryEntry.lastUsedAt = Date.now();
+    }
+}
+
 export async function broadcastMatchFound(
     matchId: string,
     player1Address: string,
@@ -528,17 +627,12 @@ export async function broadcastMatchFound(
     selectionDeadlineAt: string
 ): Promise<void> {
     try {
-        const supabase = getSupabase();
-        const channel = supabase.channel("matchmaking:queue");
-
-        await sendBroadcast(channel as any, "match_found", {
+        await broadcastViaCachedChannel("matchmaking:queue", "match_found", {
             matchId,
             player1Address,
             player2Address,
             selectionDeadlineAt,
         });
-
-        await supabase.removeChannel(channel);
     } catch (error) {
         console.error("Failed to broadcast match found:", error);
     }
@@ -549,12 +643,8 @@ export async function broadcastGameEvent(
     event: string,
     payload: Record<string, unknown>
 ): Promise<void> {
-    const supabase = getSupabase();
-
     try {
-        const channel = supabase.channel(`game:${matchId}`);
-        await sendBroadcast(channel as any, event, payload);
-        await supabase.removeChannel(channel);
+        await broadcastViaCachedChannel(`game:${matchId}`, event, payload);
     } catch (err) {
         console.error(`[Matchmaker] Failed to broadcast ${event}:`, err);
     }
