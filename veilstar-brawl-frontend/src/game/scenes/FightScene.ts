@@ -280,6 +280,23 @@ export class FightScene extends Phaser.Scene {
     return !!anyText && !!anyText.active && !!anyText.scene && !!anyText.scene.sys;
   }
 
+  private isPrivatePhaseThreeTimerLocked(): boolean {
+    if (!PRIVATE_ROUNDS_ENABLED || !this.isActiveText(this.turnIndicatorText)) {
+      return false;
+    }
+
+    const indicator = this.turnIndicatorText.text;
+    return this.phase === "resolving"
+      || indicator.startsWith("Phase 3/3")
+      || indicator === "Waiting for next turn...";
+  }
+
+  private setPhaseThreeTimerTick(): void {
+    if (!this.isActiveText(this.roundTimerText)) return;
+    this.roundTimerText.setText("✓");
+    this.roundTimerText.setColor("#22c55e");
+  }
+
   /**
    * Check if this is a bot match
    */
@@ -568,6 +585,11 @@ export class FightScene extends Phaser.Scene {
   update(_time: number, _delta: number): void {
     const now = Date.now();
     this.updatePrivatePlanEnergyText();
+    const isPrivatePhaseThreeTimerLocked = this.isPrivatePhaseThreeTimerLocked();
+
+    if (isPrivatePhaseThreeTimerLocked) {
+      this.setPhaseThreeTimerTick();
+    }
 
     // === COUNTDOWN PHASE (3-2-1 FIGHT) ===
     if (this.phase === "countdown" && this.countdownEndsAt > 0) {
@@ -611,7 +633,7 @@ export class FightScene extends Phaser.Scene {
     }
 
     // === SELECTING PHASE (move timer countdown) ===
-    if (this.phase === "selecting" && this.moveDeadlineAt > 0 && this.roundTimerText) {
+    if (this.phase === "selecting" && this.moveDeadlineAt > 0 && this.roundTimerText && !isPrivatePhaseThreeTimerLocked) {
       const remainingMs = this.moveDeadlineAt - now;
       this.turnTimer = Math.max(0, Math.ceil(remainingMs / 1000));
       this.roundTimerText.setText(`${this.turnTimer}s`);
@@ -969,7 +991,10 @@ export class FightScene extends Phaser.Scene {
           // Animation finished, wait for next phase
           this.phase = "waiting";
           this.turnIndicatorText.setText("Waiting for next turn...");
-          this.turnIndicatorText.setColor("#f97316");
+          this.turnIndicatorText.setColor(PRIVATE_ROUNDS_ENABLED ? "#22c55e" : "#f97316");
+          if (PRIVATE_ROUNDS_ENABLED) {
+            this.setPhaseThreeTimerTick();
+          }
           EventBus.emit("fight:requestRoundState", { matchId: this.config.matchId });
         }
         break;
@@ -4818,9 +4843,12 @@ export class FightScene extends Phaser.Scene {
                 } else {
                   console.warn(`[FightScene] *** WARNING: No pendingRoundStart after animations! Setting phase to 'selecting' and waiting for round_starting event`);
                   console.warn(`[FightScene] *** This may indicate round_starting arrived before round_resolved or was lost`);
-                  this.phase = "selecting";
+                  this.phase = "waiting";
                   this.turnIndicatorText.setText("Waiting for next turn...");
-                  this.turnIndicatorText.setColor("#888888");
+                  this.turnIndicatorText.setColor(PRIVATE_ROUNDS_ENABLED ? "#22c55e" : "#888888");
+                  if (PRIVATE_ROUNDS_ENABLED) {
+                    this.setPhaseThreeTimerTick();
+                  }
                 }
               }
             }
