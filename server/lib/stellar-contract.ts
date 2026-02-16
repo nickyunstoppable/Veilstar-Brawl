@@ -89,6 +89,22 @@ function getAdminKeypair(): Keypair | null {
     return getKeypair(ADMIN_SECRET);
 }
 
+function getAnyConfiguredPublicKey(): string | null {
+    const admin = getAdminKeypair();
+    if (admin) return admin.publicKey();
+
+    const feePayers = getFeePayerKeypairs();
+    if (feePayers.length > 0) return feePayers[0]!.publicKey();
+
+    const p1 = getKeypair(PLAYER1_SECRET);
+    if (p1) return p1.publicKey();
+
+    const p2 = getKeypair(PLAYER2_SECRET);
+    if (p2) return p2.publicKey();
+
+    return null;
+}
+
 function parseSecretList(raw: string): string[] {
     return String(raw || "")
         .split(/[\s,]+/g)
@@ -1537,18 +1553,46 @@ export async function getOnChainMatchState(matchId: string): Promise<any | null>
     const sessionId = matchIdToSessionId(matchId);
 
     try {
-        const spec = await getContractSpec();
-        const client = new contract.Client(spec, {
-            contractId: CONTRACT_ID,
-            networkPassphrase: NETWORK_PASSPHRASE,
-            rpcUrl: RPC_URL,
-        });
+        const publicKey = getAnyConfiguredPublicKey();
+        const client = publicKey
+            ? await createReadOnlyContractClientWithPublicKey(publicKey)
+            : new contract.Client(await getContractSpec(), {
+                contractId: CONTRACT_ID,
+                networkPassphrase: NETWORK_PASSPHRASE,
+                rpcUrl: RPC_URL,
+            });
 
         const tx = await (client as any).get_match({ session_id: sessionId });
         const result = tx?.result;
-        if (result && typeof result === "object" && "error" in result) {
-            return null;
+        if (!result) return null;
+
+        // get_match returns Result<Match> (Soroban style) which is typically { ok: Match } or { error: ... }.
+        if (typeof result === "object") {
+            if ("error" in result) return null;
+            if ("ok" in result) return (result as any).ok ?? null;
+            // Current @stellar/stellar-sdk contract decoding often returns Result wrappers as { value: Match }.
+            if ("value" in result) return (result as any).value ?? null;
+
+            // Some builds return a Result-like object with an unwrap() method.
+            const maybeUnwrap = (result as any).unwrap;
+            if (typeof maybeUnwrap === "function") {
+                try {
+                    return maybeUnwrap.call(result);
+                } catch {
+                    return null;
+                }
+            }
+
+            // Fallback: nested result holder.
+            if ("result" in result) {
+                const nested = (result as any).result;
+                if (nested && typeof nested === "object") {
+                    if ("ok" in nested) return (nested as any).ok ?? null;
+                    if ("value" in nested) return (nested as any).value ?? null;
+                }
+            }
         }
+
         return result ?? null;
     } catch {
         return null;
@@ -1563,18 +1607,42 @@ export async function getOnChainMatchStateBySession(
 
     try {
         const contractId = options?.contractId || undefined;
-        const spec = await getContractSpec(contractId);
-        const client = new contract.Client(spec, {
-            contractId: resolveContractId(contractId),
-            networkPassphrase: NETWORK_PASSPHRASE,
-            rpcUrl: RPC_URL,
-        });
+        const publicKey = getAnyConfiguredPublicKey();
+        const client = publicKey
+            ? await createReadOnlyContractClientWithPublicKey(publicKey, contractId)
+            : new contract.Client(await getContractSpec(contractId), {
+                contractId: resolveContractId(contractId),
+                networkPassphrase: NETWORK_PASSPHRASE,
+                rpcUrl: RPC_URL,
+            });
 
         const tx = await (client as any).get_match({ session_id: sessionId });
         const result = tx?.result;
-        if (result && typeof result === "object" && "error" in result) {
-            return null;
+        if (!result) return null;
+
+        if (typeof result === "object") {
+            if ("error" in result) return null;
+            if ("ok" in result) return (result as any).ok ?? null;
+            if ("value" in result) return (result as any).value ?? null;
+
+            const maybeUnwrap = (result as any).unwrap;
+            if (typeof maybeUnwrap === "function") {
+                try {
+                    return maybeUnwrap.call(result);
+                } catch {
+                    return null;
+                }
+            }
+
+            if ("result" in result) {
+                const nested = (result as any).result;
+                if (nested && typeof nested === "object") {
+                    if ("ok" in nested) return (nested as any).ok ?? null;
+                    if ("value" in nested) return (nested as any).value ?? null;
+                }
+            }
         }
+
         return result ?? null;
     } catch {
         return null;
@@ -1854,7 +1922,6 @@ export async function submitZkVerificationOnChain(
 
                 const tx = await submitZkVerification({
                     session_id: sessionId,
-                    verifier: feePayerKeypair.publicKey(),
                     player: playerAddress,
                     round: roundNumber,
                     turn: turnNumber,
@@ -1948,7 +2015,7 @@ export async function submitZkMatchOutcomeOnChain(
 
                 const tx = await submitMatchOutcome({
                     session_id: sessionId,
-                    verifier: feePayerKeypair.publicKey(),
+                    winner: winnerAddress,
                     vk_id: vkIdBytes,
                     proof: proofBytes,
                     public_inputs: publicInputsBytes,
