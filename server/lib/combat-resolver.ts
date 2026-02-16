@@ -324,11 +324,10 @@ export async function resolveTurn(
         // Determine round winner
         let p1RoundsWon = match.player1_rounds_won || 0;
         let p2RoundsWon = match.player2_rounds_won || 0;
-        let roundOver = false;
+        let roundOver = resolution.isRoundOver;
         let roundWinner = resolution.winner;
 
-        if (resolution.isKnockout) {
-            roundOver = true;
+        if (roundOver) {
             if (roundWinner === "player1") p1RoundsWon++;
             else if (roundWinner === "player2") p2RoundsWon++;
         }

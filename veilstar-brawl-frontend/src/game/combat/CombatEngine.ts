@@ -41,6 +41,8 @@ import type { PowerSurgeCardId } from "@/types/power-surge";
 export class CombatEngine {
     private state: CombatState;
 
+    private static readonly MAX_TURNS_PER_ROUND = 10;
+
     // Track if surge stun has been applied this round (Mempool Congest)
     // REFACTORED: Now checking currentTurn === 1 instead of using state flags to be stateless-safe
 
@@ -705,6 +707,27 @@ export class CombatEngine {
             }
 
             // Check match end
+            this.checkMatchEnd();
+        }
+
+        // Turn limit tiebreaker: if no one is KO'd after N turns, higher remaining HP% wins.
+        // If HP% is equal, treat as draw (no round awarded).
+        if (!this.state.isRoundOver && this.state.currentTurn >= CombatEngine.MAX_TURNS_PER_ROUND) {
+            this.state.isRoundOver = true;
+
+            const p1Pct = this.state.player1.maxHp > 0 ? this.state.player1.hp / this.state.player1.maxHp : 0;
+            const p2Pct = this.state.player2.maxHp > 0 ? this.state.player2.hp / this.state.player2.maxHp : 0;
+
+            if (p1Pct > p2Pct) {
+                this.state.roundWinner = "player1";
+                this.state.player1.roundsWon++;
+            } else if (p2Pct > p1Pct) {
+                this.state.roundWinner = "player2";
+                this.state.player2.roundsWon++;
+            } else {
+                this.state.roundWinner = null;
+            }
+
             this.checkMatchEnd();
         }
     }

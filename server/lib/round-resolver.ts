@@ -521,19 +521,29 @@ export function resolveRound(
     // Determine advantage
     const advantage = getMoveAdvantage(player1PlannedMove, player2PlannedMove);
 
-    // Determine round winner (only if knockout)
+    // Determine round winner
+    // - Knockout always ends the round.
+    // - If no knockout after MAX_TURNS_PER_ROUND, higher remaining HP% wins.
+    //   (If equal, treat as draw.)
     let winner: RoundWinner = null;
     const isKnockout = p1HealthAfter <= 0 || p2HealthAfter <= 0;
+    const isTurnLimitReached = !!ctx && ctx.turnNumber >= GAME_CONSTANTS.MAX_TURNS_PER_ROUND;
 
     if (isKnockout) {
         if (p1HealthAfter <= 0 && p2HealthAfter <= 0) {
-            // Both KO — higher remaining health wins, else draw
             winner = "draw";
         } else if (p1HealthAfter <= 0) {
             winner = "player2";
         } else {
             winner = "player1";
         }
+    } else if (isTurnLimitReached) {
+        const p1Pct = GAME_CONSTANTS.MAX_HEALTH > 0 ? p1HealthAfter / GAME_CONSTANTS.MAX_HEALTH : 0;
+        const p2Pct = GAME_CONSTANTS.MAX_HEALTH > 0 ? p2HealthAfter / GAME_CONSTANTS.MAX_HEALTH : 0;
+
+        if (p1Pct > p2Pct) winner = "player1";
+        else if (p2Pct > p1Pct) winner = "player2";
+        else winner = "draw";
     }
 
     // Generate narrative
@@ -568,6 +578,7 @@ export function resolveRound(
         },
         winner,
         isKnockout,
+        isRoundOver: isKnockout || isTurnLimitReached,
         player1HealthAfter: p1HealthAfter,
         player2HealthAfter: p2HealthAfter,
         player1EnergyAfter: p1EnergyAfter,

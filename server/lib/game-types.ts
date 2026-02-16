@@ -36,6 +36,7 @@ export interface RoundResolutionResult {
     player2: PlayerMoveResult;
     winner: RoundWinner;
     isKnockout: boolean;
+    isRoundOver: boolean;
     player1HealthAfter: number;
     player2HealthAfter: number;
     player1EnergyAfter: number;
@@ -143,6 +144,8 @@ export const COMBAT_CONSTANTS = {
 export const GAME_CONSTANTS = {
     /** Default starting health */
     MAX_HEALTH: 100,
+    /** Max turns per round before HP% tiebreak */
+    MAX_TURNS_PER_ROUND: 10,
     /** Default starting energy */
     MAX_ENERGY: 100,
     /** Energy regen per turn */
