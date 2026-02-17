@@ -31,6 +31,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const USE_OFFCHAIN_ACTIONS = (import.meta.env.VITE_ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
 const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const STROOPS_PER_XLM = 10_000_000;
+const REGISTRATION_SIGN_WINDOW_SECONDS = 60;
 
 interface StakeGateState {
     required: boolean;
@@ -191,11 +192,15 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const onExitRef = useRef(onExit);
     const registrationTriggeredRef = useRef(false);
     const registrationCompleteRef = useRef(false);
+    const registrationCancelTriggeredRef = useRef(false);
     const localStakeConfirmedRef = useRef(false);
     const stakeExpireTriggeredRef = useRef(false);
     const stakeErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const stakeSubmitInFlightRef = useRef(false);
     const [stakeSubmitLocked, setStakeSubmitLocked] = useState(false);
+
+    const [registrationDeadlineMs, setRegistrationDeadlineMs] = useState<number | null>(null);
+    const [registrationSecondsLeft, setRegistrationSecondsLeft] = useState<number | null>(null);
     useEffect(() => {
         onMatchEndRef.current = onMatchEnd;
         onExitRef.current = onExit;
@@ -204,11 +209,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     useEffect(() => {
         registrationTriggeredRef.current = false;
         registrationCompleteRef.current = false;
+        registrationCancelTriggeredRef.current = false;
         localStakeConfirmedRef.current = false;
         stakeExpireTriggeredRef.current = false;
         stakeSubmitInFlightRef.current = false;
         setStakeSubmitLocked(false);
         setPendingRegistrationNoStake(false);
+        setRegistrationDeadlineMs(null);
+        setRegistrationSecondsLeft(null);
 
         if (stakeErrorTimerRef.current) {
             clearTimeout(stakeErrorTimerRef.current);
@@ -266,12 +274,61 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         if (!shouldRegister) return;
         if (registrationTriggeredRef.current) return;
 
+        // Start a 60s signing window as soon as we enter the registration-required state.
+        if (!registrationDeadlineMs) {
+            setRegistrationDeadlineMs(Date.now() + REGISTRATION_SIGN_WINDOW_SECONDS * 1000);
+            setRegistrationSecondsLeft(REGISTRATION_SIGN_WINDOW_SECONDS);
+            registrationCancelTriggeredRef.current = false;
+        }
+
         registrationTriggeredRef.current = true;
         registerOnChain(matchId).catch((err) => {
             console.error("[CharacterSelectClient] Registration signing failed:", err);
             registrationTriggeredRef.current = false;
         });
-    }, [matchId, pendingRegistrationNoStake, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required]);
+    }, [matchId, pendingRegistrationNoStake, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required, registrationDeadlineMs]);
+
+    // Countdown + cancel-on-expiry for the registration signing window.
+    useEffect(() => {
+        if (!publicKey) return;
+        if (!registrationDeadlineMs) return;
+
+        const done = registrationStatus === "complete" || registrationStatus === "skipped";
+        if (done) {
+            setRegistrationSecondsLeft(null);
+            setRegistrationDeadlineMs(null);
+            return;
+        }
+
+        const tick = () => {
+            const left = Math.max(0, Math.ceil((registrationDeadlineMs - Date.now()) / 1000));
+            setRegistrationSecondsLeft(left);
+
+            if (left <= 0 && !registrationCancelTriggeredRef.current) {
+                registrationCancelTriggeredRef.current = true;
+                (async () => {
+                    try {
+                        await fetch(`${API_BASE}/api/matches/${matchId}/register/cancel`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ address: publicKey, reason: "auth_timeout" }),
+                        });
+                    } catch (err) {
+                        console.warn("[CharacterSelectClient] Failed to cancel match after auth timeout:", err);
+                    } finally {
+                        if (onExitRef.current) {
+                            onExitRef.current();
+                        }
+                        navigateTo("/play");
+                    }
+                })();
+            }
+        };
+
+        tick();
+        const interval = setInterval(tick, 250);
+        return () => clearInterval(interval);
+    }, [API_BASE, matchId, onExitRef, publicKey, registrationDeadlineMs, registrationStatus]);
 
     useEffect(() => {
         if (registrationStatus === "complete" || registrationStatus === "skipped") {
@@ -2278,6 +2335,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         ? Math.max(0, Math.ceil((stakeGate.stakeDeadlineAtMs - stakeClockNowMs) / 1000))
         : null;
 
+    const fmtMmSs = (seconds: number) => {
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}:${s.toString().padStart(2, "0")}`;
+    };
+
     if (shouldBlockForRegistration) {
         return (
             <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50 p-4">
@@ -2301,6 +2364,14 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 </div>
 
                 <h2 className="text-2xl font-bold font-orbitron text-emerald-500 mb-2">OPPONENT FOUND!</h2>
+
+                {registrationSecondsLeft !== null && registrationStatus !== "complete" && registrationStatus !== "skipped" && (
+                    <div className="mt-2 bg-black/70 border border-cyber-orange/30 rounded-xl px-4 py-2">
+                        <span className="text-cyber-orange text-xs font-orbitron tracking-wider">
+                            SIGN WITHIN {fmtMmSs(registrationSecondsLeft)}
+                        </span>
+                    </div>
+                )}
 
                 <div className="mt-3 bg-black/80 border border-cyber-gold/40 rounded-xl px-6 py-3 flex items-center gap-3 backdrop-blur-sm">
                     {registrationStatus === "error" ? (
@@ -2371,6 +2442,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                                 {(registrationStatus === "idle" || registrationStatus === "complete" || registrationStatus === "skipped" || registrationStatus === "error") &&
                                     "Waiting for on-chain match registration to complete before stake deposit."}
                             </p>
+
+                            {registrationSecondsLeft !== null && registrationStatus !== "complete" && registrationStatus !== "skipped" && (
+                                <p className="text-cyber-orange text-xs font-orbitron tracking-wider mt-2">
+                                    SIGN WITHIN {fmtMmSs(registrationSecondsLeft)}
+                                </p>
+                            )}
                         </div>
                     )}
 

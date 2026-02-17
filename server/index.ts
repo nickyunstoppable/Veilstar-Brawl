@@ -13,7 +13,7 @@ import { handleExpireStakeDepositWindow, handlePrepareStakeDeposit, handleSubmit
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleSubmitBan } from "./routes/matches/ban";
 import { handleForfeit } from "./routes/matches/forfeit";
-import { handlePrepareRegistration, handleSubmitAuth } from "./routes/matches/register";
+import { handlePrepareRegistration, handleSubmitAuth, handleCancelRegistration } from "./routes/matches/register";
 import {
     handleGetPowerSurgeCards,
     handlePreparePowerSurge,
@@ -203,6 +203,11 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/register/auth
         if (pathname === `/api/matches/${matchId}/register/auth` && method === "POST") {
             return corsResponse(await handleSubmitAuth(matchId, req), req);
+        }
+
+        // POST /api/matches/:matchId/register/cancel
+        if (pathname === `/api/matches/${matchId}/register/cancel` && method === "POST") {
+            return corsResponse(await handleCancelRegistration(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/forfeit

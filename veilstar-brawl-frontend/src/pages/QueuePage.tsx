@@ -12,6 +12,9 @@ import { useWallet } from "@/hooks/useWallet";
 import { useOnChainRegistration } from "@/hooks/useOnChainRegistration";
 import { getSupabaseClient } from "@/lib/supabase/client";
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+const SIGN_WINDOW_SECONDS = 60;
+
 function navigateTo(path: string) {
     window.history.pushState({}, "", path);
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -43,12 +46,85 @@ export default function QueuePage() {
     const matchFoundAtRef = useRef<number | null>(null);
     const registrationTriggeredRef = useRef(false);
 
+    const [signingDeadlineMs, setSigningDeadlineMs] = useState<number | null>(null);
+    const cancelTriggeredRef = useRef(false);
+    const [signingSecondsLeft, setSigningSecondsLeft] = useState<number | null>(null);
+
     // Track when the Opponent Found screen first appears
     useEffect(() => {
-        if ((isMatching || matchResult) && !matchFoundAtRef.current) {
-            matchFoundAtRef.current = Date.now();
+        const showingOpponentFound = !!(isMatching || matchResult);
+
+        if (showingOpponentFound) {
+            if (!matchFoundAtRef.current) {
+                matchFoundAtRef.current = Date.now();
+            }
+
+            // Start the 60s signing window the moment the overlay appears.
+            // This guarantees the countdown is visible even if we're in a transitional
+            // "matching" state before matchResult is hydrated.
+            if (!signingDeadlineMs) {
+                setSigningDeadlineMs(Date.now() + SIGN_WINDOW_SECONDS * 1000);
+                setSigningSecondsLeft(SIGN_WINDOW_SECONDS);
+                cancelTriggeredRef.current = false;
+            }
+
+            return;
         }
-    }, [isMatching, matchResult]);
+
+        // If we exit the overlay (back to searching), reset timer state so a re-queue works.
+        matchFoundAtRef.current = null;
+        setSigningDeadlineMs(null);
+        cancelTriggeredRef.current = false;
+        setSigningSecondsLeft(null);
+    }, [isMatching, matchResult, signingDeadlineMs]);
+
+    // Countdown for the signing window. If it expires before registration completes, cancel the match.
+    useEffect(() => {
+        if (!signingDeadlineMs) return;
+
+        const hasMatchId = !!matchResult?.matchId;
+
+        // Once complete (or skipped), stop the timer.
+        if (regStatus === "complete" || regStatus === "skipped") {
+            setSigningSecondsLeft(null);
+            return;
+        }
+
+        const tick = () => {
+            const left = Math.max(0, Math.ceil((signingDeadlineMs - Date.now()) / 1000));
+            setSigningSecondsLeft(left);
+
+            if (left <= 0 && !cancelTriggeredRef.current) {
+                cancelTriggeredRef.current = true;
+                const matchId = matchResult?.matchId;
+                const address = publicKey;
+
+                (async () => {
+                    try {
+                        if (hasMatchId && matchId && address) {
+                            await fetch(`${API_BASE}/api/matches/${matchId}/register/cancel`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ address, reason: "auth_timeout" }),
+                            });
+                        }
+                    } catch (err) {
+                        console.warn("[QueuePage] Failed to cancel match after auth timeout:", err);
+                    } finally {
+                        try {
+                            await leaveQueue();
+                        } finally {
+                            navigateTo("/play");
+                        }
+                    }
+                })();
+            }
+        };
+
+        tick();
+        const interval = setInterval(tick, 250);
+        return () => clearInterval(interval);
+    }, [signingDeadlineMs, matchResult?.matchId, regStatus, publicKey, leaveQueue]);
 
     // Auto-join queue on mount if wallet connected
     useEffect(() => {
@@ -81,6 +157,11 @@ export default function QueuePage() {
                 const data = payload.payload as { txHash?: string };
                 console.log("[QueuePage] registration_complete received");
                 markComplete(data?.txHash);
+            })
+            .on("broadcast", { event: "match_cancelled" }, (payload) => {
+                console.log("[QueuePage] match_cancelled received", payload.payload);
+                cancelTriggeredRef.current = true;
+                leaveQueue().finally(() => navigateTo("/play"));
             })
             .subscribe();
 
@@ -170,6 +251,12 @@ export default function QueuePage() {
     // because the initiating player may skip the "matching" state entirely,
     // jumping straight from "queued" to "matched"
     if (isMatching || matchResult) {
+        const fmt = (seconds: number) => {
+            const m = Math.floor(seconds / 60);
+            const s = seconds % 60;
+            return `${m}:${s.toString().padStart(2, "0")}`;
+        };
+
         return (
             <div className="fixed inset-0 bg-black flex flex-col items-center justify-center z-50">
                 <div className="relative w-64 h-64 mb-12 flex items-center justify-center">
@@ -193,6 +280,14 @@ export default function QueuePage() {
                 <h2 className="text-2xl font-bold font-orbitron text-emerald-500 mb-2">
                     OPPONENT FOUND!
                 </h2>
+
+                {signingSecondsLeft !== null && regStatus !== "complete" && regStatus !== "skipped" && (
+                    <div className="mt-2 bg-black/70 border border-cyber-orange/30 rounded-xl px-4 py-2">
+                        <span className="text-cyber-orange text-xs font-orbitron tracking-wider">
+                            SIGN WITHIN {fmt(signingSecondsLeft)}
+                        </span>
+                    </div>
+                )}
 
                 {/* On-chain registration status */}
                 {regStatus !== "idle" && regStatus !== "complete" && regStatus !== "skipped" && (

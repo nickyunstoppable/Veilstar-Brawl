@@ -22,6 +22,8 @@ import {
     setMatchStakeOnChain,
     submitSignedRegistration,
     type PreparedRegistration,
+    cancelMatchOnChainWithOptions,
+    isStellarConfigured,
 } from "../../lib/stellar-contract";
 
 function deterministicSessionCandidate(matchId: string, index: number): number {
@@ -116,6 +118,128 @@ interface PendingRegistration {
 }
 
 const pendingRegistrations = new Map<string, PendingRegistration>();
+
+// =============================================================================
+// POST /api/matches/:matchId/register/cancel
+// =============================================================================
+
+interface CancelRegistrationBody {
+    address: string;
+    reason?: string;
+}
+
+export async function handleCancelRegistration(matchId: string, req: Request): Promise<Response> {
+    try {
+        const body = (await req.json()) as CancelRegistrationBody;
+        const address = body.address?.trim();
+        const reason = body.reason?.trim() || "auth_timeout";
+
+        if (!address) {
+            return Response.json({ error: "Missing 'address'" }, { status: 400 });
+        }
+
+        const supabase = getSupabase();
+        const { data: match, error: matchError } = await supabase
+            .from("matches")
+            .select(
+                "id,status,player1_address,player2_address,onchain_session_id,onchain_contract_id,onchain_tx_hash,stake_amount_stroops,player1_stake_confirmed_at,player2_stake_confirmed_at",
+            )
+            .eq("id", matchId)
+            .single();
+
+        if (matchError || !match) {
+            return Response.json({ error: "Match not found" }, { status: 404 });
+        }
+
+        const isPlayer1 = match.player1_address === address;
+        const isPlayer2 = match.player2_address === address;
+        if (!isPlayer1 && !isPlayer2) {
+            return Response.json({ error: "You are not a participant in this match" }, { status: 403 });
+        }
+
+        if (match.status === "completed") {
+            return Response.json({ success: true, cancelled: false, reason: "match_completed" });
+        }
+
+        if (match.status === "cancelled" || match.status === "abandoned") {
+            pendingRegistrations.delete(matchId);
+            return Response.json({ success: true, cancelled: true, alreadyCancelled: true });
+        }
+
+        // Best-effort on-chain cancellation if a session was already registered.
+        // If it fails due to missing session, we still cancel off-chain to unblock UX.
+        let onChainTxHash: string | null = null;
+        let onChainCancelError: string | null = null;
+        const hadStakePaid = !!match.player1_stake_confirmed_at || !!match.player2_stake_confirmed_at;
+
+        if (isStellarConfigured()) {
+            try {
+                const onChainCancel = await cancelMatchOnChainWithOptions(matchId, {
+                    sessionId: typeof match.onchain_session_id === "number" ? match.onchain_session_id : undefined,
+                    contractId: match.onchain_contract_id || undefined,
+                });
+
+                if (onChainCancel.success) {
+                    onChainTxHash = onChainCancel.txHash || null;
+                } else {
+                    onChainCancelError = onChainCancel.error || "unknown";
+                    const isMissingSession = /Contract,\s*#1|MatchNotFound/i.test(onChainCancelError);
+                    if (!isMissingSession) {
+                        console.warn(`[Register/cancel] cancel_match failed for ${matchId}: ${onChainCancelError}`);
+                    }
+                    // If stake was paid and we can't confirm on-chain cancellation, surface as a failure.
+                    if (hadStakePaid && !isMissingSession) {
+                        return Response.json(
+                            {
+                                error: "Failed to cancel match on-chain; stake refund could not be guaranteed",
+                                details: onChainCancelError,
+                            },
+                            { status: 502 },
+                        );
+                    }
+                }
+            } catch (err) {
+                onChainCancelError = err instanceof Error ? err.message : String(err);
+                console.warn(`[Register/cancel] cancel_match threw for ${matchId}: ${onChainCancelError}`);
+            }
+        }
+
+        await supabase
+            .from("matches")
+            .update({
+                status: "cancelled",
+                completed_at: new Date().toISOString(),
+                fight_phase: "match_end",
+                // If we cancel during registration, clear any recorded stake confirmations.
+                player1_stake_confirmed_at: null,
+                player2_stake_confirmed_at: null,
+            })
+            .eq("id", matchId)
+            .in("status", ["waiting", "character_select", "in_progress"]);
+
+        pendingRegistrations.delete(matchId);
+
+        const payload = {
+            matchId,
+            reason,
+            message: "Match cancelled (signature window expired).",
+            onChainSessionId: typeof match.onchain_session_id === "number" ? match.onchain_session_id : matchIdToSessionId(matchId),
+            onChainTxHash: onChainTxHash || match.onchain_tx_hash || null,
+            onChainCancelError,
+            redirectTo: "/play",
+        };
+
+        await broadcastGameEvent(matchId, "match_cancelled", payload);
+
+        return Response.json({ success: true, cancelled: true, ...payload });
+    } catch (err) {
+        console.error("[Register/cancel] Error:", err);
+        return Response.json(
+            { error: err instanceof Error ? err.message : "Failed to cancel match" },
+            { status: 500 },
+        );
+    }
+}
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
