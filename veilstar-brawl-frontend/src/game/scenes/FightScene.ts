@@ -4779,6 +4779,29 @@ export class FightScene extends Phaser.Scene {
         const p1ActualDamage = Math.max(0, prevP1Health - payload.player1Health);
         const p2ActualDamage = Math.max(0, prevP2Health - payload.player2Health);
 
+        const splitDamageIntoHits = (total: number, hits: number): number[] => {
+          const safeHits = Math.max(1, Math.floor(hits));
+          const safeTotal = Math.max(0, Math.floor(total));
+          const base = Math.floor(safeTotal / safeHits);
+          const remainder = safeTotal % safeHits;
+          return Array.from({ length: safeHits }, (_, i) => base + (i < remainder ? 1 : 0));
+        };
+
+        const surgeForPlayback = calculateSurgeEffects(this.activeSurges.player1, this.activeSurges.player2);
+        const p1HitCount = (!p1IsStunned
+          && surgeForPlayback.player1Modifiers.doubleHit
+          && surgeForPlayback.player1Modifiers.doubleHitMoves.includes(p1Move))
+          ? 2
+          : 1;
+        const p2HitCount = (!p2IsStunned
+          && surgeForPlayback.player2Modifiers.doubleHit
+          && surgeForPlayback.player2Modifiers.doubleHitMoves.includes(p2Move))
+          ? 2
+          : 1;
+
+        const PUNCH_KICK_HIT_MS = 1200;
+        const HIT_IMPACT_MS = 300;
+
         // Helper: P1 Attack
         const runP1Attack = () => {
           return new Promise<void>((resolve) => {
@@ -4787,55 +4810,51 @@ export class FightScene extends Phaser.Scene {
               return;
             }
 
-            // Play P1 animation
             const animKey = `${p1Char}_${p1Move}`;
-            if (this.anims.exists(animKey) || p1Move === "block") { // Allow Block even if anim missing? Ideally exists.
-              const scale = getAnimationScale(p1Char, p1Move);
+            const shouldRepeat = (p1Move === "punch" || p1Move === "kick") && p1HitCount > 1;
+            const hitCount = shouldRepeat ? p1HitCount : 1;
+            const damageParts = splitDamageIntoHits(p2ActualDamage, hitCount);
 
-              this.player1Sprite.setScale(scale);
+            for (let i = 0; i < hitCount; i++) {
+              const startOffset = i * PUNCH_KICK_HIT_MS;
 
-              // Play Animation immediately
-              if (this.anims.exists(animKey)) this.player1Sprite.play(animKey);
+              this.time.delayedCall(startOffset, () => {
+                if (this.anims.exists(animKey) || p1Move === "block") {
+                  const scale = getAnimationScale(p1Char, p1Move);
+                  this.player1Sprite.setScale(scale);
+                  if (this.anims.exists(animKey)) this.player1Sprite.play(animKey, true);
 
-              // SFX Logic with centralized delays and keys
-              const sfxKey = getSFXKey(p1Char, p1Move);
-              const delay = getSoundDelay(p1Char, p1Move);
-              if (delay > 0) {
-                this.time.delayedCall(delay, () => this.playSFX(sfxKey));
-              } else {
-                this.playSFX(sfxKey);
-              }
-            }
-
-            // Show narrative for P1
-            // this.turnIndicatorText.setText(p1Move.toUpperCase()); // Optional: show move name? 
-            // Better to rely on the main narrative text at the end or floating text?
-            // Existing logic shows summary at end. Let's keep summary but show floating text/damage per hit.
-
-            // Show P2 damage delayed - use pre-calculated actual HP lost
-            if (p2ActualDamage > 0) {
-              this.time.delayedCall(300, () => { // Hit impact timing
-                this.showFloatingText(`-${p2ActualDamage}`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#ff4444");
-
-                // Flash P2
-                this.tweens.add({
-                  targets: this.player2Sprite,
-                  alpha: 0.5,
-                  yoyo: true,
-                  duration: 50,
-                  repeat: 3
-                });
+                  const sfxKey = getSFXKey(p1Char, p1Move);
+                  const delay = getSoundDelay(p1Char, p1Move);
+                  if (delay > 0) {
+                    this.time.delayedCall(delay, () => this.playSFX(sfxKey));
+                  } else {
+                    this.playSFX(sfxKey);
+                  }
+                }
               });
-            } else if (payload.player2.outcome === "missed") {
-              // Show DODGE! text when Hash Hurricane triggers (attack dodged)
-              this.time.delayedCall(300, () => {
-                this.showFloatingText("DODGE!", p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#8800ff");
+
+              this.time.delayedCall(startOffset + HIT_IMPACT_MS, () => {
+                const part = damageParts[i] ?? 0;
+                if (part > 0) {
+                  this.showFloatingText(`-${part}`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#ff4444");
+                  this.tweens.add({
+                    targets: this.player2Sprite,
+                    alpha: 0.5,
+                    yoyo: true,
+                    duration: 50,
+                    repeat: 3
+                  });
+                } else if (i === 0 && payload.player2.outcome === "missed") {
+                  this.showFloatingText("DODGE!", p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#8800ff");
+                }
               });
             }
 
-            // Show energy drain effect if P2 lost energy from P1's surge (e.g., Mempool Siphon, Vaultbreaker)
+            const afterLastHitOffset = (hitCount - 1) * PUNCH_KICK_HIT_MS;
+
             if (payload.player2.energyDrained && payload.player2.energyDrained > 0) {
-              this.time.delayedCall(500, () => {
+              this.time.delayedCall(afterLastHitOffset + 500, () => {
                 this.showFloatingText(
                   `-${Math.round(payload.player2.energyDrained!)} EN`,
                   p2TargetX,
@@ -4845,10 +4864,9 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            // Show HP regen effect if P1 healed (from Blue Set Heal or lifesteal)
             const p1TotalHeal = (payload.player1.hpRegen || 0) + (payload.player1.lifesteal || 0);
             if (p1TotalHeal > 0) {
-              this.time.delayedCall(700, () => {
+              this.time.delayedCall(afterLastHitOffset + 700, () => {
                 this.showFloatingText(
                   `+${Math.round(p1TotalHeal)} HP`,
                   p1TargetX,
@@ -4858,10 +4876,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            // Wait for anim to finish (approx 1s)
-            this.time.delayedCall(1200, () => {
-              resolve();
-            });
+            this.time.delayedCall(hitCount * PUNCH_KICK_HIT_MS, () => resolve());
           });
         };
 
@@ -4873,48 +4888,51 @@ export class FightScene extends Phaser.Scene {
               return;
             }
 
-            // Play P2 animation
             const animKey = `${p2Char}_${p2Move}`;
-            if (this.anims.exists(animKey) || p2Move === "block") {
-              const scale = getAnimationScale(p2Char, p2Move);
+            const shouldRepeat = (p2Move === "punch" || p2Move === "kick") && p2HitCount > 1;
+            const hitCount = shouldRepeat ? p2HitCount : 1;
+            const damageParts = splitDamageIntoHits(p1ActualDamage, hitCount);
 
-              this.player2Sprite.setScale(scale);
+            for (let i = 0; i < hitCount; i++) {
+              const startOffset = i * PUNCH_KICK_HIT_MS;
 
-              // Play Animation immediately
-              if (this.anims.exists(animKey)) this.player2Sprite.play(animKey);
+              this.time.delayedCall(startOffset, () => {
+                if (this.anims.exists(animKey) || p2Move === "block") {
+                  const scale = getAnimationScale(p2Char, p2Move);
+                  this.player2Sprite.setScale(scale);
+                  if (this.anims.exists(animKey)) this.player2Sprite.play(animKey, true);
 
-              // SFX Logic with centralized delays and keys
-              const sfxKey = getSFXKey(p2Char, p2Move);
-              const p2Delay = getSoundDelay(p2Char, p2Move);
-              if (p2Delay > 0) {
-                this.time.delayedCall(p2Delay, () => this.playSFX(sfxKey));
-              } else {
-                this.playSFX(sfxKey);
-              }
+                  const sfxKey = getSFXKey(p2Char, p2Move);
+                  const p2Delay = getSoundDelay(p2Char, p2Move);
+                  if (p2Delay > 0) {
+                    this.time.delayedCall(p2Delay, () => this.playSFX(sfxKey));
+                  } else {
+                    this.playSFX(sfxKey);
+                  }
+                }
+              });
+
+              this.time.delayedCall(startOffset + HIT_IMPACT_MS, () => {
+                const part = damageParts[i] ?? 0;
+                if (part > 0) {
+                  this.showFloatingText(`-${part}`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#ff4444");
+                  this.tweens.add({
+                    targets: this.player1Sprite,
+                    alpha: 0.5,
+                    yoyo: true,
+                    duration: 50,
+                    repeat: 3
+                  });
+                } else if (i === 0 && payload.player1.outcome === "missed") {
+                  this.showFloatingText("DODGE!", p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#8800ff");
+                }
+              });
             }
 
-            // Show P1 damage - use pre-calculated actual HP lost
-            if (p1ActualDamage > 0) {
-              this.time.delayedCall(300, () => {
-                this.showFloatingText(`-${p1ActualDamage}`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#ff4444");
-                this.tweens.add({
-                  targets: this.player1Sprite,
-                  alpha: 0.5,
-                  yoyo: true,
-                  duration: 50,
-                  repeat: 3
-                });
-              });
-            } else if (payload.player1.outcome === "missed") {
-              // Show DODGE! text when Hash Hurricane triggers (attack dodged)
-              this.time.delayedCall(300, () => {
-                this.showFloatingText("DODGE!", p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#8800ff");
-              });
-            }
+            const afterLastHitOffset = (hitCount - 1) * PUNCH_KICK_HIT_MS;
 
-            // Show energy drain effect if P1 lost energy from P2's surge (e.g., Mempool Siphon, Vaultbreaker)
             if (payload.player1.energyDrained && payload.player1.energyDrained > 0) {
-              this.time.delayedCall(500, () => {
+              this.time.delayedCall(afterLastHitOffset + 500, () => {
                 this.showFloatingText(
                   `-${Math.round(payload.player1.energyDrained!)} EN`,
                   p1TargetX,
@@ -4924,10 +4942,9 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            // Show HP regen effect if P2 healed (from Blue Set Heal or lifesteal)
             const p2TotalHeal = (payload.player2.hpRegen || 0) + (payload.player2.lifesteal || 0);
             if (p2TotalHeal > 0) {
-              this.time.delayedCall(700, () => {
+              this.time.delayedCall(afterLastHitOffset + 700, () => {
                 this.showFloatingText(
                   `+${Math.round(p2TotalHeal)} HP`,
                   p2TargetX,
@@ -4937,10 +4954,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-
-            this.time.delayedCall(1200, () => {
-              resolve();
-            });
+            this.time.delayedCall(hitCount * PUNCH_KICK_HIT_MS, () => resolve());
           });
         };
 
