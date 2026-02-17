@@ -241,7 +241,7 @@ describe("round-resolver power surge integration", () => {
     expect(result.player2HealthAfter).toBe(92);
   });
 
-  it("applies next-turn stun when block is shattered by special", () => {
+  it("does not apply next-turn stun when block is shattered by special", () => {
     const result = resolveRound(
       {
         player1Move: "special",
@@ -263,7 +263,7 @@ describe("round-resolver power surge integration", () => {
     );
 
     expect(result.player2.outcome).toBe("shattered");
-    expect(result.player2IsStunnedNext).toBe(true);
+    expect(result.player2IsStunnedNext).toBe(false);
     expect(result.player1IsStunnedNext).toBe(false);
   });
 

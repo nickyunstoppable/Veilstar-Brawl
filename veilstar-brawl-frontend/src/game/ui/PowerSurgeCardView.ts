@@ -16,6 +16,15 @@ export class PowerSurgeCardView {
     static create(config: PowerSurgeCardViewConfig): Phaser.GameObjects.Container {
         const { scene, card, x, y, scale = 1 } = config;
 
+        // Scene teardown / tab-resume races can leave the display list unavailable.
+        // In that case, skip rendering instead of throwing (callers treat this as best-effort UI).
+        const sys: any = (scene as any)?.sys;
+        if (!sys || !sys.displayList || !sys.updateList || !scene.scene?.isActive()) {
+            const empty = new Phaser.GameObjects.Container(scene, x, y);
+            empty.setScale(scale);
+            return empty;
+        }
+
         const container = scene.add.container(x, y);
         container.setScale(scale);
 

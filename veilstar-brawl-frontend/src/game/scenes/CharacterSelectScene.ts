@@ -1062,7 +1062,11 @@ export class CharacterSelectScene extends Phaser.Scene {
   private setupVisibilityChangeHandler(): void {
     this.visibilityHandler = () => {
       if (document.visibilityState === "visible") {
-        this.update(0, 0);
+        // Avoid calling Scene.update() directly from a DOM event.
+        // When the tab becomes visible, the renderer/text canvases may still be resuming,
+        // and forcing update() here can trigger Phaser text drawImage null crashes.
+        if (!this.sys || (this.sys as any).isDestroyed) return;
+        if (!this.scene.isActive()) return;
       }
     };
     document.addEventListener("visibilitychange", this.visibilityHandler);

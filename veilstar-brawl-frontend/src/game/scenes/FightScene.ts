@@ -125,6 +125,16 @@ export class FightScene extends Phaser.Scene {
   // Visibility change handler for catch-up on tab refocus
   private visibilityChangeHandler?: () => void;
 
+  // Track EventBus subscriptions so we can reliably unsubscribe on shutdown.
+  // Without this, stale listeners from previous FightScene instances can keep firing,
+  // causing duplicated roundResolved handling and crashes (e.g. this.add/text drawImage null).
+  private busDisposers: Array<() => void> = [];
+  private hasCleanedUp: boolean = false;
+
+  // Ordered playback queue for server-authoritative turn results.
+  // Especially important in private rounds, where many turn resolutions can arrive back-to-back.
+  private roundResolvedQueue: Array<any> = [];
+
   // Store round-end data for processing after countdown
   private roundEndData?: { p1Char: string; p2Char: string };
 
@@ -462,6 +472,11 @@ export class FightScene extends Phaser.Scene {
    * Create scene elements.
    */
   create(): void {
+    // Ensure we always clean up global listeners when the scene shuts down.
+    // Without this, old FightScene instances keep handling EventBus events.
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanupScene, this);
+    this.events.once(Phaser.Scenes.Events.DESTROY, this.cleanupScene, this);
+
     // Initialize combat engine
     this.combatEngine = new CombatEngine(
       this.config.player1Character || "dag-warrior",
@@ -749,6 +764,8 @@ export class FightScene extends Phaser.Scene {
    * Called asynchronously after scene creation.
    */
   private async fetchAndInitializeStickerPicker(playerSprite: Phaser.GameObjects.Sprite): Promise<void> {
+    if (this.hasCleanedUp) return;
+
     const ownedStickerIds: StickerId[] = [];
     const playerAddress = this.config.playerRole === "player1" ? this.config.player1Address : this.config.player2Address;
 
@@ -778,6 +795,8 @@ export class FightScene extends Phaser.Scene {
       console.error("[FightScene] Error fetching sticker inventory:", err);
     }
 
+    if (this.hasCleanedUp) return;
+
     // Create sticker picker with fetched data
     this.stickerPicker = new StickerPicker(this, {
       x: GAME_DIMENSIONS.WIDTH - 290,
@@ -792,7 +811,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for opponent stickers
-    EventBus.on("game:stickerMessage", (data: unknown) => {
+    this.onBus("game:stickerMessage", (data: unknown) => {
       const payload = data as { sender: string; senderAddress: string; stickerId: string; timestamp: number };
       this.handleOpponentSticker(payload);
     });
@@ -2545,26 +2564,33 @@ export class FightScene extends Phaser.Scene {
 
   private resetZkOnChainBadge(roundNumber: number): void {
     this.zkOnChainBadgeRound = roundNumber;
-    if (this.zkOnChainBadgeText) {
+    if (!this.zkOnChainBadgeText || !this.zkOnChainBadgeText.active) return;
+    try {
       this.zkOnChainBadgeText.setVisible(false);
       this.zkOnChainBadgeText.setText("");
+    } catch {
+      // ignore renderer/text teardown races
     }
   }
 
   private setZkOnChainBadge(params: { roundNumber: number; message: string; color: string }): void {
     if (!PRIVATE_ROUNDS_ENABLED) return;
-    if (!this.zkOnChainBadgeText) return;
+    if (!this.zkOnChainBadgeText || !this.zkOnChainBadgeText.active) return;
 
     // Ignore late/out-of-round updates.
     if (params.roundNumber !== this.zkOnChainBadgeRound) return;
 
-    this.zkOnChainBadgeText.setVisible(true);
-    this.zkOnChainBadgeText.setText(params.message);
-    this.zkOnChainBadgeText.setColor(params.color);
+    try {
+      this.zkOnChainBadgeText.setVisible(true);
+      this.zkOnChainBadgeText.setText(params.message);
+      this.zkOnChainBadgeText.setColor(params.color);
+    } catch {
+      // ignore renderer/text teardown races
+    }
   }
 
   private updatePrivatePlanEnergyText(): void {
-    if (!this.privatePlanEnergyText) return;
+    if (!this.privatePlanEnergyText || !this.privatePlanEnergyText.active) return;
 
     const shouldShow = PRIVATE_ROUNDS_ENABLED && this.phase === "selecting";
     if (!shouldShow) {
@@ -2573,8 +2599,12 @@ export class FightScene extends Phaser.Scene {
     }
 
     this.privatePlanEnergyText.setVisible(true);
-    this.privatePlanEnergyText.setText(`Plan Energy: ${this.privateRoundPlanEnergyPreview}`);
-    this.privatePlanEnergyText.setColor(this.privateRoundPlanEnergyPreview < BASE_MOVE_STATS.special.energyCost ? "#f59e0b" : "#3b82f6");
+    try {
+      this.privatePlanEnergyText.setText(`Plan Energy: ${this.privateRoundPlanEnergyPreview}`);
+      this.privatePlanEnergyText.setColor(this.privateRoundPlanEnergyPreview < BASE_MOVE_STATS.special.energyCost ? "#f59e0b" : "#3b82f6");
+    } catch {
+      // ignore renderer/text disposal edge cases
+    }
   }
 
   private setMoveButtonsVisible(visible: boolean): void {
@@ -3216,21 +3246,86 @@ export class FightScene extends Phaser.Scene {
     });
   }
 
+  private onBus(event: string, callback: (data: unknown) => void): void {
+    EventBus.on(event as any, callback as any, this);
+    this.busDisposers.push(() => {
+      try {
+        EventBus.off(event as any, callback as any, this);
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  private enqueueRoundResolved(payload: any): void {
+    this.roundResolvedQueue.push(payload);
+
+    // Keep playback deterministic even if events arrive slightly out of order.
+    this.roundResolvedQueue.sort((a, b) => {
+      const ar = Number(a?.roundNumber ?? 0);
+      const br = Number(b?.roundNumber ?? 0);
+      if (ar !== br) return ar - br;
+      const at = Number(a?.turnNumber ?? 0);
+      const bt = Number(b?.turnNumber ?? 0);
+      return at - bt;
+    });
+
+    this.tryPlayNextResolvedTurn();
+  }
+
+  private tryPlayNextResolvedTurn(): void {
+    if (this.hasCleanedUp) return;
+    if (this.isResolving) return;
+
+    const next = this.roundResolvedQueue.shift();
+    if (!next) return;
+
+    this.handleServerRoundResolved(next);
+  }
+
+  private cleanupScene(): void {
+    if (this.hasCleanedUp) return;
+    this.hasCleanedUp = true;
+
+    if (this.visibilityChangeHandler) {
+      document.removeEventListener("visibilitychange", this.visibilityChangeHandler);
+      this.visibilityChangeHandler = undefined;
+    }
+
+    // Stop any ZK tickers/toasts.
+    try {
+      this.stopZkWaitingTicker();
+    } catch {
+      // ignore
+    }
+
+    if (this.activeTransactionToast) {
+      try {
+        this.activeTransactionToast.close();
+      } catch {
+        // ignore
+      }
+      this.activeTransactionToast = undefined;
+    }
+
+    // Unsubscribe from EventBus events registered by this scene instance.
+    const disposers = this.busDisposers.splice(0);
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   private setupEventListeners(): void {
     // Listen for round start (triggered by React wrapper)
-    EventBus.onEvent("round:start", ({ roundNumber }) => {
+    this.onBus("round:start", (data: unknown) => {
       this.startRound();
     });
 
-    // Listen for cancel events
-    EventBus.onEvent("game:rejectionWaiting", ({ message }) => {
-      // Spectators should never see rejection waiting state
-      if (this.config.isSpectator) return;
-      this.showFloatingText(message, GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y - 100, "#f97316");
-      this.turnIndicatorText.setText(message);
-    });
-
-    EventBus.onEvent("game:opponentRejected", () => {
+    this.onBus("game:opponentRejected", () => {
       // Deprecated - handled by game:moveRejected now
     });
 
@@ -3239,7 +3334,7 @@ export class FightScene extends Phaser.Scene {
     // ========================================
 
     // Listen for opponent's move submission (show "opponent ready" indicator)
-    EventBus.on("game:moveSubmitted", (data: unknown) => {
+    this.onBus("game:moveSubmitted", (data: unknown) => {
       const payload = data as { player: string };
       const isOpponentMove =
         (this.config.playerRole === "player1" && payload.player === "player2") ||
@@ -3253,7 +3348,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for move in-flight (player clicked move, transaction is being processed)
-    EventBus.on("game:moveInFlight", (data: unknown) => {
+    this.onBus("game:moveInFlight", (data: unknown) => {
       const payload = data as { player: string; cancelled?: boolean };
       if (payload.player === this.config.playerRole) {
         if (payload.cancelled) {
@@ -3302,7 +3397,7 @@ export class FightScene extends Phaser.Scene {
         }
       }
     };
-    EventBus.on("game:moveConfirmed", this.moveConfirmedListener, this);
+    this.onBus("game:moveConfirmed", this.moveConfirmedListener);
 
     // Private turn flow status updates (ZK commit/reveal each turn)
     this.privateRoundCommittedListener = (data: unknown) => {
@@ -3365,7 +3460,7 @@ export class FightScene extends Phaser.Scene {
         this.startZkWaitingTicker("Commitment recorded. Waiting for opponent...", "#22c55e");
       }
     };
-    EventBus.on("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
+    this.onBus("game:privateRoundCommitted", this.privateRoundCommittedListener);
 
     this.zkProgressListener = (data: unknown) => {
       if (!PRIVATE_ROUNDS_ENABLED) return;
@@ -3373,6 +3468,12 @@ export class FightScene extends Phaser.Scene {
 
       const payload = data as { message?: string; color?: string; stickyMs?: number; stage?: string; roundNumber?: number };
       if (!payload?.message) return;
+
+      // Important: on-chain verification can complete while Phase 3 animations are playing.
+      // Those progress events should NOT override the Phase 3 narration/indicator, otherwise
+      // the UI looks like it "jumps" or desyncs mid-move.
+      // We still allow the on-chain badge to update, but we suppress ticker/status updates.
+      const isMidResolution = this.isResolving || this.phase === "resolving";
 
       const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
       const payloadRound = Number(payload.roundNumber ?? currentRound);
@@ -3401,13 +3502,15 @@ export class FightScene extends Phaser.Scene {
         });
       }
 
+      if (isMidResolution) return;
+
       this.startZkWaitingTicker();
       this.showZkWaitingStatus(payload.message, payload.color || "#22c55e", payload.stickyMs || 1600);
     };
-    EventBus.on("game:zkProgress", this.zkProgressListener, this);
+    this.onBus("game:zkProgress", this.zkProgressListener);
 
     // Listen for round resolution (from server combat resolver)
-    EventBus.on("game:roundResolved", (data: unknown) => {
+    this.onBus("game:roundResolved", (data: unknown) => {
       const raw = data as any;
       const eventRoundNumber = Number(raw.roundNumber ?? this.serverState?.currentRound ?? 1);
       const eventTurnNumber = Number(raw.turnNumber ?? this.combatEngine?.getState()?.currentTurn ?? 1);
@@ -3510,11 +3613,12 @@ export class FightScene extends Phaser.Scene {
       this.lastResolvedEventKey = dedupeKey;
       this.processedResolvedTurns.add(turnKey);
 
-      this.handleServerRoundResolved(payload);
+      // Queue and play sequentially to prevent overlapping resolutions.
+      this.enqueueRoundResolved(payload);
     });
 
     // Listen for match ended (from server)
-    EventBus.on("game:matchEnded", (data: unknown) => {
+    this.onBus("game:matchEnded", (data: unknown) => {
       const payload = data as {
         winner: "player1" | "player2";
         winnerAddress: string;
@@ -3551,7 +3655,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for round starting (synchronized timing from server)
-    EventBus.on("game:roundStarting", (data: unknown) => {
+    this.onBus("game:roundStarting", (data: unknown) => {
       const payload = data as {
         roundNumber: number;
         turnNumber: number;
@@ -3586,7 +3690,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for opponent move rejection
-    EventBus.on("game:moveRejected", (data: unknown) => {
+    this.onBus("game:moveRejected", (data: unknown) => {
       // Spectators should never react to move rejection events
       if (this.config.isSpectator) return;
 
@@ -3601,7 +3705,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for Power Surge selections (from realtime channel)
-    EventBus.on("game:powerSurgeSelected", (data: unknown) => {
+    this.onBus("game:powerSurgeSelected", (data: unknown) => {
       const payload = data as {
         player: "player1" | "player2";
         cardId: PowerSurgeCardId;
@@ -3623,7 +3727,7 @@ export class FightScene extends Phaser.Scene {
 
     // Listen for Power Surge cards offered (from realtime channel) - spectator mode
     if (this.config.isSpectator) {
-      EventBus.on("game:powerSurgeCards", (data: unknown) => {
+      this.onBus("game:powerSurgeCards", (data: unknown) => {
         const payload = data as {
           matchId: string;
           roundNumber: number;
@@ -3646,7 +3750,7 @@ export class FightScene extends Phaser.Scene {
     }
 
     // Listen for match cancellation (both players rejected OR both disconnected)
-    EventBus.on("game:matchCancelled", (data: unknown) => {
+    this.onBus("game:matchCancelled", (data: unknown) => {
       const payload = data as {
         matchId: string;
         reason: string;
@@ -3715,7 +3819,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for opponent disconnect
-    EventBus.on("game:playerDisconnected", (data: unknown) => {
+    this.onBus("game:playerDisconnected", (data: unknown) => {
       const payload = data as {
         player: "player1" | "player2";
         address: string;
@@ -3730,7 +3834,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for opponent reconnect
-    EventBus.on("game:playerReconnected", (data: unknown) => {
+    this.onBus("game:playerReconnected", (data: unknown) => {
       const payload = data as {
         player: "player1" | "player2";
         address: string;
@@ -3744,7 +3848,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for state sync (reconnection)
-    EventBus.on("game:stateSync", (data: unknown) => {
+    this.onBus("game:stateSync", (data: unknown) => {
       const state = data as {
         status: string;
         currentRound: number;
@@ -3761,7 +3865,7 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for comprehensive fight state updates from server
-    EventBus.on("game:fightStateUpdate", (data: unknown) => {
+    this.onBus("game:fightStateUpdate", (data: unknown) => {
       const payload = data as { matchId: string; update: any; timestamp: number };
       console.log("[FightScene] Received fight state update:", payload);
 
@@ -3783,20 +3887,26 @@ export class FightScene extends Phaser.Scene {
     });
 
     // Listen for local rejection waiting (we rejected, waiting for opponent)
-    EventBus.on("game:rejectionWaiting", (data: unknown) => {
+    this.onBus("game:rejectionWaiting", (data: unknown) => {
       // Spectators should never see rejection waiting state
       if (this.config.isSpectator) return;
 
       const payload = data as { message: string };
+      const message = payload?.message?.trim() || "Waiting for opponent...";
       this.isWaitingForOpponent = true;
-      this.turnIndicatorText.setText("Waiting for opponent...");
+      try {
+        this.showFloatingText(message, GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.CENTER_Y - 100, "#f97316");
+      } catch {
+        // ignore
+      }
+      this.turnIndicatorText.setText(message);
       this.turnIndicatorText.setColor("#f97316");
       // this.moveButtons.forEach(btn => btn.setAlpha(0.4).disableInteractive());
     });
 
     // Listen for move error (e.g. wallet rejected but failed to record rejection)
     // This allows the user to try again if the rejection recording failed
-    EventBus.on("game:moveError", (data: unknown) => {
+    this.onBus("game:moveError", (data: unknown) => {
       // Spectators should never see move error state
       if (this.config.isSpectator) return;
 
@@ -3841,7 +3951,7 @@ export class FightScene extends Phaser.Scene {
 
     // Listen for incoming chat messages from opponent only
     // (we display our own messages locally in onSendMessage)
-    EventBus.on("game:chatMessage", (data: unknown) => {
+    this.onBus("game:chatMessage", (data: unknown) => {
       const payload = data as { sender: string; senderAddress: string; message: string; timestamp: number };
 
       // Skip messages from ourselves - we already displayed them locally
@@ -3930,12 +4040,18 @@ export class FightScene extends Phaser.Scene {
    * Show disconnect overlay with countdown.
    */
   private showDisconnectOverlay(timeoutSeconds: number): void {
+    if (this.hasCleanedUp || this.phase === "match_end" || !this.scene.isActive()) return;
+
     this.opponentDisconnected = true;
     this.disconnectTimeoutAt = Date.now() + timeoutSeconds * 1000;
 
     // Create overlay if it doesn't exist
     if (!this.disconnectOverlay) {
-      this.disconnectOverlay = this.add.container(0, 0);
+      try {
+        this.disconnectOverlay = this.add.container(0, 0);
+      } catch {
+        return;
+      }
       this.disconnectOverlay.setDepth(1000);
 
       // Semi-transparent background
@@ -4338,15 +4454,11 @@ export class FightScene extends Phaser.Scene {
       }
     }
 
+    // Some server payloads omit countdownSeconds; default to 3 to avoid noisy warnings and
+    // keep the start-of-round pacing consistent.
     const normalizedCountdownSeconds = Number.isFinite(countdownSeconds)
       ? Math.max(0, Math.floor(countdownSeconds))
-      : 0;
-
-    if (!Number.isFinite(countdownSeconds)) {
-      console.warn(
-        `[FightScene] Invalid countdownSeconds received (${String(countdownSeconds)}), starting selection immediately`
-      );
-    }
+      : 3;
 
     if (normalizedCountdownSeconds <= 0) {
       // No countdown, start immediately
@@ -4418,8 +4530,12 @@ export class FightScene extends Phaser.Scene {
       ? (this.serverState?.player1Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY)
       : (this.serverState?.player2Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY);
 
-    this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Phase 2/3: Plan moves (0/10)" : "Select your move!");
-    this.turnIndicatorText.setColor("#40e0d0");
+    try {
+      this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Phase 2/3: Plan moves (0/10)" : "Select your move!");
+      this.turnIndicatorText.setColor("#40e0d0");
+    } catch {
+      // ignore renderer/text teardown races
+    }
     this.updatePrivatePlanEnergyText();
 
     // React UI handles button state and affordability
@@ -4431,14 +4547,14 @@ export class FightScene extends Phaser.Scene {
     const currentTurn = this.combatEngine?.getState()?.currentTurn ?? 1;
 
     if (PRIVATE_ROUNDS_ENABLED && currentTurn === 1 && remainingMs < ROUND_MOVE_TIMER_MS - 5000) {
-      console.warn(`[FightScene] *** Rebased round-start timer from ${Math.floor(remainingMs / 1000)}s to full ${Math.floor(ROUND_MOVE_TIMER_MS / 1000)}s`);
+      console.log(`[FightScene] Rebased round-start timer from ${Math.floor(remainingMs / 1000)}s to full ${Math.floor(ROUND_MOVE_TIMER_MS / 1000)}s`);
       moveDeadlineAt = now + ROUND_MOVE_TIMER_MS;
       remainingMs = ROUND_MOVE_TIMER_MS;
     }
 
     // If less than 15 seconds remaining (shouldn't happen with proper server timing), extend the deadline
     if (remainingMs < 15000) {
-      console.warn(`[FightScene] *** SAFETY FALLBACK: Deadline too close (${Math.floor(remainingMs / 1000)}s), extending by 20s`);
+      console.log(`[FightScene] Safety fallback: deadline too close (${Math.floor(remainingMs / 1000)}s), extending to full timer`);
       moveDeadlineAt = now + ROUND_MOVE_TIMER_MS; // Give full move timer
       remainingMs = ROUND_MOVE_TIMER_MS;
     }
@@ -4677,8 +4793,14 @@ export class FightScene extends Phaser.Scene {
         player1RoundsWon: payload.player1RoundsWon,
         player2RoundsWon: payload.player2RoundsWon,
         currentRound: this.serverState?.currentRound ?? 1,
-        player1IsStunned: payload.player1?.isStunned ?? false,
-        player2IsStunned: payload.player2?.isStunned ?? false,
+        // Stun is a *turn-start* status in this game flow.
+        // The roundResolved payload may reflect "stunned next" (e.g., guard break), and applying
+        // it immediately makes the defender look stunned right after the narrative shows
+        // "Special beats Block" — which feels like a desync.
+        // We keep current stun state here and rely on the next round_starting/stateSync to
+        // introduce stun at the correct time.
+        player1IsStunned: this.serverState?.player1IsStunned ?? false,
+        player2IsStunned: this.serverState?.player2IsStunned ?? false,
       };
 
       // Capture stun-at-turn-start state from the last round_starting payload.
@@ -4779,6 +4901,24 @@ export class FightScene extends Phaser.Scene {
         const p1ActualDamage = Math.max(0, prevP1Health - payload.player1Health);
         const p2ActualDamage = Math.max(0, prevP2Health - payload.player2Health);
 
+        const getAnimDurationMs = (animKey: string, fallbackMs: number): number => {
+          try {
+            if (!this.anims.exists(animKey)) return fallbackMs;
+            const anim = this.anims.get(animKey) as any;
+            const duration = Number(anim?.duration);
+            if (Number.isFinite(duration) && duration > 0) return Math.ceil(duration);
+
+            const frames = Array.isArray(anim?.frames) ? anim.frames.length : Number(anim?.frames?.length ?? 0);
+            const frameRate = Number(anim?.frameRate ?? 24);
+            if (Number.isFinite(frames) && frames > 0 && Number.isFinite(frameRate) && frameRate > 0) {
+              return Math.ceil((frames / frameRate) * 1000);
+            }
+          } catch {
+            // ignore and fall back
+          }
+          return fallbackMs;
+        };
+
         const splitDamageIntoHits = (total: number, hits: number): number[] => {
           const safeHits = Math.max(1, Math.floor(hits));
           const safeTotal = Math.max(0, Math.floor(total));
@@ -4811,12 +4951,17 @@ export class FightScene extends Phaser.Scene {
             }
 
             const animKey = `${p1Char}_${p1Move}`;
+            const animDurationMs = getAnimDurationMs(animKey, PUNCH_KICK_HIT_MS);
+            const baseSpacingMs = (p1Move === "punch" || p1Move === "kick") ? PUNCH_KICK_HIT_MS : animDurationMs;
+            const hitSpacingMs = Math.max(baseSpacingMs, animDurationMs);
+            const impactMs = Math.min(HIT_IMPACT_MS, Math.max(120, Math.floor(animDurationMs * 0.25)));
+
             const shouldRepeat = (p1Move === "punch" || p1Move === "kick") && p1HitCount > 1;
             const hitCount = shouldRepeat ? p1HitCount : 1;
             const damageParts = splitDamageIntoHits(p2ActualDamage, hitCount);
 
             for (let i = 0; i < hitCount; i++) {
-              const startOffset = i * PUNCH_KICK_HIT_MS;
+              const startOffset = i * hitSpacingMs;
 
               this.time.delayedCall(startOffset, () => {
                 if (this.anims.exists(animKey) || p1Move === "block") {
@@ -4834,7 +4979,7 @@ export class FightScene extends Phaser.Scene {
                 }
               });
 
-              this.time.delayedCall(startOffset + HIT_IMPACT_MS, () => {
+              this.time.delayedCall(startOffset + impactMs, () => {
                 const part = damageParts[i] ?? 0;
                 if (part > 0) {
                   this.showFloatingText(`-${part}`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#ff4444");
@@ -4851,7 +4996,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            const afterLastHitOffset = (hitCount - 1) * PUNCH_KICK_HIT_MS;
+            const afterLastHitOffset = (hitCount - 1) * hitSpacingMs;
 
             if (payload.player2.energyDrained && payload.player2.energyDrained > 0) {
               this.time.delayedCall(afterLastHitOffset + 500, () => {
@@ -4876,7 +5021,8 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            this.time.delayedCall(hitCount * PUNCH_KICK_HIT_MS, () => resolve());
+            const totalMs = afterLastHitOffset + animDurationMs;
+            this.time.delayedCall(totalMs, () => resolve());
           });
         };
 
@@ -4889,12 +5035,17 @@ export class FightScene extends Phaser.Scene {
             }
 
             const animKey = `${p2Char}_${p2Move}`;
+            const animDurationMs = getAnimDurationMs(animKey, PUNCH_KICK_HIT_MS);
+            const baseSpacingMs = (p2Move === "punch" || p2Move === "kick") ? PUNCH_KICK_HIT_MS : animDurationMs;
+            const hitSpacingMs = Math.max(baseSpacingMs, animDurationMs);
+            const impactMs = Math.min(HIT_IMPACT_MS, Math.max(120, Math.floor(animDurationMs * 0.25)));
+
             const shouldRepeat = (p2Move === "punch" || p2Move === "kick") && p2HitCount > 1;
             const hitCount = shouldRepeat ? p2HitCount : 1;
             const damageParts = splitDamageIntoHits(p1ActualDamage, hitCount);
 
             for (let i = 0; i < hitCount; i++) {
-              const startOffset = i * PUNCH_KICK_HIT_MS;
+              const startOffset = i * hitSpacingMs;
 
               this.time.delayedCall(startOffset, () => {
                 if (this.anims.exists(animKey) || p2Move === "block") {
@@ -4912,7 +5063,7 @@ export class FightScene extends Phaser.Scene {
                 }
               });
 
-              this.time.delayedCall(startOffset + HIT_IMPACT_MS, () => {
+              this.time.delayedCall(startOffset + impactMs, () => {
                 const part = damageParts[i] ?? 0;
                 if (part > 0) {
                   this.showFloatingText(`-${part}`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#ff4444");
@@ -4929,7 +5080,7 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            const afterLastHitOffset = (hitCount - 1) * PUNCH_KICK_HIT_MS;
+            const afterLastHitOffset = (hitCount - 1) * hitSpacingMs;
 
             if (payload.player1.energyDrained && payload.player1.energyDrained > 0) {
               this.time.delayedCall(afterLastHitOffset + 500, () => {
@@ -4954,7 +5105,8 @@ export class FightScene extends Phaser.Scene {
               });
             }
 
-            this.time.delayedCall(hitCount * PUNCH_KICK_HIT_MS, () => resolve());
+            const totalMs = afterLastHitOffset + animDurationMs;
+            this.time.delayedCall(totalMs, () => resolve());
           });
         };
 
@@ -5014,73 +5166,89 @@ export class FightScene extends Phaser.Scene {
             duration: p2IsStunned ? 0 : 600,
             ease: 'Power2',
             onComplete: () => {
-              // Unset resolving flag
-              this.isResolving = false;
+              const REST_MS = 1000;
 
-              // If match is over, DO NOT return to idle
-              if (payload.isMatchOver) {
-                console.log("[FightScene] Match is over - skipping return to idle");
-
-                // Process any queued match end payload
-                if (this.pendingMatchEndPayload) {
-                  console.log("[FightScene] Processing queued match end payload");
-                  this.processMatchEnd(this.pendingMatchEndPayload);
-                  this.pendingMatchEndPayload = null;
-                } else {
-                  // Fallback: if match_ended broadcast was lost, fetch the final match state
-                  // to trigger game:matchEnded and transition to ResultsScene.
-                  console.warn("[FightScene] No pendingMatchEndPayload on isMatchOver; fetching final match state as fallback");
-                  void this.fetchFinalMatchState();
+              // Phase 5: Return to idle immediately once both fighters are back.
+              if (!payload.isMatchOver) {
+                if (this.anims.exists(`${p1Char}_idle`)) {
+                  const p1IdleScale = getAnimationScale(p1Char, "idle");
+                  this.player1Sprite.setScale(p1IdleScale);
+                  this.player1Sprite.play(`${p1Char}_idle`);
                 }
-                return;
+                if (this.anims.exists(`${p2Char}_idle`)) {
+                  const p2IdleScale = getAnimationScale(p2Char, "idle");
+                  this.player2Sprite.setScale(p2IdleScale);
+                  this.player2Sprite.play(`${p2Char}_idle`);
+                }
+
+                this.tweens.add({
+                  targets: this.narrativeText,
+                  alpha: 0,
+                  duration: 300,
+                });
               }
 
-              // Phase 5: Return to idle
-              if (this.anims.exists(`${p1Char}_idle`)) {
-                const p1IdleScale = getAnimationScale(p1Char, "idle");
-                this.player1Sprite.setScale(p1IdleScale);
-                this.player1Sprite.play(`${p1Char}_idle`);
-              }
-              if (this.anims.exists(`${p2Char}_idle`)) {
-                const p2IdleScale = getAnimationScale(p2Char, "idle");
-                this.player2Sprite.setScale(p2IdleScale);
-                this.player2Sprite.play(`${p2Char}_idle`);
-              }
+              // Keep isResolving true during the short rest so we don't instantly start the next
+              // turn (which looks like "middle → back → immediately middle again").
+              this.time.delayedCall(REST_MS, () => {
+                // If match is over, do not continue turn flow.
+                if (payload.isMatchOver) {
+                  this.isResolving = false;
+                  console.log("[FightScene] Match is over - skipping next turn flow");
 
-              // Fade out narrative
-              this.tweens.add({
-                targets: this.narrativeText,
-                alpha: 0,
-                duration: 300,
-              });
+                  if (this.pendingMatchEndPayload) {
+                    console.log("[FightScene] Processing queued match end payload");
+                    this.processMatchEnd(this.pendingMatchEndPayload);
+                    this.pendingMatchEndPayload = null;
+                  } else {
+                    console.warn("[FightScene] No pendingMatchEndPayload on isMatchOver; fetching final match state as fallback");
+                    void this.fetchFinalMatchState();
+                  }
+                  return;
+                }
 
-              // Handle round/match end
-              if (payload.isMatchOver) {
-                // Match end handled by event (processMatchEnd called above if pending)
-              } else if (payload.isRoundOver) {
-                this.showRoundEndFromServer(payload.roundWinner, payload.player1RoundsWon, payload.player2RoundsWon);
-              } else {
-                // Turn ended, round continues
+                // Apply stun carry *for the next turn* after the current animations have finished.
+                if (!payload.isRoundOver && this.serverState) {
+                  this.serverState.player1IsStunned = Boolean(payload.player1?.isStunned);
+                  this.serverState.player2IsStunned = Boolean(payload.player2?.isStunned);
+                  this.toggleStunEffect("player1", this.serverState.player1IsStunned ?? false);
+                  this.toggleStunEffect("player2", this.serverState.player2IsStunned ?? false);
+                }
+
+                // Unset resolving flag after rest.
+                this.isResolving = false;
+
+                // If another resolved turn is already queued (common in private rounds), play it now.
+                if (!payload.isRoundOver && this.roundResolvedQueue.length > 0) {
+                  this.tryPlayNextResolvedTurn();
+                  return;
+                }
+
+                // Round ended → show round end UI.
+                if (payload.isRoundOver) {
+                  this.showRoundEndFromServer(payload.roundWinner, payload.player1RoundsWon, payload.player2RoundsWon);
+                  return;
+                }
+
+                // Otherwise, wait for the next round_starting payload (public rounds).
                 this.selectedMove = null;
                 if (this.pendingRoundStart) {
                   console.log(`[FightScene] *** Processing queued pendingRoundStart after animations`);
                   const queuedPayload = this.pendingRoundStart;
                   this.pendingRoundStart = null;
-                  // Reset phase to neutral state so startRoundFromServer doesn't re-queue
-                  // (the queuing check looks at isResolving and phase)
                   this.phase = "selecting";
                   this.startRoundFromServer(queuedPayload, false);
                 } else {
-                  console.warn(`[FightScene] *** WARNING: No pendingRoundStart after animations! Setting phase to 'selecting' and waiting for round_starting event`);
-                  console.warn(`[FightScene] *** This may indicate round_starting arrived before round_resolved or was lost`);
                   this.phase = "waiting";
-                  this.turnIndicatorText.setText("Waiting for next turn...");
-                  this.turnIndicatorText.setColor(PRIVATE_ROUNDS_ENABLED ? "#22c55e" : "#888888");
+                  if (this.isActiveText(this.turnIndicatorText)) {
+                    this.turnIndicatorText.setText("Waiting for next turn...");
+                    this.turnIndicatorText.setColor(PRIVATE_ROUNDS_ENABLED ? "#22c55e" : "#888888");
+                  }
                   if (PRIVATE_ROUNDS_ENABLED) {
                     this.setPhaseThreeTimerTick();
                   }
                 }
-              }
+              });
             }
           });
         })();
@@ -5518,8 +5686,12 @@ export class FightScene extends Phaser.Scene {
         onCardSelected: async (cardId: PowerSurgeCardId) => {
           await new Promise<void>((resolve, reject) => {
             const timeout = this.time.delayedCall(30000, () => {
-              EventBus.off("game:powerSurgeSelected", onSelected);
-              EventBus.off("game:powerSurgeError", onError);
+              try {
+                EventBus.off("game:powerSurgeSelected", onSelected as any, this);
+                EventBus.off("game:powerSurgeError", onError as any, this);
+              } catch {
+                // ignore
+              }
               reject(new Error("Power Surge confirmation timed out"));
             });
 
@@ -5536,8 +5708,12 @@ export class FightScene extends Phaser.Scene {
                 && payload.roundNumber === roundNumber
               ) {
                 timeout.remove(false);
-                EventBus.off("game:powerSurgeSelected", onSelected);
-                EventBus.off("game:powerSurgeError", onError);
+                try {
+                  EventBus.off("game:powerSurgeSelected", onSelected as any, this);
+                  EventBus.off("game:powerSurgeError", onError as any, this);
+                } catch {
+                  // ignore
+                }
                 resolve();
               }
             };
@@ -5556,14 +5732,18 @@ export class FightScene extends Phaser.Scene {
                 && payload.roundNumber === roundNumber
               ) {
                 timeout.remove(false);
-                EventBus.off("game:powerSurgeSelected", onSelected);
-                EventBus.off("game:powerSurgeError", onError);
+                try {
+                  EventBus.off("game:powerSurgeSelected", onSelected as any, this);
+                  EventBus.off("game:powerSurgeError", onError as any, this);
+                } catch {
+                  // ignore
+                }
                 reject(new Error(payload.error || "Power Surge selection failed"));
               }
             };
 
-            EventBus.on("game:powerSurgeSelected", onSelected);
-            EventBus.on("game:powerSurgeError", onError);
+            this.onBus("game:powerSurgeSelected", onSelected as any);
+            this.onBus("game:powerSurgeError", onError as any);
             EventBus.emit("fight:selectPowerSurge", {
               matchId: this.config.matchId,
               roundNumber,
@@ -5645,6 +5825,8 @@ export class FightScene extends Phaser.Scene {
     cardId: PowerSurgeCardId;
     roundNumber: number;
   }): Promise<void> {
+    if (this.hasCleanedUp || this.phase === "match_end" || !this.scene.isActive()) return;
+
     // Spectators: record both players' selections for the read-only display
     if (this.config.isSpectator) {
       console.log(`[FightScene] Spectator received surge selection: ${payload.player} chose ${payload.cardId} (round ${payload.roundNumber})`);
@@ -5713,9 +5895,13 @@ export class FightScene extends Phaser.Scene {
       const isStunCard = card?.effectType === "opponent_stun";
       if (isOpponent && isStunCard) {
         console.log(`[FightScene] Late stun apply from handleOpponentSurgeSelected: ${card?.name ?? payload.cardId}`);
-        this.turnIndicatorText.setText("YOU ARE STUNNED!");
-        this.turnIndicatorText.setColor("#ff4444");
-        this.roundTimerText.setColor("#ff4444");
+        try {
+          this.turnIndicatorText.setText("YOU ARE STUNNED!");
+          this.turnIndicatorText.setColor("#ff4444");
+          this.roundTimerText.setColor("#ff4444");
+        } catch {
+          // ignore renderer/text teardown races
+        }
 
         this.moveButtons.forEach(btn => {
           btn.setAlpha(0.3);
@@ -5756,8 +5942,7 @@ export class FightScene extends Phaser.Scene {
 
       this.showSurgeCardReveal(payload.player, payload.cardId);
 
-      // Apply visual effect overlay based on card type
-      this.applySurgeVisualEffect(payload.player, card);
+      // Visual effect is applied by showSurgeCardReveal().
 
       // NOTE: We do NOT apply immediate visual stun for Mempool Congest here.
       // The stun effect only applies on turn 1 of the round, not immediately on card selection.
@@ -5829,6 +6014,8 @@ export class FightScene extends Phaser.Scene {
    * Replaces the old text-only reveal.
    */
   private showSurgeCardReveal(player: "player1" | "player2", cardId: string): void {
+    if (this.hasCleanedUp || this.phase === "match_end" || !this.scene.isActive()) return;
+
     const card = getPowerSurgeCard(cardId as PowerSurgeCardId);
     if (!card) return;
 
@@ -5837,13 +6024,19 @@ export class FightScene extends Phaser.Scene {
 
     // Create container above character
     // Use PowerSurgeCardView for unified design
-    const container = PowerSurgeCardView.create({
-      scene: this,
-      card,
-      x: targetSprite.x,
-      y: targetSprite.y - 280,
-      scale: 0.7, // Slightly smaller than selection screen
-    });
+    let container: Phaser.GameObjects.Container;
+    try {
+      container = PowerSurgeCardView.create({
+        scene: this,
+        card,
+        x: targetSprite.x,
+        y: targetSprite.y - 280,
+        scale: 0.7, // Slightly smaller than selection screen
+      });
+    } catch (error) {
+      console.warn("[FightScene] Skipping surge reveal due to scene teardown race", error);
+      return;
+    }
 
     container.setDepth(2000); // Higher than standard UI but lower than overlays
     container.setScale(0); // Start hidden for pop-up
@@ -5853,16 +6046,20 @@ export class FightScene extends Phaser.Scene {
     const labelText = isOpponent ? "OPPONENT SURGE" : "YOUR SURGE";
     const labelColor = isOpponent ? "#ff4444" : "#22c55e";
 
-    const label = this.add.text(0, -PowerSurgeCardView.CARD_HEIGHT / 2 - 30, labelText, {
-      fontFamily: "monospace",
-      fontSize: "20px",
-      color: labelColor,
-      fontStyle: "bold",
-      stroke: "#000000",
-      strokeThickness: 4,
-    });
-    label.setOrigin(0.5);
-    container.add(label);
+    try {
+      const label = this.add.text(0, -PowerSurgeCardView.CARD_HEIGHT / 2 - 30, labelText, {
+        fontFamily: "monospace",
+        fontSize: "20px",
+        color: labelColor,
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 4,
+      });
+      label.setOrigin(0.5);
+      container.add(label);
+    } catch {
+      // ignore
+    }
 
     // Animation: Pop in
     this.tweens.add({
@@ -5900,6 +6097,7 @@ export class FightScene extends Phaser.Scene {
     card: ReturnType<typeof getPowerSurgeCard>
   ): void {
     if (!card) return;
+    if (this.hasCleanedUp || this.phase === "match_end" || !this.scene.isActive()) return;
 
     const sprite = player === "player1" ? this.player1Sprite : this.player2Sprite;
 
@@ -5932,8 +6130,15 @@ export class FightScene extends Phaser.Scene {
    * Create particle effect for surge activation.
    */
   private createSurgeParticles(x: number, y: number, color: number): void {
+    if (this.hasCleanedUp || this.phase === "match_end" || !this.scene.isActive()) return;
+
     for (let i = 0; i < 15; i++) {
-      const particle = this.add.graphics();
+      let particle: Phaser.GameObjects.Graphics;
+      try {
+        particle = this.add.graphics();
+      } catch {
+        return;
+      }
       particle.fillStyle(color, 1);
       particle.fillCircle(0, 0, 3 + Math.random() * 3);
       particle.setPosition(x, y);
@@ -6098,15 +6303,27 @@ export class FightScene extends Phaser.Scene {
   private setupVisibilityChangeHandler(): void {
     this.visibilityChangeHandler = () => {
       if (document.visibilityState === "visible") {
+        if (this.hasCleanedUp) return;
+        if (!this.sys || (this.sys as any).isDestroyed) return;
+        if (!this.scene.isActive()) return;
+
         console.log("[FightScene] Tab became visible - catching up with real time");
-        // Force an immediate update to catch up with any elapsed time
-        // The update() loop uses Date.now() so it will automatically
-        // show the correct timer value, trigger expiry, etc.
-        this.update(0, 0);
+
+        // Do a minimal, safe catch-up without calling Scene.update() directly.
+        // Calling update() here can run while the renderer/textures are mid-resume.
+        try {
+          this.updatePrivatePlanEnergyText();
+        } catch {
+          // ignore
+        }
 
         // If we're in selecting phase and deadline has passed, trigger timeout immediately
         if (this.phase === "selecting" && this.moveDeadlineAt > 0) {
           const remaining = this.moveDeadlineAt - Date.now();
+          if (this.isActiveText(this.roundTimerText)) {
+            const secs = Math.max(0, Math.ceil(remaining / 1000));
+            this.roundTimerText.setText(`${secs}s`);
+          }
           if (remaining <= 0 && !this.timerExpiredHandled) {
             console.log("[FightScene] Tab refocus: deadline already passed, triggering timeout");
             this.timerExpiredHandled = true;
@@ -6117,7 +6334,9 @@ export class FightScene extends Phaser.Scene {
         // If countdown should have ended, force completion
         if (this.phase === "countdown" && this.countdownEndsAt > 0 && Date.now() >= this.countdownEndsAt + 500) {
           console.log("[FightScene] Tab refocus: countdown already ended, jumping to selection");
-          this.countdownText.setAlpha(0);
+          if (this.isActiveText(this.countdownText)) {
+            this.countdownText.setAlpha(0);
+          }
           this.countdownEndsAt = 0;
           this.startSynchronizedSelectionPhase(this.moveDeadlineAt);
         }
@@ -6138,32 +6357,7 @@ export class FightScene extends Phaser.Scene {
    * Clean up visibility change listener when scene is destroyed.
    */
   destroy(): void {
-    if (this.visibilityChangeHandler) {
-      document.removeEventListener("visibilitychange", this.visibilityChangeHandler);
-      this.visibilityChangeHandler = undefined;
-    }
-
-    if (this.moveConfirmedListener) {
-      EventBus.off("game:moveConfirmed", this.moveConfirmedListener, this);
-      this.moveConfirmedListener = undefined;
-    }
-
-    if (this.privateRoundCommittedListener) {
-      EventBus.off("game:privateRoundCommitted", this.privateRoundCommittedListener, this);
-      this.privateRoundCommittedListener = undefined;
-    }
-
-    if (this.zkProgressListener) {
-      EventBus.off("game:zkProgress", this.zkProgressListener, this);
-      this.zkProgressListener = undefined;
-    }
-
-    this.stopZkWaitingTicker();
-
-    if (this.activeTransactionToast) {
-      this.activeTransactionToast.close();
-      this.activeTransactionToast = undefined;
-    }
+    this.cleanupScene();
   }
 }
 

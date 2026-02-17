@@ -261,8 +261,10 @@ function didGuardBreakThisTurn(
 ): boolean {
     if (myMove !== "block") return false;
 
-    // Direct guard break interaction (e.g. block shattered by special)
-    if (myOutcome === "shattered") return true;
+    // Note: a "shattered" block (special vs block) resets guard meter, but it is NOT
+    // treated as a guard-break stun for next turn. Stun-next is reserved for the
+    // guard meter overflowing to a break (threshold snap-to-0) or explicit missed.
+    if (myOutcome === "shattered") return false;
 
     if (myOutcome !== "guarding") return false;
 

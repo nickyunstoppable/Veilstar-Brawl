@@ -135,21 +135,37 @@ export class SelectionTimer extends Phaser.GameObjects.Container {
     const color = this.getColor();
     const colorHex = `#${color.toString(16).padStart(6, "0")}`;
 
-    this.timerText.setText(this.formatTime(this.timeRemaining));
-    this.timerText.setColor(colorHex);
+    try {
+      if (this.timerText?.active) {
+        this.timerText.setText(this.formatTime(this.timeRemaining));
+        this.timerText.setColor(colorHex);
+      }
+    } catch {
+      // ignore renderer/text teardown races
+    }
 
-    this.progressFill.clear();
+    try {
+      this.progressFill.clear();
+    } catch {
+      return;
+    }
     const progress = this.timeRemaining / this.duration;
     const fillWidth = this.BAR_WIDTH * progress;
 
     this.progressFill.fillStyle(color, 1);
     this.progressFill.fillRoundedRect(-this.BAR_WIDTH / 2, 30, fillWidth, this.BAR_HEIGHT, 4);
 
-    if (this.timerState === "critical" && this.timeRemaining > 0) {
-      const pulse = Math.sin(Date.now() / 100) * 0.1 + 1;
-      this.timerText.setScale(pulse);
-    } else {
-      this.timerText.setScale(1);
+    try {
+      if (this.timerText?.active) {
+        if (this.timerState === "critical" && this.timeRemaining > 0) {
+          const pulse = Math.sin(Date.now() / 100) * 0.1 + 1;
+          this.timerText.setScale(pulse);
+        } else {
+          this.timerText.setScale(1);
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 
@@ -222,20 +238,36 @@ export class SelectionTimer extends Phaser.GameObjects.Container {
   }
 
   setLabel(text: string): void {
-    this.labelText.setText(text);
+    try {
+      if (this.labelText?.active) this.labelText.setText(text);
+    } catch {
+      // ignore
+    }
   }
 
   showLockedIn(): void {
     this.stop();
-    this.labelText.setText("LOCKED IN!");
-    this.labelText.setColor("#22c55e");
-    this.timerText.setText("✓");
-    this.timerText.setColor("#22c55e");
-    this.timerText.setScale(1);
+    try {
+      if (this.labelText?.active) {
+        this.labelText.setText("LOCKED IN!");
+        this.labelText.setColor("#22c55e");
+      }
+      if (this.timerText?.active) {
+        this.timerText.setText("✓");
+        this.timerText.setColor("#22c55e");
+        this.timerText.setScale(1);
+      }
+    } catch {
+      // ignore
+    }
 
-    this.progressFill.clear();
-    this.progressFill.fillStyle(0x22c55e, 1);
-    this.progressFill.fillRoundedRect(-this.BAR_WIDTH / 2, 30, this.BAR_WIDTH, this.BAR_HEIGHT, 4);
+    try {
+      this.progressFill.clear();
+      this.progressFill.fillStyle(0x22c55e, 1);
+      this.progressFill.fillRoundedRect(-this.BAR_WIDTH / 2, 30, this.BAR_WIDTH, this.BAR_HEIGHT, 4);
+    } catch {
+      // ignore
+    }
   }
 
   destroy(fromScene?: boolean): void {
