@@ -1,3 +1,5 @@
+/// <reference path="../../circomlibjs.d.ts" />
+
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -5,6 +7,7 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import type { MoveType } from "./game-types";
 import { POWER_SURGE_CARD_IDS, type PowerSurgeCardId } from "./power-surge";
+import { buildPoseidon } from "circomlibjs";
 
 const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
 
@@ -14,15 +17,6 @@ const MOVE_TO_CODE: Record<MoveType, number> = {
     kick: 2,
     block: 3,
     special: 4,
-};
-
-const COMMITMENT_FACTORS = {
-    round: 1000003n,
-    turn: 1000033n,
-    player: 1000037n,
-    surge: 1000039n,
-    move: 1000081n,
-    nonce: 1000099n,
 };
 
 const setupInFlight = new Map<string, Promise<void>>();
@@ -115,6 +109,21 @@ function toBytes32FromDecimal(value: string): Buffer {
     return Buffer.from(hex, "hex");
 }
 
+let poseidonPromise: Promise<any> | null = null;
+async function getPoseidon(): Promise<any> {
+    if (!poseidonPromise) {
+        poseidonPromise = buildPoseidon();
+    }
+    return poseidonPromise;
+}
+
+async function computePoseidonCommitmentDecimal(preimage: bigint[]): Promise<string> {
+    const poseidon = await getPoseidon();
+    const out = poseidon(preimage);
+    const asBigint: bigint = poseidon.F.toObject(out);
+    return asBigint.toString(10);
+}
+
 function serializeGroth16ProofToCalldataBytes(proof: any): Buffer {
     if (!proof?.pi_a || !proof?.pi_b || !proof?.pi_c) {
         throw new Error("Invalid Groth16 proof JSON shape");
@@ -165,7 +174,19 @@ async function ensureGroth16Artifacts(circuitDir: string): Promise<void> {
 
         const circomCmd = process.env.ZK_GROTH16_CIRCOM_CMD?.trim()
             ? parseCommandLine(process.env.ZK_GROTH16_CIRCOM_CMD)
-            : ["npx", "circom2", "round_plan.circom", "--r1cs", "--wasm", "--sym", "-o", "artifacts"];
+            : [
+                "npx",
+                "circom2",
+                "round_plan.circom",
+                "--r1cs",
+                "--wasm",
+                "--sym",
+                "-o",
+                "artifacts",
+                // Resolve `include "circomlib/..."` from repo-root node_modules.
+                "-l",
+                "../../node_modules",
+            ];
 
         if (!existsSync(r1csPath) || !existsSync(wasmPath)) {
             await runCommand(circomCmd, circuitDir);
@@ -173,13 +194,25 @@ async function ensureGroth16Artifacts(circuitDir: string): Promise<void> {
 
         if (!existsSync(ptauFinalPath)) {
             await runCommand([...SNARKJS_NODE_CLI, "powersoftau", "new", "bn128", "12", "artifacts/pot12_0000.ptau", "-v"], circuitDir);
+
+            // snarkjs@0.7.6 does not support non-interactive flags for `powersoftau contribute`.
+            // Use a deterministic beacon so this step can run unattended.
+            const ptauBeaconHash = (process.env.ZK_GROTH16_PTAU_BEACON_HASH || "").trim()
+                || (process.env.ZK_GROTH16_BEACON_HASH || "").trim()
+                || "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+            const ptauBeaconItersExp = (process.env.ZK_GROTH16_PTAU_BEACON_ITERS_EXP || "").trim()
+                || (process.env.ZK_GROTH16_BEACON_ITERS_EXP || "10").trim();
+
             await runCommand([
-                ...SNARKJS_NODE_CLI, "powersoftau", "contribute",
+                ...SNARKJS_NODE_CLI,
+                "powersoftau",
+                "beacon",
                 "artifacts/pot12_0000.ptau",
                 "artifacts/pot12_0001.ptau",
-                "--name", "veilstar-groth16-local-ptau",
-                "-e", "veilstar-local-ptau-entropy",
+                ptauBeaconHash,
+                ptauBeaconItersExp,
             ], circuitDir);
+
             await runCommand([
                 ...SNARKJS_NODE_CLI, "powersoftau", "prepare", "phase2",
                 "artifacts/pot12_0001.ptau",
@@ -194,13 +227,23 @@ async function ensureGroth16Artifacts(circuitDir: string): Promise<void> {
                 "artifacts/pot12_final.ptau",
                 "artifacts/round_plan_0000.zkey",
             ], circuitDir);
+
+            // snarkjs@0.7.6 does not support non-interactive flags for `zkey contribute`.
+            // Use `zkey beacon` instead so CI/Fly builds don't hang waiting for entropy.
+            const beaconHash = (process.env.ZK_GROTH16_BEACON_HASH || "").trim()
+                || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            const beaconItersExp = (process.env.ZK_GROTH16_BEACON_ITERS_EXP || "10").trim();
+
             await runCommand([
-                ...SNARKJS_NODE_CLI, "zkey", "contribute",
+                ...SNARKJS_NODE_CLI,
+                "zkey",
+                "beacon",
                 "artifacts/round_plan_0000.zkey",
                 "artifacts/round_plan_final.zkey",
-                "--name", "veilstar-groth16-local-zkey",
-                "-e", "veilstar-local-zkey-entropy",
+                beaconHash,
+                beaconItersExp,
             ], circuitDir);
+
             await runCommand([
                 ...SNARKJS_NODE_CLI, "zkey", "export", "verificationkey",
                 "artifacts/round_plan_final.zkey",
@@ -217,32 +260,13 @@ async function ensureGroth16Artifacts(circuitDir: string): Promise<void> {
     }
 }
 
-function computeCommitment(inputs: {
-    matchIdField: bigint;
-    roundNumber: bigint;
-    turnNumber: bigint;
-    playerField: bigint;
-    surgeCode: bigint;
-    moveCode: bigint;
-    nonce: bigint;
-}): bigint {
-    return (
-        inputs.matchIdField
-        + inputs.roundNumber * COMMITMENT_FACTORS.round
-        + inputs.turnNumber * COMMITMENT_FACTORS.turn
-        + inputs.playerField * COMMITMENT_FACTORS.player
-        + inputs.surgeCode * COMMITMENT_FACTORS.surge
-        + inputs.moveCode * COMMITMENT_FACTORS.move
-        + inputs.nonce * COMMITMENT_FACTORS.nonce
-    ) % BN254_FIELD_PRIME;
-}
-
 export interface ProvePrivateRoundPlanParams {
     matchId: string;
     playerAddress: string;
     roundNumber: number;
     turnNumber: number;
     move: MoveType;
+    movePlan: MoveType[];
     surgeCardId?: PowerSurgeCardId | null;
     nonce?: string;
 }
@@ -283,6 +307,15 @@ export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams)
 
     const moveCode = MOVE_TO_CODE[params.move] ?? MOVE_TO_CODE.block;
 
+    const movePlan = Array.isArray(params.movePlan)
+        ? params.movePlan.filter((move): move is MoveType => !!move)
+        : [];
+    if (movePlan.length !== 10) {
+        throw new Error("movePlan must contain exactly 10 moves");
+    }
+
+    const movePlanCodes = movePlan.map((move) => MOVE_TO_CODE[move] ?? MOVE_TO_CODE.block);
+
     const nonceValue = (params.nonce && params.nonce.trim().length > 0)
         ? BigInt(params.nonce.trim())
         : toFieldDecimal(`${params.matchId}|${params.playerAddress}|${params.roundNumber}|${params.turnNumber}|${Date.now()}|${requestId}`);
@@ -291,25 +324,25 @@ export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams)
     const playerField = toFieldDecimal(params.playerAddress);
     const surgeCode = BigInt(toSurgeCode(params.surgeCardId));
 
-    const commitmentValue = computeCommitment({
+    const commitmentDecimal = await computePoseidonCommitmentDecimal([
         matchIdField,
-        roundNumber: BigInt(params.roundNumber),
-        turnNumber: BigInt(params.turnNumber),
+        BigInt(params.roundNumber),
+        BigInt(params.turnNumber),
         playerField,
         surgeCode,
-        moveCode: BigInt(moveCode),
-        nonce: nonceValue,
-    });
+        nonceValue,
+        ...movePlanCodes.map((code) => BigInt(code)),
+    ]);
 
     const input = {
-        commitment: commitmentValue.toString(),
+        commitment: commitmentDecimal,
         match_id: matchIdField.toString(),
         round_number: String(params.roundNumber),
         turn_number: String(params.turnNumber),
         player_address: playerField.toString(),
         surge_card: surgeCode.toString(),
-        selected_move: String(moveCode),
         nonce: nonceValue.toString(),
+        moves: movePlanCodes.map(String),
     };
 
     try {
@@ -334,8 +367,11 @@ export async function provePrivateRoundPlan(params: ProvePrivateRoundPlanParams)
 
         const proofBytes = serializeGroth16ProofToCalldataBytes(proofJson);
 
+        // commitment is the single public input/output at index 0.
+        const commitmentBytes32 = toBytes32FromDecimal(String(publicInputsJson?.[0] ?? commitmentDecimal));
+
         return {
-            commitment: `0x${toBytes32FromDecimal(commitmentValue.toString()).toString("hex")}`,
+            commitment: `0x${commitmentBytes32.toString("hex")}`,
             proof: `base64:${proofBytes.toString("base64")}`,
             publicInputs: JSON.stringify(publicInputsJson),
             nonce: nonceValue.toString(),

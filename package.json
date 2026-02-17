@@ -17,14 +17,18 @@
     "dev:server": "bun --watch run server/index.ts",
     "server": "bun --watch server/index.ts",
     "dev:zk": "bun --watch run zk_service/index.ts",
-    "zk": "bun run zk_service/index.ts"
+    "zk": "bun run zk_service/index.ts",
+    "typecheck:zk": "tsc -p tsconfig.zk.json --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^5.5.4"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.5.0",
     "@supabase/supabase-js": "^2.49.1",
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
     "snarkjs": "^0.7.6"
   }
 }

@@ -201,6 +201,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
     const [registrationDeadlineMs, setRegistrationDeadlineMs] = useState<number | null>(null);
     const [registrationSecondsLeft, setRegistrationSecondsLeft] = useState<number | null>(null);
+
+    const shouldRegister = !!publicKey && (stakeGate?.required ? stakeGate.pendingRegistration : pendingRegistrationNoStake);
     useEffect(() => {
         onMatchEndRef.current = onMatchEnd;
         onExitRef.current = onExit;
@@ -270,8 +272,13 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
     useEffect(() => {
         if (!publicKey) return;
-        const shouldRegister = stakeGate?.required ? stakeGate.pendingRegistration : pendingRegistrationNoStake;
-        if (!shouldRegister) return;
+        if (!shouldRegister) {
+            // If registration is no longer required, stop any countdown immediately.
+            setRegistrationDeadlineMs(null);
+            setRegistrationSecondsLeft(null);
+            registrationCancelTriggeredRef.current = false;
+            return;
+        }
         if (registrationTriggeredRef.current) return;
 
         // Start a 60s signing window as soon as we enter the registration-required state.
@@ -286,12 +293,20 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             console.error("[CharacterSelectClient] Registration signing failed:", err);
             registrationTriggeredRef.current = false;
         });
-    }, [matchId, pendingRegistrationNoStake, publicKey, registerOnChain, stakeGate?.pendingRegistration, stakeGate?.required, registrationDeadlineMs]);
+    }, [matchId, publicKey, registerOnChain, registrationDeadlineMs, shouldRegister]);
 
     // Countdown + cancel-on-expiry for the registration signing window.
     useEffect(() => {
         if (!publicKey) return;
         if (!registrationDeadlineMs) return;
+
+        // Only run the countdown while registration is actively required.
+        if (!shouldRegister) {
+            setRegistrationDeadlineMs(null);
+            setRegistrationSecondsLeft(null);
+            registrationCancelTriggeredRef.current = false;
+            return;
+        }
 
         const done = registrationStatus === "complete" || registrationStatus === "skipped";
         if (done) {
@@ -328,7 +343,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         tick();
         const interval = setInterval(tick, 250);
         return () => clearInterval(interval);
-    }, [API_BASE, matchId, onExitRef, publicKey, registrationDeadlineMs, registrationStatus]);
+    }, [matchId, publicKey, registrationDeadlineMs, registrationStatus, shouldRegister]);
 
     useEffect(() => {
         if (registrationStatus === "complete" || registrationStatus === "skipped") {

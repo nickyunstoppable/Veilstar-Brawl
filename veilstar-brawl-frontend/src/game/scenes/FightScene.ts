@@ -4897,9 +4897,11 @@ export class FightScene extends Phaser.Scene {
         ease: 'Power2',
         onComplete: () => {
         // Sequential Animation Logic using Promises
-        // Calculate actual damage from HP difference (before animations)
-        const p1ActualDamage = Math.max(0, prevP1Health - payload.player1Health);
-        const p2ActualDamage = Math.max(0, prevP2Health - payload.player2Health);
+        // Use server-provided pre-regen damageTaken for hit VFX.
+        // Net HP delta can be 0 when regen/lifesteal offsets damage, which makes
+        // stunned turns look like they dealt no damage.
+        const p1ActualDamage = Math.max(0, Math.floor(payload.player1?.damageTaken ?? 0));
+        const p2ActualDamage = Math.max(0, Math.floor(payload.player2?.damageTaken ?? 0));
 
         const getAnimDurationMs = (animKey: string, fallbackMs: number): number => {
           try {

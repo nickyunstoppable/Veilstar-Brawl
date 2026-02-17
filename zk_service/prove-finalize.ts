@@ -1,8 +1,11 @@
+/// <reference path="../circomlibjs.d.ts" />
+
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { buildPoseidon } from "circomlibjs";
 
 const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
 
@@ -118,33 +121,18 @@ function toFieldBigint(input: string): bigint {
     return BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
 }
 
-const COMMITMENT_FACTORS = {
-    round: 1000003n,
-    turn: 1000033n,
-    player: 1000037n,
-    surge: 1000039n,
-    move: 1000081n,
-    nonce: 1000099n,
-};
+function parseFirstPublicInputAsDecimal(publicInputsJson: unknown): string {
+    if (!Array.isArray(publicInputsJson) || publicInputsJson.length < 1) {
+        throw new Error("Groth16 public outputs must be a non-empty array");
+    }
 
-function computeCommitment(inputs: {
-    matchIdField: bigint;
-    roundNumber: bigint;
-    turnNumber: bigint;
-    playerField: bigint;
-    surgeCode: bigint;
-    moveCode: bigint;
-    nonce: bigint;
-}): bigint {
-    return (
-        inputs.matchIdField
-        + inputs.roundNumber * COMMITMENT_FACTORS.round
-        + inputs.turnNumber * COMMITMENT_FACTORS.turn
-        + inputs.playerField * COMMITMENT_FACTORS.player
-        + inputs.surgeCode * COMMITMENT_FACTORS.surge
-        + inputs.moveCode * COMMITMENT_FACTORS.move
-        + inputs.nonce * COMMITMENT_FACTORS.nonce
-    ) % BN254_FIELD_PRIME;
+    const first = publicInputsJson[0];
+    const text = typeof first === "string" ? first.trim() : String(first ?? "").trim();
+    if (!/^[0-9]+$/.test(text)) {
+        throw new Error("Groth16 public output[0] must be a decimal field element");
+    }
+
+    return text;
 }
 
 function toBytes32FromDecimal(value: string): Buffer {
@@ -186,6 +174,21 @@ function serializeGroth16ProofToCalldataBytes(proof: any): Buffer {
     return calldata;
 }
 
+let poseidonPromise: Promise<any> | null = null;
+async function getPoseidon(): Promise<any> {
+    if (!poseidonPromise) {
+        poseidonPromise = buildPoseidon();
+    }
+    return poseidonPromise;
+}
+
+async function computePoseidonCommitmentDecimal(preimage: bigint[]): Promise<string> {
+    const poseidon = await getPoseidon();
+    const out = poseidon(preimage);
+    const asBigint: bigint = poseidon.F.toObject(out);
+    return asBigint.toString(10);
+}
+
 function normalizeMove(move: unknown): MoveType {
     if (move === "punch" || move === "kick" || move === "block" || move === "special" || move === "stunned") {
         return move;
@@ -205,6 +208,14 @@ function collectWinnerMoves(transcript: any, winnerAddress: string): MoveType[] 
     }
 
     return moves;
+}
+
+function padOrTrimMovePlan(moves: MoveType[], desiredLength: number): MoveType[] {
+    const normalized = Array.isArray(moves) ? moves.slice(0, desiredLength) : [];
+    while (normalized.length < desiredLength) {
+        normalized.push("block");
+    }
+    return normalized;
 }
 
 function deriveRoundNumber(transcript: any): number {
@@ -264,9 +275,11 @@ async function main() {
     const publicJsonPath = join(outDir, "public.json");
 
     const winnerMoves = collectWinnerMoves(transcript, args.winnerAddress);
-    const selectedMove = winnerMoves[winnerMoves.length - 1] || winnerMoves[0] || "block";
-    const selectedMoveCode = BigInt(MOVE_TO_CODE[selectedMove]);
-    const turnNumber = Math.max(1, winnerMoves.length || 1);
+    const movePlan = padOrTrimMovePlan(winnerMoves, 10);
+    const movePlanCodes = movePlan.map((move) => BigInt(MOVE_TO_CODE[move] ?? MOVE_TO_CODE.block));
+
+    // Keep turn number deterministic for the finalize proof.
+    const turnNumber = 1;
     const roundNumber = deriveRoundNumber(transcript);
     const surgeCode = BigInt(deriveSurgeCode(transcript));
 
@@ -274,25 +287,25 @@ async function main() {
     const matchIdField = toFieldBigint(args.matchId);
     const playerField = toFieldBigint(args.winnerAddress);
 
-    const commitmentValue = computeCommitment({
+    const commitmentDecimal = await computePoseidonCommitmentDecimal([
         matchIdField,
-        roundNumber: BigInt(roundNumber),
-        turnNumber: BigInt(turnNumber),
+        BigInt(roundNumber),
+        BigInt(turnNumber),
         playerField,
         surgeCode,
-        moveCode: selectedMoveCode,
-        nonce: nonceValue,
-    });
+        nonceValue,
+        ...movePlanCodes,
+    ]);
 
     const input = {
-        commitment: commitmentValue.toString(),
+        commitment: commitmentDecimal,
         match_id: matchIdField.toString(),
         round_number: String(roundNumber),
         turn_number: String(turnNumber),
         player_address: playerField.toString(),
         surge_card: surgeCode.toString(),
-        selected_move: selectedMoveCode.toString(),
         nonce: nonceValue.toString(),
+        moves: movePlanCodes.map((code) => code.toString(10)),
     };
 
     try {
@@ -315,7 +328,10 @@ async function main() {
         ]);
 
         const proofJson = JSON.parse(proofJsonRaw);
+        const publicInputsJson = JSON.parse(publicJsonRaw);
         const proofBytes = serializeGroth16ProofToCalldataBytes(proofJson);
+
+        const commitmentBytes32 = toBytes32FromDecimal(String(publicInputsJson?.[0] ?? commitmentDecimal));
 
         await mkdir(resolve(args.proofPath, ".."), { recursive: true }).catch(() => {});
         await mkdir(resolve(args.publicInputsPath, ".."), { recursive: true }).catch(() => {});
@@ -331,7 +347,7 @@ async function main() {
             winnerAddress: args.winnerAddress,
             proofPath: args.proofPath,
             publicInputsPath: args.publicInputsPath,
-            commitment: `0x${toBytes32FromDecimal(commitmentValue.toString()).toString("hex")}`,
+            commitment: `0x${commitmentBytes32.toString("hex")}`,
         }));
     } finally {
         await rm(workspace, { recursive: true, force: true }).catch(() => {});

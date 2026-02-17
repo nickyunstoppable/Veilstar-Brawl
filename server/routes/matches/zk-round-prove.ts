@@ -9,6 +9,7 @@ interface ProveRoundBody {
     roundNumber?: number;
     turnNumber?: number;
     move?: MoveType;
+    movePlan?: MoveType[];
     surgeCardId?: string | null;
     nonce?: string;
 }
@@ -43,6 +44,13 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             return Response.json({ error: "Missing/invalid move" }, { status: 400 });
         }
 
+        const movePlan = Array.isArray(body.movePlan)
+            ? body.movePlan.filter((move): move is MoveType => isMoveType(move))
+            : null;
+        if (!movePlan || movePlan.length !== 10) {
+            return Response.json({ error: "Missing/invalid movePlan (exactly 10 moves required)" }, { status: 400 });
+        }
+
         if (body.surgeCardId != null && !isPowerSurgeCardId(body.surgeCardId)) {
             return Response.json({ error: "Missing/invalid surgeCardId" }, { status: 400 });
         }
@@ -53,6 +61,7 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
             roundNumber,
             turnNumber,
             move: body.move,
+            movePlan,
             surgeCardId: body.surgeCardId ?? null,
             nonce: body.nonce,
         });

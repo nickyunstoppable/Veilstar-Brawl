@@ -2,6 +2,34 @@ import { describe, expect, it } from "bun:test";
 import { resolveRound } from "./round-resolver";
 
 describe("round-resolver power surge integration", () => {
+  it("still deals damage when opponent is stunned", () => {
+    const result = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "stunned",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-stunned",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player1.outcome).toBe("hit");
+    expect(result.player2.outcome).toBe("stunned");
+    expect(result.player1.damageDealt).toBe(10);
+    expect(result.player2.damageTaken).toBe(10);
+    expect(result.player2HealthAfter).toBe(90);
+  });
+
   it("applies tx-storm priority boost to break simultaneous-hit clashes", () => {
     const result = resolveRound(
       {

@@ -433,6 +433,17 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             return Response.json({ error: "Commit payload must include a valid move in encryptedPlan" }, { status: 400 });
         }
 
+        // The Groth16 circuit commits to a full 10-turn move plan; require it at commit time.
+        const parsedMovePlan = Array.isArray(parsedCommitPlan.movePlan)
+            ? parsedCommitPlan.movePlan.filter((move): move is MoveType => isValidMove(String(move)))
+            : [];
+        if (parsedMovePlan.length !== PRIVATE_ROUND_PLAN_TURNS) {
+            return Response.json(
+                { error: `Commit payload must include movePlan with exactly ${PRIVATE_ROUND_PLAN_TURNS} moves in encryptedPlan` },
+                { status: 400 },
+            );
+        }
+
         if (parsedCommitPlan.surgeCardId && !isPowerSurgeCardId(parsedCommitPlan.surgeCardId)) {
             return Response.json({ error: "Commit payload contains invalid surgeCardId" }, { status: 400 });
         }

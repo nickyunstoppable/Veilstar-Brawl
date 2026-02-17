@@ -142,7 +142,7 @@ export async function handleCancelRegistration(matchId: string, req: Request): P
         const { data: match, error: matchError } = await supabase
             .from("matches")
             .select(
-                "id,status,player1_address,player2_address,onchain_session_id,onchain_contract_id,onchain_tx_hash,stake_amount_stroops,player1_stake_confirmed_at,player2_stake_confirmed_at",
+                "id,status,fight_phase,player1_address,player2_address,onchain_session_id,onchain_contract_id,onchain_tx_hash,stake_amount_stroops,player1_stake_confirmed_at,player2_stake_confirmed_at",
             )
             .eq("id", matchId)
             .single();
@@ -159,6 +159,13 @@ export async function handleCancelRegistration(matchId: string, req: Request): P
 
         if (match.status === "completed") {
             return Response.json({ success: true, cancelled: false, reason: "match_completed" });
+        }
+
+        // Safety: never allow auth-timeout cancellation once the match is underway.
+        // This endpoint is meant only for the pre-fight registration window.
+        const fightPhase = String((match as any).fight_phase || "");
+        if (match.status === "in_progress" || (fightPhase && fightPhase !== "waiting")) {
+            return Response.json({ success: true, cancelled: false, reason: "match_in_progress" }, { status: 409 });
         }
 
         if (match.status === "cancelled" || match.status === "abandoned") {
@@ -215,7 +222,7 @@ export async function handleCancelRegistration(matchId: string, req: Request): P
                 player2_stake_confirmed_at: null,
             })
             .eq("id", matchId)
-            .in("status", ["waiting", "character_select", "in_progress"]);
+            .in("status", ["waiting", "character_select"]);
 
         pendingRegistrations.delete(matchId);
 

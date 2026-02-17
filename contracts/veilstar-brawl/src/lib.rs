@@ -546,7 +546,9 @@ impl VeilstarBrawlContract {
         proof: Bytes,
         public_inputs: Vec<BytesN<32>>,
     ) -> Result<(), Error> {
-        if proof.len() != 256 || public_inputs.is_empty() {
+        // Current Groth16 round-plan circuit exposes exactly one public input: `commitment`.
+        // Keep this strict so a caller cannot satisfy the verifier with a different statement.
+        if proof.len() != 256 || public_inputs.len() != 1 {
             return Err(Error::ZkProofInvalid);
         }
 
@@ -752,7 +754,15 @@ impl VeilstarBrawlContract {
             return Err(Error::ZkProofInvalid);
         }
 
-        if proof.len() != 256 || public_inputs.is_empty() {
+        // Current Groth16 round-plan circuit exposes exactly one public input: `commitment`.
+        // Enforce that it matches the submitted commitment, otherwise a proof for some other
+        // commitment could be replayed to satisfy the ZK gate.
+        if proof.len() != 256 || public_inputs.len() != 1 {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let public_commitment = public_inputs.get(0).unwrap();
+        if public_commitment != commitment {
             return Err(Error::ZkProofInvalid);
         }
 

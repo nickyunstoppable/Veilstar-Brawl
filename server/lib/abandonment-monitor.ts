@@ -1,7 +1,13 @@
 import { getSupabase } from "./supabase";
 import { broadcastGameEvent } from "./matchmaker";
 import { calculateEloChange } from "./game-types";
-import { cancelMatchOnChainWithOptions, isStellarConfigured, matchIdToSessionId, reportMatchResultOnChain } from "./stellar-contract";
+import {
+    cancelMatchOnChainWithOptions,
+    getOnChainMatchStateBySession,
+    isStellarConfigured,
+    matchIdToSessionId,
+    reportMatchResultOnChain,
+} from "./stellar-contract";
 import { getAutoProveFinalizeStatus, triggerAutoProveFinalize } from "./zk-finalizer-client";
 
 const MONITOR_INTERVAL_MS = 60_000;
@@ -190,8 +196,40 @@ async function resolveSingleDisconnected(match: any, disconnectedPlayer: "player
             console.error("[AbandonmentMonitor] On-chain report error:", err);
         }
     } else if (autoFinalize.enabled) {
-        triggerAutoProveFinalize(match.id, winnerAddress, "disconnect-timeout");
-        console.log(`[AbandonmentMonitor] Triggered auto ZK prove+finalize for timeout match=${match.id}`);
+        if (!stellarReady) {
+            onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
+        } else {
+            // Strict ZK finalize requires a real on-chain `start_game` to exist.
+            // If the match never finished registration (e.g. players disconnected before signing auth),
+            // do not attempt ZK finalize (it will 409 with lifecycle mismatch).
+            const contractId = (match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "").trim();
+            const sessionIdCandidate = typeof match.onchain_session_id === "number"
+                ? match.onchain_session_id
+                : matchIdToSessionId(match.id);
+
+            const onChainState = contractId
+                ? await getOnChainMatchStateBySession(sessionIdCandidate, { contractId })
+                : null;
+
+            if (!onChainState) {
+                onChainSkippedReason = "On-chain start_game not found; skipping auto ZK finalize for timeout match";
+                console.warn(`[AbandonmentMonitor] AutoFinalize skipped (no on-chain session) match=${match.id} session=${sessionIdCandidate} contract=${contractId || "n/a"}`);
+            } else {
+                // Persist recovered metadata so subsequent finalize paths are consistent.
+                if (typeof match.onchain_session_id !== "number") {
+                    await supabase
+                        .from("matches")
+                        .update({
+                            onchain_session_id: sessionIdCandidate,
+                            onchain_contract_id: contractId || null,
+                        })
+                        .eq("id", match.id);
+                }
+
+                triggerAutoProveFinalize(match.id, winnerAddress, "disconnect-timeout");
+                console.log(`[AbandonmentMonitor] Triggered auto ZK prove+finalize for timeout match=${match.id}`);
+            }
+        }
     } else {
         onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
     }

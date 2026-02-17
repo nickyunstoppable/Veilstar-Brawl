@@ -233,9 +233,10 @@ export class CombatEngine {
         const p2WasStunned = p2State.isStunned;
 
         // Handle stunned players (auto-miss)
-        // Also treat "stunned" move type as null (for when stunned move is submitted explicitly)
-        const effectiveP1Move = (p1WasStunned || player1Move === "stunned") ? null : player1Move;
-        const effectiveP2Move = (p2WasStunned || player2Move === "stunned") ? null : player2Move;
+        // Represent stunned explicitly as the "stunned" move so resolution stays consistent
+        // and damage-vs-stunned always flows through the matrix.
+        const effectiveP1Move: MoveType = (p1WasStunned || player1Move === "stunned") ? "stunned" : player1Move;
+        const effectiveP2Move: MoveType = (p2WasStunned || player2Move === "stunned") ? "stunned" : player2Move;
 
         // Calculate outcomes
         const p1Result = this.resolvePlayerTurn(
@@ -622,7 +623,7 @@ export class CombatEngine {
 
         // Determine effects
         const effects: TurnEffect[] = [];
-        if (outcome === "stunned" || outcome === "missed") {
+        if (outcome === "missed") {
             effects.push("stun");
         }
         if (outcome === "staggered") {
