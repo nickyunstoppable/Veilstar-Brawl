@@ -4967,7 +4967,7 @@ export class FightScene extends Phaser.Scene {
                 if (this.anims.exists(animKey) || p1Move === "block") {
                   const scale = getAnimationScale(p1Char, p1Move);
                   this.player1Sprite.setScale(scale);
-                  if (this.anims.exists(animKey)) this.player1Sprite.play(animKey, true);
+                  if (this.anims.exists(animKey)) this.player1Sprite.play(animKey);
 
                   const sfxKey = getSFXKey(p1Char, p1Move);
                   const delay = getSoundDelay(p1Char, p1Move);
@@ -5051,7 +5051,7 @@ export class FightScene extends Phaser.Scene {
                 if (this.anims.exists(animKey) || p2Move === "block") {
                   const scale = getAnimationScale(p2Char, p2Move);
                   this.player2Sprite.setScale(scale);
-                  if (this.anims.exists(animKey)) this.player2Sprite.play(animKey, true);
+                  if (this.anims.exists(animKey)) this.player2Sprite.play(animKey);
 
                   const sfxKey = getSFXKey(p2Char, p2Move);
                   const p2Delay = getSoundDelay(p2Char, p2Move);

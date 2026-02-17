@@ -1914,7 +1914,7 @@ export class PracticeScene extends Phaser.Scene {
                 if (this.anims.exists(animKey)) {
                   const scale = getAnimationScale(p1Char, playerMove);
                   this.player1Sprite.setScale(scale);
-                  this.player1Sprite.play(animKey, true);
+                  this.player1Sprite.play(animKey);
 
                   const sfxKey = getSFXKey(p1Char, playerMove);
                   const delay = getSoundDelay(p1Char, playerMove);
@@ -1996,7 +1996,7 @@ export class PracticeScene extends Phaser.Scene {
                 if (this.anims.exists(animKey)) {
                   const scale = getAnimationScale(p2Char, aiMove);
                   this.player2Sprite.setScale(scale);
-                  this.player2Sprite.play(animKey, true);
+                  this.player2Sprite.play(animKey);
 
                   const sfxKey = getSFXKey(p2Char, aiMove);
                   const p2Delay = getSoundDelay(p2Char, aiMove);
