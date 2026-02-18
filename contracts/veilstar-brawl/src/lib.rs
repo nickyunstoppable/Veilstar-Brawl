@@ -150,6 +150,7 @@ pub struct ZkMatchOutcomeRecord {
 pub enum DataKey {
     Match(u32),
     MatchSalt(u32),
+    PendingStake(u32),
     ZkCommit(u32, BytesN<32>, u32, u32, bool),
     ZkVerified(u32, BytesN<32>, u32, u32, bool),
     ZkMatchOutcome(u32),
@@ -268,7 +269,7 @@ impl VeilstarBrawlContract {
             &player2_points,
         );
 
-        let m = Match {
+        let mut m = Match {
             player1: player1.clone(),
             player2: player2.clone(),
             player1_points,
@@ -289,6 +290,22 @@ impl VeilstarBrawlContract {
             is_cancelled: false,
             winner: None,
         };
+
+        // Allow stake to be configured either before or after `start_game`.
+        // This prevents tx ordering races where `set_match_stake` lands before the match exists.
+        let pending_stake_key = DataKey::PendingStake(session_id);
+        if let Some(pending_stake_amount_stroops) = env.storage().temporary().get::<_, i128>(&pending_stake_key) {
+            if pending_stake_amount_stroops > 0 {
+                m.stake_amount_stroops = pending_stake_amount_stroops;
+                m.stake_fee_bps = STAKE_FEE_BPS;
+                m.stake_deadline_ts = env
+                    .ledger()
+                    .timestamp()
+                    .saturating_add(STAKE_DEPOSIT_WINDOW_SECONDS);
+            }
+
+            env.storage().temporary().remove(&pending_stake_key);
+        }
 
         let key = DataKey::Match(session_id);
         let mut salt_bytes = [0u8; 8];
@@ -820,37 +837,66 @@ impl VeilstarBrawlContract {
             .expect("Admin not set");
         admin.require_auth();
 
-        let key = DataKey::Match(session_id);
-        let mut m: Match = env
-            .storage()
-            .temporary()
-            .get(&key)
-            .ok_or(Error::MatchNotFound)?;
-
         if stake_amount_stroops <= 0 {
             return Err(Error::InvalidStake);
         }
 
-        if m.stake_amount_stroops > 0 {
-            if m.stake_amount_stroops != stake_amount_stroops {
-                return Err(Error::InvalidStake);
+        // Fast-path: match already exists.
+        let key = DataKey::Match(session_id);
+        if let Some(mut m) = env.storage().temporary().get::<_, Match>(&key) {
+            if m.stake_amount_stroops > 0 {
+                if m.stake_amount_stroops != stake_amount_stroops {
+                    return Err(Error::InvalidStake);
+                }
+
+                env.storage().temporary().set(&key, &m);
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+                return Ok(());
             }
+
+            m.stake_amount_stroops = stake_amount_stroops;
+            m.stake_fee_bps = STAKE_FEE_BPS;
+            m.stake_deadline_ts = env
+                .ledger()
+                .timestamp()
+                .saturating_add(STAKE_DEPOSIT_WINDOW_SECONDS);
 
             env.storage().temporary().set(&key, &m);
             env.storage()
                 .temporary()
                 .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+
+            // Clear any pending config for this session to avoid stale state.
+            let pending_key = DataKey::PendingStake(session_id);
+            if env.storage().temporary().has(&pending_key) {
+                env.storage().temporary().remove(&pending_key);
+            }
+
             return Ok(());
         }
 
-        m.stake_amount_stroops = stake_amount_stroops;
-        m.stake_fee_bps = STAKE_FEE_BPS;
-        m.stake_deadline_ts = env.ledger().timestamp().saturating_add(STAKE_DEPOSIT_WINDOW_SECONDS);
+        // Match not created yet — store a pending stake config so `start_game` can apply it.
+        let pending_key = DataKey::PendingStake(session_id);
+        if let Some(existing) = env.storage().temporary().get::<_, i128>(&pending_key) {
+            if existing != stake_amount_stroops {
+                return Err(Error::InvalidStake);
+            }
 
-        env.storage().temporary().set(&key, &m);
+            env.storage().temporary().set(&pending_key, &existing);
+            env.storage()
+                .temporary()
+                .extend_ttl(&pending_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+            return Ok(());
+        }
+
         env.storage()
             .temporary()
-            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+            .set(&pending_key, &stake_amount_stroops);
+        env.storage()
+            .temporary()
+            .extend_ttl(&pending_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
 
         Ok(())
     }

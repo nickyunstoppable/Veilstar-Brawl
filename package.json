@@ -18,6 +18,8 @@
     "server": "bun --watch server/index.ts",
     "dev:zk": "bun --watch run zk_service/index.ts",
     "zk": "bun run zk_service/index.ts",
+    "zk:vkid": "bun run scripts/zk-vk-id.ts",
+    "zk:onchain:setup": "bun run scripts/zk-onchain-setup.ts",
     "typecheck:zk": "tsc -p tsconfig.zk.json --noEmit"
   },
   "devDependencies": {

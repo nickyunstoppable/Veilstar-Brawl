@@ -1368,12 +1368,14 @@ export async function submitSignedPowerSurgeOnChain(
 export async function prepareStakeDepositOnChain(
     matchId: string,
     playerAddress: string,
+    options?: { sessionId?: number; contractId?: string },
 ): Promise<PreparedPlayerAction> {
     if (!isClientSignedActionConfigured()) {
         throw new Error("Client-signed action flow is not configured");
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
 
     const feePayerPublicKey =
         pickFeePayerPublicKey(`stake:${matchId}:${playerAddress}`) || getAdminKeypair()?.publicKey();
@@ -1381,7 +1383,7 @@ export async function prepareStakeDepositOnChain(
         throw new Error("Client-signed action flow requires either STELLAR_FEE_PAYER_SECRETS or ADMIN_SECRET");
     }
 
-    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey);
+    const readOnlyClient = await createReadOnlyContractClientWithPublicKey(feePayerPublicKey, contractId);
     const tx = await (readOnlyClient as any).deposit_stake({
         session_id: sessionId,
         player: playerAddress,
@@ -1401,12 +1403,14 @@ export async function submitSignedStakeDepositOnChain(
     playerAddress: string,
     signedAuthEntryXdr: string,
     transactionXdr: string,
+    options?: { sessionId?: number; contractId?: string },
 ): Promise<OnChainResult> {
     if (!isClientSignedActionConfigured()) {
         return { success: false, error: "Client-signed action flow is not configured" };
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
 
     const submitWithTransactionXdr = async (xdrToSubmit: string): Promise<{ txHash?: string; error?: string }> => {
         try {
@@ -1415,7 +1419,7 @@ export async function submitSignedStakeDepositOnChain(
             if (!feePayerKeypair) {
                 return { error: "No fee payer available for stake submission" };
             }
-            const feePayerClient = await createFeePayerContractClient(feePayerKeypair);
+            const feePayerClient = await createFeePayerContractClient(feePayerKeypair, contractId);
             const { updatedXdr, replacedCount } = injectSignedAuthIntoTxEnvelope(xdrToSubmit, {
                 [addressKey(playerAddress)]: signedAuthEntryXdr,
             });
@@ -1458,7 +1462,7 @@ export async function submitSignedStakeDepositOnChain(
 
                 // Sequence race on shared fee payer. Rebuild with a fresh sequence and retry.
                 try {
-                    const refreshed = await prepareStakeDepositOnChain(matchId, playerAddress);
+                    const refreshed = await prepareStakeDepositOnChain(matchId, playerAddress, { sessionId, contractId });
                     candidateXdr = refreshed.transactionXdr;
                     await sleep(100 * attempt);
                 } catch (refreshErr: any) {
@@ -1652,12 +1656,17 @@ export async function getOnChainMatchStateBySession(
 /**
  * Configure stake amount for a match on-chain.
  */
-export async function setMatchStakeOnChain(matchId: string, stakeAmountStroops: bigint): Promise<OnChainResult> {
+export async function setMatchStakeOnChain(
+    matchId: string,
+    stakeAmountStroops: bigint,
+    options?: { sessionId?: number; contractId?: string },
+): Promise<OnChainResult> {
     if (!isOnChainRegistrationConfigured()) {
         return { success: false, error: "Stellar contract not configured for admin submissions" };
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
     const adminKeypair = getAdminKeypair();
     if (!adminKeypair) {
         return { success: false, error: "Admin keypair not available", sessionId };
@@ -1667,7 +1676,7 @@ export async function setMatchStakeOnChain(matchId: string, stakeAmountStroops: 
         const maxAttempts = 4;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
+                const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
                 const setMatchStake = (client as any).set_match_stake;
                 if (typeof setMatchStake !== "function") {
                     return {
@@ -1997,6 +2006,14 @@ export async function submitZkMatchOutcomeOnChain(
                 const publicInputsBytes = normalizePublicInputsToBytes32(publicInputs);
                 if (publicInputsBytes.length === 0) {
                     return { success: false, error: "public inputs cannot be empty", sessionId };
+                }
+
+                if (publicInputsBytes.length !== 1) {
+                    return {
+                        success: false,
+                        error: `Trustless mode requires exactly 1 public input (commitment); received ${publicInputsBytes.length}`,
+                        sessionId,
+                    };
                 }
 
                 const client = await createContractClient(
@@ -2339,19 +2356,20 @@ export async function sweepTreasuryFeesOnChain(): Promise<SweepFeesResult> {
 /**
  * Expire stake deposit window for a session and perform on-chain cancellation/refund logic.
  */
-export async function expireStakeOnChain(matchId: string): Promise<OnChainResult> {
+export async function expireStakeOnChain(matchId: string, options?: { sessionId?: number; contractId?: string }): Promise<OnChainResult> {
     if (!isOnChainRegistrationConfigured()) {
         return { success: false, error: "Stellar contract not configured for admin submissions" };
     }
 
-    const sessionId = matchIdToSessionId(matchId);
+    const sessionId = options?.sessionId ?? matchIdToSessionId(matchId);
+    const contractId = options?.contractId || undefined;
     const adminKeypair = getAdminKeypair();
     if (!adminKeypair) {
         return { success: false, error: "Admin keypair not available", sessionId };
     }
 
     try {
-        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair));
+        const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
         const expireStake = (client as any).expire_stake;
         if (typeof expireStake !== "function") {
             return {

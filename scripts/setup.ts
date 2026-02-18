@@ -133,8 +133,12 @@ const envUpdates: Record<string, string> = {
   VITE_DEV_PLAYER2_ADDRESS: wallets.player2,
   VITE_DEV_PLAYER1_SECRET: walletSecrets.player1,
   VITE_DEV_PLAYER2_SECRET: walletSecrets.player2,
+  // Avoid persisting stale Groth16 vk-id overrides across fresh setups.
+  ZK_GROTH16_VK_ID: "",
+  ZK_FINALIZE_VK_ID: "",
+  // Groth16 VK uploads can be large/slow on testnet.
+  STELLAR_TX_SEND_TIMEOUT_MS: "180000",
 };
-
 for (const contract of contracts) {
   envUpdates[`VITE_${contract.envKey}_CONTRACT_ID`] = contractIds[contract.packageName] || "";
 }

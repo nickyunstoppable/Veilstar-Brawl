@@ -17,6 +17,8 @@ import {
     matchIdToSessionId,
     reportMatchResultOnChain,
     setGroth16VerificationKeyOnChain,
+    setZkVerifierContractOnChain,
+    setZkVerifierVkIdOnChain,
     submitZkMatchOutcomeOnChain,
 } from "../../lib/stellar-contract";
 import { createHash } from "node:crypto";
@@ -43,6 +45,8 @@ const ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS = Number.parseInt(
     (process.env.ZK_FINALIZE_ENDGAME_RETRY_DELAY_MS ?? "5000").trim(),
     10,
 );
+
+const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
 
 interface FinalizeBody {
     winnerAddress?: string;
@@ -74,8 +78,7 @@ function getGroth16RoundVerificationKeyPath(): string {
 let computedGroth16VkIdPromise: Promise<string> | null = null;
 async function getGroth16VkIdHexForFinalize(): Promise<string> {
     const explicit = (
-        process.env.ZK_FINALIZE_VK_ID
-        || process.env.ZK_GROTH16_VK_ID
+        process.env.ZK_GROTH16_VK_ID
         || process.env.ZK_VERIFIER_VK_ID
         || ""
     ).trim();
@@ -95,16 +98,46 @@ async function getGroth16VkIdHexForFinalize(): Promise<string> {
 }
 
 let vkUploadAttempted = false;
+let vkUploadInFlight: Promise<void> | null = null;
 async function ensureGroth16VerificationKeyUploaded(vkIdHex: string): Promise<void> {
     const verifierContractId = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
     if (!verifierContractId) return;
+
+    // Avoid duplicate uploads if multiple finalize calls arrive concurrently.
     if (vkUploadAttempted) return;
-    vkUploadAttempted = true;
+    if (vkUploadInFlight) return vkUploadInFlight;
 
     const vkeyPath = getGroth16RoundVerificationKeyPath();
-    const res = await setGroth16VerificationKeyOnChain(verifierContractId, vkIdHex, vkeyPath);
-    if (!res.success) {
-        throw new Error(res.error || "Failed to upload Groth16 verification key");
+
+    vkUploadInFlight = (async () => {
+        const res = await setGroth16VerificationKeyOnChain(verifierContractId, vkIdHex, vkeyPath);
+        if (!res.success) {
+            throw new Error(res.error || "Failed to upload Groth16 verification key");
+        }
+        vkUploadAttempted = true;
+    })().finally(() => {
+        vkUploadInFlight = null;
+    });
+
+    return vkUploadInFlight;
+}
+
+async function ensureOnChainZkVerifierConfigured(params: { contractId?: string; vkIdHex: string }): Promise<void> {
+    // Keep finalize robust even if gameplay setup was skipped or partially failed.
+    // - set_zk_verifier_contract: required for on-chain verification
+    // - set_zk_verifier_vk_id: required by submit_zk_match_outcome
+    if (!isStellarConfigured()) return;
+
+    if (ZK_GROTH16_VERIFIER_CONTRACT_ID) {
+        const res = await setZkVerifierContractOnChain(ZK_GROTH16_VERIFIER_CONTRACT_ID, { contractId: params.contractId });
+        if (!res.success) {
+            throw new Error(res.error || "Failed to configure on-chain verifier contract");
+        }
+    }
+
+    const vkRes = await setZkVerifierVkIdOnChain(params.vkIdHex, { contractId: params.contractId });
+    if (!vkRes.success) {
+        throw new Error(vkRes.error || "Failed to configure on-chain verifier vk id");
     }
 }
 

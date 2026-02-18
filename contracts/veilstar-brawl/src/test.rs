@@ -326,6 +326,30 @@ fn test_set_match_stake_is_idempotent_for_same_amount() {
 }
 
 #[test]
+fn test_set_match_stake_before_start_game_applies_on_start() {
+    let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
+
+    // Configure stake before the match exists (simulates tx ordering race).
+    client.set_match_stake(&999u32, &10_000_000i128);
+
+    client.start_game(&999u32, &p1, &p2, &100_000, &100_000);
+
+    let m = client.get_match(&999u32);
+    assert_eq!(m.stake_amount_stroops, 10_000_000i128);
+    assert!(m.stake_deadline_ts > 0);
+}
+
+#[test]
+fn test_set_match_stake_before_start_game_rejects_mismatch() {
+    let (_env, client, _admin, _p1, _p2, _treasury, _xlm, _verifier) = setup_test();
+
+    client.set_match_stake(&1000u32, &10_000_000i128);
+
+    let result = client.try_set_match_stake(&1000u32, &20_000_000i128);
+    assert_contract_error(&result, Error::InvalidStake);
+}
+
+#[test]
 fn test_deposit_stake_is_idempotent_per_player() {
     let (_env, client, _admin, p1, p2, _treasury, _xlm, _verifier) = setup_test();
 
@@ -375,7 +399,8 @@ fn test_submit_zk_commit_allows_end_game_under_gate() {
     let vk_id = BytesN::from_array(&env, &[3u8; 32]);
     client.set_zk_verifier_vk_id(&vk_id);
     let proof = Bytes::from_array(&env, &[4u8; 256]);
-    let public_inputs = vec![&env, BytesN::from_array(&env, &[5u8; 32])];
+    let public_inputs_p1 = vec![&env, c1.clone()];
+    let public_inputs_p2 = vec![&env, c2.clone()];
 
     client.submit_zk_verification(
         &102u32,
@@ -385,7 +410,7 @@ fn test_submit_zk_commit_allows_end_game_under_gate() {
         &c1,
         &vk_id,
         &proof,
-        &public_inputs,
+        &public_inputs_p1,
     );
     client.submit_zk_verification(
         &102u32,
@@ -395,10 +420,10 @@ fn test_submit_zk_commit_allows_end_game_under_gate() {
         &c2,
         &vk_id,
         &proof,
-        &public_inputs,
+        &public_inputs_p2,
     );
 
-    client.submit_zk_match_outcome(&102u32, &p1, &vk_id, &proof, &public_inputs);
+    client.submit_zk_match_outcome(&102u32, &p1, &vk_id, &proof, &public_inputs_p1);
 
     client.end_game(&102u32, &true);
     let m = client.get_match(&102u32);
@@ -420,14 +445,15 @@ fn test_end_game_requires_match_outcome_when_gate_enabled() {
     let c2 = BytesN::from_array(&env, &[2u8; 32]);
     let vk_id = BytesN::from_array(&env, &[3u8; 32]);
     let proof = Bytes::from_array(&env, &[4u8; 256]);
-    let public_inputs = vec![&env, BytesN::from_array(&env, &[5u8; 32])];
+    let public_inputs_p1 = vec![&env, c1.clone()];
+    let public_inputs_p2 = vec![&env, c2.clone()];
 
     client.set_zk_verifier_contract(&verifier);
     client.set_zk_verifier_vk_id(&vk_id);
     client.submit_zk_commit(&110u32, &p1, &1u32, &1u32, &c1);
     client.submit_zk_commit(&110u32, &p2, &1u32, &1u32, &c2);
-    client.submit_zk_verification(&110u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs);
-    client.submit_zk_verification(&110u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs);
+    client.submit_zk_verification(&110u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs_p1);
+    client.submit_zk_verification(&110u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs_p2);
 
     let result = client.try_end_game(&110u32, &true);
     assert_contract_error(&result, Error::ZkMatchOutcomeRequired);
@@ -444,15 +470,16 @@ fn test_end_game_rejects_winner_mismatch_with_match_outcome() {
     let c2 = BytesN::from_array(&env, &[7u8; 32]);
     let vk_id = BytesN::from_array(&env, &[8u8; 32]);
     let proof = Bytes::from_array(&env, &[9u8; 256]);
-    let public_inputs = vec![&env, BytesN::from_array(&env, &[10u8; 32])];
+    let public_inputs_p1 = vec![&env, c1.clone()];
+    let public_inputs_p2 = vec![&env, c2.clone()];
 
     client.set_zk_verifier_contract(&verifier);
     client.set_zk_verifier_vk_id(&vk_id);
     client.submit_zk_commit(&111u32, &p1, &1u32, &1u32, &c1);
     client.submit_zk_commit(&111u32, &p2, &1u32, &1u32, &c2);
-    client.submit_zk_verification(&111u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs);
-    client.submit_zk_verification(&111u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs);
-    client.submit_zk_match_outcome(&111u32, &p2, &vk_id, &proof, &public_inputs);
+    client.submit_zk_verification(&111u32, &p1, &1u32, &1u32, &c1, &vk_id, &proof, &public_inputs_p1);
+    client.submit_zk_verification(&111u32, &p2, &1u32, &1u32, &c2, &vk_id, &proof, &public_inputs_p2);
+    client.submit_zk_match_outcome(&111u32, &p2, &vk_id, &proof, &public_inputs_p2);
 
     let result = client.try_end_game(&111u32, &true);
     assert_contract_error(&result, Error::InvalidWinnerClaim);
@@ -489,7 +516,7 @@ fn test_duplicate_zk_verification_rejected() {
     let vk_id = BytesN::from_array(&env, &[8u8; 32]);
     client.set_zk_verifier_vk_id(&vk_id);
     let proof = Bytes::from_array(&env, &[9u8; 256]);
-    let public_inputs = vec![&env, BytesN::from_array(&env, &[10u8; 32])];
+    let public_inputs = vec![&env, c1.clone()];
 
     client.submit_zk_commit(&104u32, &p1, &1u32, &2u32, &c1);
     client.submit_zk_verification(

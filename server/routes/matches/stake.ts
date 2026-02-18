@@ -4,6 +4,7 @@ import { GAME_CONSTANTS } from "../../lib/game-types";
 import {
     expireStakeOnChain,
     getOnChainMatchState,
+    getOnChainMatchStateBySession,
     isClientSignedActionConfigured,
     prepareStakeDepositOnChain,
     setMatchStakeOnChain,
@@ -105,7 +106,11 @@ async function reconcileStakeConfirmationsFromChain(matchId: string, match: any)
     const hasStake = parseStroops(match?.stake_amount_stroops) > 0n;
     if (!hasStake) return match;
 
-    const onChainState = await getOnChainMatchState(matchId);
+    const onChainContractId = (match?.onchain_contract_id || "").trim() || undefined;
+    const onChainSessionId = typeof match?.onchain_session_id === "number" ? match.onchain_session_id : null;
+    const onChainState = onChainSessionId !== null
+        ? await getOnChainMatchStateBySession(onChainSessionId, { contractId: onChainContractId })
+        : await getOnChainMatchState(matchId);
     const paidFlags = readStakePaidFlags(onChainState);
 
     const needsP1 = paidFlags.player1Paid && !match.player1_stake_confirmed_at;
@@ -166,7 +171,7 @@ export async function handlePrepareStakeDeposit(
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id,player1_address,player2_address,status,stake_amount_stroops,stake_fee_bps,player1_stake_confirmed_at,player2_stake_confirmed_at")
+            .select("id,player1_address,player2_address,status,stake_amount_stroops,stake_fee_bps,player1_stake_confirmed_at,player2_stake_confirmed_at,onchain_session_id,onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -243,15 +248,20 @@ export async function handlePrepareStakeDeposit(
         const feeStroops = calcFee(stakeAmountStroops, feeBps);
         const requiredDepositStroops = stakeAmountStroops + feeStroops;
 
+        const onChainSessionId = typeof (effectiveMatch as any).onchain_session_id === "number"
+            ? (effectiveMatch as any).onchain_session_id
+            : undefined;
+        const onChainContractId = ((effectiveMatch as any).onchain_contract_id || "").trim() || undefined;
+
         let prepared;
         try {
-            prepared = await prepareStakeDepositOnChain(matchId, body.address);
+            prepared = await prepareStakeDepositOnChain(matchId, body.address, { sessionId: onChainSessionId, contractId: onChainContractId });
         } catch (prepareError) {
             const message = prepareError instanceof Error ? prepareError.message : String(prepareError);
             if (/Contract,\s*#8|StakeNotConfigured/i.test(message)) {
                 console.warn(`[Stake Prepare] Stake not configured on-chain for match ${matchId.slice(0, 8)}…, attempting auto-configure and retry`);
 
-                const setStake = await setMatchStakeOnChain(matchId, stakeAmountStroops);
+                const setStake = await setMatchStakeOnChain(matchId, stakeAmountStroops, { sessionId: onChainSessionId, contractId: onChainContractId });
                 if (!setStake.success) {
                     const setStakeError = setStake.error || "";
 
@@ -259,7 +269,9 @@ export async function handlePrepareStakeDeposit(
                     // while the other observes a transient/sequence error.
                     let chainHasStakeConfigured = false;
                     try {
-                        const onChainState = await getOnChainMatchState(matchId);
+                        const onChainState = onChainSessionId !== undefined
+                            ? await getOnChainMatchStateBySession(onChainSessionId, { contractId: onChainContractId })
+                            : await getOnChainMatchState(matchId);
                         const state = unwrapPossibleResult(onChainState);
                         const configuredStake =
                             parseStroops((state as any)?.stake_amount_stroops)
@@ -289,7 +301,7 @@ export async function handlePrepareStakeDeposit(
                     console.warn(`[Stake Prepare] Configure call failed but on-chain stake is already configured for match ${matchId.slice(0, 8)}…, continuing`);
                 }
 
-                prepared = await prepareStakeDepositOnChain(matchId, body.address);
+                prepared = await prepareStakeDepositOnChain(matchId, body.address, { sessionId: onChainSessionId, contractId: onChainContractId });
             }
 
             if (/MatchNotFound|Contract,#1|match not found|MissingValue/i.test(message)) {
@@ -351,13 +363,16 @@ export async function handleSubmitStakeDeposit(
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id,player1_address,player2_address,status,stake_amount_stroops,player1_stake_confirmed_at,player2_stake_confirmed_at,selection_deadline_at")
+            .select("id,player1_address,player2_address,status,stake_amount_stroops,player1_stake_confirmed_at,player2_stake_confirmed_at,selection_deadline_at,onchain_session_id,onchain_contract_id")
             .eq("id", matchId)
             .single();
 
         if (matchError || !match) {
             return Response.json({ error: "Match not found" }, { status: 404 });
         }
+
+        const onChainSessionId = typeof (match as any).onchain_session_id === "number" ? (match as any).onchain_session_id : undefined;
+        const onChainContractId = ((match as any).onchain_contract_id || "").trim() || undefined;
 
         const stakeStatus = getStakeStatus(match, body.address);
         if (!stakeStatus.isPlayer1 && !stakeStatus.isPlayer2) {
@@ -397,6 +412,7 @@ export async function handleSubmitStakeDeposit(
             body.address,
             body.signedAuthEntryXdr,
             body.transactionXdr,
+            { sessionId: onChainSessionId, contractId: onChainContractId },
         );
 
         let effectiveTxHash = onChainResult.txHash || null;
@@ -409,7 +425,9 @@ export async function handleSubmitStakeDeposit(
             let reconciledPaid = false;
             if (isAlreadyPaid || isTransient) {
                 try {
-                    const onChainState = await getOnChainMatchState(matchId);
+                    const onChainState = onChainSessionId !== undefined
+                        ? await getOnChainMatchStateBySession(onChainSessionId, { contractId: onChainContractId })
+                        : await getOnChainMatchState(matchId);
                     const paidFlags = readStakePaidFlags(onChainState);
                     reconciledPaid = didPlayerStakeOnChain(match, paidFlags, body.address);
                 } catch {
@@ -528,7 +546,7 @@ export async function handleExpireStakeDepositWindow(
         const supabase = getSupabase();
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id,status,player1_address,player2_address,stake_amount_stroops,stake_deadline_at,player1_stake_confirmed_at,player2_stake_confirmed_at")
+            .select("id,status,player1_address,player2_address,stake_amount_stroops,stake_deadline_at,player1_stake_confirmed_at,player2_stake_confirmed_at,onchain_session_id,onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -569,7 +587,10 @@ export async function handleExpireStakeDepositWindow(
                 ? match.player2_address
                 : null;
 
-        const onChainExpire = await expireStakeOnChain(matchId);
+        const onChainSessionId = typeof (match as any).onchain_session_id === "number" ? (match as any).onchain_session_id : undefined;
+        const onChainContractId = ((match as any).onchain_contract_id || "").trim() || undefined;
+
+        const onChainExpire = await expireStakeOnChain(matchId, { sessionId: onChainSessionId, contractId: onChainContractId });
         if (!onChainExpire.success) {
             console.warn(
                 `[Stake Expire] On-chain expire failed match=${matchId} error=${onChainExpire.error || "n/a"}`,
