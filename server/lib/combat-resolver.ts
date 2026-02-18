@@ -321,6 +321,12 @@ export async function resolveTurn(
             player2Surge: p2Surge,
         });
 
+        // The round resolver may normalize moves (e.g., unaffordable move -> block).
+        // Always use the executed/resolved move for broadcasts and snapshots so the UI doesn't
+        // show "kick" while applying "block" effects (guard buildup, 0 damage, etc.).
+        const p1ResolvedMove = resolution.player1.move;
+        const p2ResolvedMove = resolution.player2.move;
+
         // Determine round winner
         let p1RoundsWon = match.player1_rounds_won || 0;
         let p2RoundsWon = match.player2_rounds_won || 0;
@@ -431,8 +437,8 @@ export async function resolveTurn(
                 // Carry stun from outcome into next turn (cleared after consuming on next resolve)
                 player1_is_stunned: resolution.player1IsStunnedNext,
                 player2_is_stunned: resolution.player2IsStunnedNext,
-                last_resolved_player1_move: p1Move,
-                last_resolved_player2_move: p2Move,
+                last_resolved_player1_move: p1ResolvedMove,
+                last_resolved_player2_move: p2ResolvedMove,
                 last_narrative: resolution.narrative,
                 updated_at: new Date().toISOString(),
             })
@@ -443,8 +449,8 @@ export async function resolveTurn(
             success: true,
             turnNumber: currentRound.turn_number || 1,
             roundNumber: currentRound.round_number,
-            player1Move: p1Move,
-            player2Move: p2Move,
+            player1Move: p1ResolvedMove,
+            player2Move: p2ResolvedMove,
             player1DamageDealt: resolution.player1.damageDealt,
             player2DamageDealt: resolution.player2.damageDealt,
             player1HealthAfter: resolution.player1HealthAfter,
@@ -468,7 +474,7 @@ export async function resolveTurn(
             player1Address: match.player1_address,
             player2Address: match.player2_address,
             player1: {
-                move: p1Move,
+                move: p1ResolvedMove,
                 damageDealt: resolution.player1.damageDealt,
                 damageTaken: resolution.player1.damageTaken,
                 healthAfter: resolution.player1HealthAfter,
@@ -481,7 +487,7 @@ export async function resolveTurn(
                 energyDrained: resolution.player1.energyDrained ?? 0,
             },
             player2: {
-                move: p2Move,
+                move: p2ResolvedMove,
                 damageDealt: resolution.player2.damageDealt,
                 damageTaken: resolution.player2.damageTaken,
                 healthAfter: resolution.player2HealthAfter,
@@ -576,7 +582,7 @@ export async function resolveTurn(
                 winner: matchWinner,
                 winnerAddress: winnerAddr,
                 finalScore: {
-                    player1RoundsWon: p1RoundsWon,
+                    move: p1ResolvedMove,
                     player2RoundsWon: p2RoundsWon,
                 },
                 player1RoundsWon: p1RoundsWon,
@@ -589,7 +595,7 @@ export async function resolveTurn(
                 onChainOutcomeTxHash,
                 onChainResultPending,
                 onChainResultError,
-                onChainSkippedReason,
+                    move: p2ResolvedMove,
                 zkFinalizeFailedReason,
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });

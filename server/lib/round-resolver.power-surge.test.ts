@@ -30,6 +30,35 @@ describe("round-resolver power surge integration", () => {
     expect(result.player2HealthAfter).toBe(90);
   });
 
+  it("does not charge energy for unaffordable moves (auto-block)", () => {
+    const result = resolveRound(
+      {
+        // Player 1 tries to kick without enough energy; server should auto-convert to block.
+        player1Move: "kick",
+        player2Move: "stunned",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 10,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-energy-auto-block",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: null,
+      }
+    );
+
+    // Move becomes a block (guarding vs stunned) and should gain regen energy without paying kick cost.
+    expect(result.player1.move).toBe("block");
+    expect(result.player1.outcome).toBe("guarding");
+    expect(result.player1EnergyAfter).toBe(18); // 10 + ENERGY_REGEN(8)
+    expect(result.player1GuardAfter).toBeGreaterThan(0);
+  });
+
   it("applies tx-storm priority boost to break simultaneous-hit clashes", () => {
     const result = resolveRound(
       {

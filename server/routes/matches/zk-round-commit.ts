@@ -7,9 +7,11 @@ import { isValidMove } from "../../lib/round-resolver";
 import { GAME_CONSTANTS, type MoveType } from "../../lib/game-types";
 import { isPowerSurgeCardId, POWER_SURGE_CARD_IDS, type PowerSurgeCardId } from "../../lib/power-surge";
 import { resolveTurn } from "../../lib/combat-resolver";
-import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setZkGateRequiredOnChain, setZkVerifierContractOnChain, setZkVerifierVkIdOnChain, submitSignedZkCommitOnChain, submitZkCommitOnChain, submitZkVerificationOnChain } from "../../lib/stellar-contract";
+import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setGroth16VerificationKeyOnChain, setZkGateRequiredOnChain, setZkVerifierContractOnChain, setZkVerifierVkIdOnChain, submitSignedZkCommitOnChain, submitZkCommitOnChain, submitZkVerificationOnChain } from "../../lib/stellar-contract";
 import { buildPoseidon } from "circomlibjs";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
@@ -31,8 +33,34 @@ const onChainSetupCache = new Map<string, {
     gateEnabled?: boolean;
     verifierConfigured?: boolean;
     vkConfigured?: boolean;
+    vkUploaded?: boolean;
 }>();
 const onChainSetupInFlight = new Map<string, Promise<{ success: boolean; error?: string | null }>>();
+
+const DEFAULT_GROTH16_ROUND_CIRCUIT_DIR = resolve(process.cwd(), "zk_circuits", "veilstar_round_plan_groth16");
+const DEFAULT_GROTH16_ROUND_VKEY_PATH = resolve(DEFAULT_GROTH16_ROUND_CIRCUIT_DIR, "artifacts", "verification_key.json");
+
+let computedGroth16VkIdPromise: Promise<string> | null = null;
+async function getGroth16RoundVkIdHex(): Promise<string> {
+    if (ZK_GROTH16_VK_ID) {
+        return normalizeHex32(ZK_GROTH16_VK_ID);
+    }
+
+    if (!computedGroth16VkIdPromise) {
+        computedGroth16VkIdPromise = (async () => {
+            const vkeyPath = (process.env.ZK_GROTH16_ROUND_VKEY_PATH || "").trim() || DEFAULT_GROTH16_ROUND_VKEY_PATH;
+            const raw = await readFile(vkeyPath, "utf8");
+            const digestHex = createHash("sha256").update(raw).digest("hex");
+            return normalizeHex32(`0x${digestHex}`);
+        })();
+    }
+
+    return computedGroth16VkIdPromise;
+}
+
+function getGroth16RoundVerificationKeyPath(): string {
+    return (process.env.ZK_GROTH16_ROUND_VKEY_PATH || "").trim() || DEFAULT_GROTH16_ROUND_VKEY_PATH;
+}
 
 interface CommitPrivateRoundBody {
     clientTraceId?: string;
@@ -321,33 +349,67 @@ async function runOnChainSetup(params: {
         }
     }
 
-    if (!ZK_GROTH16_VK_ID) {
+    let vkIdHex: string | null = null;
+    try {
+        vkIdHex = await getGroth16RoundVkIdHex();
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         if (strictMode) {
-            return {
-                success: false,
-                error: "ZK_GROTH16_VK_ID is required in strict mode",
-            };
+            return { success: false, error: `Failed to compute Groth16 vk id: ${msg}` };
         }
-    } else if (!setupState.vkConfigured) {
-        const setVkIdResult = await runSetupWithRetry(
-            "set_zk_verifier_vk_id",
-            () => setZkVerifierVkIdOnChain(
-                ZK_GROTH16_VK_ID,
-                { contractId },
-            ),
-        );
+    }
 
-        if (!setVkIdResult.success && strictMode) {
-            return {
-                success: false,
-                error: `Failed to configure on-chain verifier vk id: ${setVkIdResult.error || "unknown"}`,
-            };
+    if (vkIdHex) {
+        if (!setupState.vkUploaded) {
+            const vkeyPath = getGroth16RoundVerificationKeyPath();
+            const setVkOnVerifierResult = await runSetupWithRetry(
+                "set_verification_key",
+                () => setGroth16VerificationKeyOnChain(
+                    ZK_GROTH16_VERIFIER_CONTRACT_ID,
+                    vkIdHex as string,
+                    vkeyPath,
+                ),
+            );
+
+            if (!setVkOnVerifierResult.success && strictMode) {
+                return {
+                    success: false,
+                    error: `Failed to upload Groth16 verification key: ${setVkOnVerifierResult.error || "unknown"}`,
+                };
+            }
+
+            if (setVkOnVerifierResult.success) {
+                setupState.vkUploaded = true;
+                onChainSetupCache.set(setupKey, setupState);
+            }
         }
 
-        if (setVkIdResult.success) {
-            setupState.vkConfigured = true;
-            onChainSetupCache.set(setupKey, setupState);
+        if (!setupState.vkConfigured) {
+            const setVkIdResult = await runSetupWithRetry(
+                "set_zk_verifier_vk_id",
+                () => setZkVerifierVkIdOnChain(
+                    vkIdHex as string,
+                    { contractId },
+                ),
+            );
+
+            if (!setVkIdResult.success && strictMode) {
+                return {
+                    success: false,
+                    error: `Failed to configure on-chain verifier vk id: ${setVkIdResult.error || "unknown"}`,
+                };
+            }
+
+            if (setVkIdResult.success) {
+                setupState.vkConfigured = true;
+                onChainSetupCache.set(setupKey, setupState);
+            }
         }
+    } else if (strictMode) {
+        return {
+            success: false,
+            error: "Missing Groth16 verifier key id (set ZK_GROTH16_VK_ID or ensure verification_key.json is available)",
+        };
     }
 
     return { success: true };
@@ -897,7 +959,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         roundNumber,
                         turnNumber,
                         commitment,
-                        ZK_GROTH16_VK_ID,
+                        await getGroth16RoundVkIdHex(),
                         proof,
                         body.publicInputs,
                         {

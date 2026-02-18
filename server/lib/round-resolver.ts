@@ -484,8 +484,12 @@ export function resolveRound(
     }
 
     // Energy after moves
-    let p1EnergyAfter = calculateEnergyAfter(player1Energy, player1Move);
-    let p2EnergyAfter = calculateEnergyAfter(player2Energy, player2Move);
+    // Important: if a player cannot afford their submitted move, we auto-convert it to a block
+    // (see player1PlannedMove/player2PlannedMove). Energy must be charged for the move that
+    // actually executes, otherwise we incorrectly drain energy and create cascading desyncs
+    // (e.g. player appears to "kick" but server resolves as block and energy mysteriously drops).
+    let p1EnergyAfter = calculateEnergyAfter(player1Energy, player1PlannedMove);
+    let p2EnergyAfter = calculateEnergyAfter(player2Energy, player2PlannedMove);
 
     // Surge energy effects (burn/steal/extra cost/regen bonus)
     let p1EnergyDrained = 0;

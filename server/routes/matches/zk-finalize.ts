@@ -16,9 +16,12 @@ import {
     isStellarConfigured,
     matchIdToSessionId,
     reportMatchResultOnChain,
+    setGroth16VerificationKeyOnChain,
     submitZkMatchOutcomeOnChain,
 } from "../../lib/stellar-contract";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
 const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
@@ -47,6 +50,62 @@ interface FinalizeBody {
     publicInputs?: unknown;
     transcriptHash?: string;
     broadcast?: boolean;
+}
+
+const DEFAULT_GROTH16_ROUND_CIRCUIT_DIR = resolve(process.cwd(), "zk_circuits", "veilstar_round_plan_groth16");
+const DEFAULT_GROTH16_ROUND_VKEY_PATH = resolve(DEFAULT_GROTH16_ROUND_CIRCUIT_DIR, "artifacts", "verification_key.json");
+
+function normalizeHex32(input: string): string {
+    const trimmed = input.trim().toLowerCase();
+    if (!/^0x[0-9a-f]+$/.test(trimmed)) {
+        throw new Error("Invalid 0x hex string");
+    }
+    const raw = trimmed.slice(2);
+    if (raw.length === 0 || raw.length > 64) {
+        throw new Error("Hex value exceeds 32 bytes");
+    }
+    return `0x${raw.padStart(64, "0")}`;
+}
+
+function getGroth16RoundVerificationKeyPath(): string {
+    return (process.env.ZK_GROTH16_ROUND_VKEY_PATH || "").trim() || DEFAULT_GROTH16_ROUND_VKEY_PATH;
+}
+
+let computedGroth16VkIdPromise: Promise<string> | null = null;
+async function getGroth16VkIdHexForFinalize(): Promise<string> {
+    const explicit = (
+        process.env.ZK_FINALIZE_VK_ID
+        || process.env.ZK_GROTH16_VK_ID
+        || process.env.ZK_VERIFIER_VK_ID
+        || ""
+    ).trim();
+
+    if (explicit) return normalizeHex32(explicit);
+
+    if (!computedGroth16VkIdPromise) {
+        computedGroth16VkIdPromise = (async () => {
+            const vkeyPath = getGroth16RoundVerificationKeyPath();
+            const raw = await readFile(vkeyPath, "utf8");
+            const digestHex = createHash("sha256").update(raw).digest("hex");
+            return normalizeHex32(`0x${digestHex}`);
+        })();
+    }
+
+    return computedGroth16VkIdPromise;
+}
+
+let vkUploadAttempted = false;
+async function ensureGroth16VerificationKeyUploaded(vkIdHex: string): Promise<void> {
+    const verifierContractId = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
+    if (!verifierContractId) return;
+    if (vkUploadAttempted) return;
+    vkUploadAttempted = true;
+
+    const vkeyPath = getGroth16RoundVerificationKeyPath();
+    const res = await setGroth16VerificationKeyOnChain(verifierContractId, vkIdHex, vkeyPath);
+    if (!res.success) {
+        throw new Error(res.error || "Failed to upload Groth16 verification key");
+    }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -303,16 +362,13 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             }
         }
 
-        const vkIdHex = (
-            process.env.ZK_FINALIZE_VK_ID
-            || process.env.ZK_GROTH16_VK_ID
-            || process.env.ZK_VERIFIER_VK_ID
-            || ""
-        ).trim();
-
-        if (!vkIdHex) {
+        let vkIdHex: string;
+        try {
+            vkIdHex = await getGroth16VkIdHexForFinalize();
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
             return Response.json(
-                { error: "Missing finalize verifier key id (set ZK_FINALIZE_VK_ID or ZK_GROTH16_VK_ID)" },
+                { error: `Missing/invalid finalize verifier key id: ${msg}` },
                 { status: 500 },
             );
         }
@@ -365,6 +421,20 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
         let onChainContractId = (match.onchain_contract_id || getConfiguredContractId() || "").trim();
 
         if (isStellarConfigured()) {
+            // Ensure verifier has the VK stored under the vk_id we’re about to use.
+            try {
+                await ensureGroth16VerificationKeyUploaded(vkIdHex);
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (strictFinalize) {
+                    return Response.json(
+                        { error: `Failed to upload Groth16 verification key: ${msg}` },
+                        { status: 502 },
+                    );
+                }
+                console.warn(`[ZK Finalize] Groth16 VK upload skipped/failed (non-strict): ${msg}`);
+            }
+
             if (onChainSessionId === null) {
                 const recoveredSessionId = matchIdToSessionId(matchId);
                 const recoveredContractId = onChainContractId || getConfiguredContractId() || "";

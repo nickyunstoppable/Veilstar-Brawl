@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
+import { buildPoseidon } from "circomlibjs";
 
 type TableRow = Record<string, any>;
 
@@ -197,6 +199,66 @@ function createSupabaseMock(db: InMemoryDb) {
   };
 }
 
+const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+function toFieldBigint(text: string): bigint {
+  const digestHex = createHash("sha256").update(text).digest("hex");
+  return BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
+}
+
+function normalizeHex32(input: string): string {
+  const trimmed = input.trim().toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(trimmed)) throw new Error("Invalid 0x hex string");
+  const raw = trimmed.slice(2);
+  if (raw.length === 0 || raw.length > 64) throw new Error("Hex value exceeds 32 bytes");
+  return `0x${raw.padStart(64, "0")}`;
+}
+
+const MOVE_TO_CODE: Record<string, number> = {
+  stunned: 0,
+  punch: 1,
+  kick: 2,
+  block: 3,
+  special: 4,
+};
+
+let poseidonPromise: Promise<any> | null = null;
+async function getPoseidon(): Promise<any> {
+  if (!poseidonPromise) poseidonPromise = buildPoseidon();
+  return poseidonPromise;
+}
+
+async function computeExpectedCommitmentHex(params: {
+  matchId: string;
+  roundNumber: number;
+  turnNumber: number;
+  playerAddress: string;
+  surgeCardId?: string | null;
+  nonceDecimal: string;
+  movePlan: string[];
+}): Promise<string> {
+  const poseidon = await getPoseidon();
+  const matchIdField = toFieldBigint(params.matchId);
+  const playerField = toFieldBigint(params.playerAddress);
+  const surgeCode = 0n; // tests use null surge
+  const nonce = BigInt(params.nonceDecimal);
+
+  const moveCodes = params.movePlan.map((move) => BigInt(MOVE_TO_CODE[String(move)] ?? MOVE_TO_CODE.block));
+  const preimage: bigint[] = [
+    matchIdField,
+    BigInt(params.roundNumber),
+    BigInt(params.turnNumber),
+    playerField,
+    surgeCode,
+    nonce,
+    ...moveCodes,
+  ];
+
+  const out = poseidon(preimage);
+  const asBigint: bigint = poseidon.F.toObject(out);
+  return normalizeHex32(`0x${asBigint.toString(16)}`);
+}
+
 describe("zk-round-commit private round auto-resolution integration", () => {
   beforeEach(() => {
     process.env.ZK_PRIVATE_ROUNDS = "true";
@@ -211,6 +273,26 @@ describe("zk-round-commit private round auto-resolution integration", () => {
 
     const player1Plan = Array(10).fill("special");
     const player2Plan = Array(10).fill("punch");
+
+    const nonceDecimal = "1";
+    const p1Commitment = await computeExpectedCommitmentHex({
+      matchId,
+      roundNumber,
+      turnNumber: 1,
+      playerAddress: player1,
+      surgeCardId: null,
+      nonceDecimal,
+      movePlan: player1Plan,
+    });
+    const p2Commitment = await computeExpectedCommitmentHex({
+      matchId,
+      roundNumber,
+      turnNumber: 1,
+      playerAddress: player2,
+      surgeCardId: null,
+      nonceDecimal,
+      movePlan: player2Plan,
+    });
 
     const db: InMemoryDb = {
       matches: [
@@ -235,14 +317,14 @@ describe("zk-round-commit private round auto-resolution integration", () => {
           match_id: matchId,
           round_number: roundNumber,
           player_address: player1,
-          commitment: "0xabc",
+          commitment: p1Commitment,
           encrypted_plan: JSON.stringify({
             move: "special",
             movePlan: player1Plan,
             surgeCardId: null,
           }),
-          proof_public_inputs: { foo: "bar" },
-          transcript_hash: "nonce-1",
+          proof_public_inputs: [p1Commitment],
+          transcript_hash: nonceDecimal,
           resolved_round_id: null,
           resolved_at: null,
           updated_at: new Date().toISOString(),
@@ -251,14 +333,14 @@ describe("zk-round-commit private round auto-resolution integration", () => {
           match_id: matchId,
           round_number: roundNumber,
           player_address: player2,
-          commitment: "0xdef",
+          commitment: p2Commitment,
           encrypted_plan: JSON.stringify({
             move: "punch",
             movePlan: player2Plan,
             surgeCardId: null,
           }),
-          proof_public_inputs: { foo: "bar" },
-          transcript_hash: "nonce-1",
+          proof_public_inputs: [p2Commitment],
+          transcript_hash: nonceDecimal,
           resolved_round_id: null,
           resolved_at: null,
           updated_at: new Date().toISOString(),
@@ -299,11 +381,13 @@ describe("zk-round-commit private round auto-resolution integration", () => {
 
       mock.module("../../lib/power-surge", () => ({
         isPowerSurgeCardId: (_value: unknown) => false,
+        POWER_SURGE_CARD_IDS: [] as any,
       }));
 
       mock.module("../../lib/stellar-contract", () => ({
         isOnChainRegistrationConfigured: () => false,
         prepareZkCommitOnChain: async () => ({ success: true }),
+        setGroth16VerificationKeyOnChain: async () => ({ success: true }),
         setZkGateRequiredOnChain: async () => ({ success: true }),
         setZkVerifierContractOnChain: async () => ({ success: true }),
         setZkVerifierVkIdOnChain: async () => ({ success: true }),
@@ -366,8 +450,8 @@ describe("zk-round-commit private round auto-resolution integration", () => {
             move: "special",
             movePlan: player1Plan,
             proof: "proof-1",
-            publicInputs: { foo: "bar" },
-            transcriptHash: "nonce-1",
+            publicInputs: [p1Commitment],
+            transcriptHash: nonceDecimal,
           }),
         }),
       );

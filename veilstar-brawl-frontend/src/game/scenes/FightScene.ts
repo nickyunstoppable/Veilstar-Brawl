@@ -2273,7 +2273,7 @@ export class FightScene extends Phaser.Scene {
         return;
       }
 
-      const moveCost = BASE_MOVE_STATS[move].energyCost;
+      const moveCost = this.getPlannedMoveEnergyCost(move);
       if (this.privateRoundPlanEnergyPreview < moveCost) {
         this.showFloatingText("Not enough energy for this step", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
         return;
@@ -2358,11 +2358,39 @@ export class FightScene extends Phaser.Scene {
       : (this.serverState?.player2Energy ?? 0);
   }
 
+  /**
+   * Energy cost used for UI affordability and private-round plan-energy simulation.
+   *
+   * In private rounds we preplan 10 moves and show a "Plan Energy" preview. That preview must
+   * include deterministic surge energy costs (e.g. Finality Fist adds extra energy cost to special),
+   * otherwise the UI can allow later steps (like Kick) that the server will resolve as Block.
+   */
+  private getPlannedMoveEnergyCost(move: MoveType): number {
+    const baseCost = BASE_MOVE_STATS[move].energyCost;
+
+    // Only private-round planning uses extra deterministic costs.
+    if (!PRIVATE_ROUNDS_ENABLED || this.phase !== "selecting") {
+      return baseCost;
+    }
+
+    if (move !== "special") return baseCost;
+
+    const surgeEffects = calculateSurgeEffects(
+      this.activeSurges.player1,
+      this.activeSurges.player2,
+    );
+
+    const myRole = this.config.playerRole;
+    const myMods = myRole === "player1" ? surgeEffects.player1Modifiers : surgeEffects.player2Modifiers;
+    const extra = Math.max(0, Math.floor(Number(myMods.specialEnergyCost ?? 0)));
+    return baseCost + extra;
+  }
+
   private canAffordMoveForSelection(move: MoveType): boolean {
     const role = this.config.playerRole;
     if (!role) return false;
     const currentEnergy = this.getSelectionEnergy(role);
-    return currentEnergy >= BASE_MOVE_STATS[move].energyCost;
+    return currentEnergy >= this.getPlannedMoveEnergyCost(move);
   }
 
   private updateButtonState(selectedMove: MoveType | null, isSelected: boolean): void {
@@ -2489,7 +2517,7 @@ export class FightScene extends Phaser.Scene {
         return;
       }
 
-      const moveCost = BASE_MOVE_STATS[move].energyCost;
+      const moveCost = this.getPlannedMoveEnergyCost(move);
       const isAffordable = currentEnergy >= moveCost;
 
       // Check if this specific move should be disabled
@@ -2601,7 +2629,8 @@ export class FightScene extends Phaser.Scene {
     this.privatePlanEnergyText.setVisible(true);
     try {
       this.privatePlanEnergyText.setText(`Plan Energy: ${this.privateRoundPlanEnergyPreview}`);
-      this.privatePlanEnergyText.setColor(this.privateRoundPlanEnergyPreview < BASE_MOVE_STATS.special.energyCost ? "#f59e0b" : "#3b82f6");
+      const warnThreshold = this.getPlannedMoveEnergyCost("special");
+      this.privatePlanEnergyText.setColor(this.privateRoundPlanEnergyPreview < warnThreshold ? "#f59e0b" : "#3b82f6");
     } catch {
       // ignore renderer/text disposal edge cases
     }
