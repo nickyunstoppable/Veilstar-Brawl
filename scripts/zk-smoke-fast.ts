@@ -120,11 +120,22 @@ async function main() {
   const p2Move = "block";
   const surge = "dag-overclock";
 
+  const p1MovePlan = [
+    p1Move,
+    ...Array(9).fill("block"),
+  ];
+
+  const p2MovePlan = [
+    p2Move,
+    ...Array(9).fill("block"),
+  ];
+
   const p1Proof = await post(`/api/matches/${matchId}/zk/round/prove`, {
     address: P1,
     roundNumber,
     turnNumber,
     move: p1Move,
+    movePlan: p1MovePlan,
     surgeCardId: surge,
   });
 
@@ -133,6 +144,7 @@ async function main() {
     roundNumber,
     turnNumber,
     move: p2Move,
+    movePlan: p2MovePlan,
     surgeCardId: surge,
   });
 
@@ -144,7 +156,7 @@ async function main() {
     proof: p1Proof.proof,
     publicInputs: p1Proof.publicInputs,
     transcriptHash: p1Proof.nonce,
-    encryptedPlan: JSON.stringify({ move: p1Move, surgeCardId: surge }),
+    encryptedPlan: JSON.stringify({ move: p1Move, movePlan: p1MovePlan, surgeCardId: surge }),
   });
 
   const c2 = await post(`/api/matches/${matchId}/zk/round/commit`, {
@@ -155,7 +167,7 @@ async function main() {
     proof: p2Proof.proof,
     publicInputs: p2Proof.publicInputs,
     transcriptHash: p2Proof.nonce,
-    encryptedPlan: JSON.stringify({ move: p2Move, surgeCardId: surge }),
+    encryptedPlan: JSON.stringify({ move: p2Move, movePlan: p2MovePlan, surgeCardId: surge }),
   });
 
   const resolve = await post(`/api/matches/${matchId}/zk/round/resolve`, {
@@ -163,6 +175,7 @@ async function main() {
     roundNumber,
     turnNumber,
     move: p1Move,
+    movePlan: p1MovePlan,
     surgeCardId: surge,
     proof: p1Proof.proof,
     publicInputs: p1Proof.publicInputs,

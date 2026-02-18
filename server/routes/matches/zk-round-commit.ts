@@ -1,11 +1,15 @@
+/// <reference path="../../../circomlibjs.d.ts" />
+
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { verifyNoirProof } from "../../lib/zk-proof";
 import { isValidMove } from "../../lib/round-resolver";
 import { GAME_CONSTANTS, type MoveType } from "../../lib/game-types";
-import { isPowerSurgeCardId, type PowerSurgeCardId } from "../../lib/power-surge";
+import { isPowerSurgeCardId, POWER_SURGE_CARD_IDS, type PowerSurgeCardId } from "../../lib/power-surge";
 import { resolveTurn } from "../../lib/combat-resolver";
 import { isOnChainRegistrationConfigured, prepareZkCommitOnChain, setZkGateRequiredOnChain, setZkVerifierContractOnChain, setZkVerifierVkIdOnChain, submitSignedZkCommitOnChain, submitZkCommitOnChain, submitZkVerificationOnChain } from "../../lib/stellar-contract";
+import { buildPoseidon } from "circomlibjs";
+import { createHash } from "node:crypto";
 
 const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
@@ -73,6 +77,147 @@ interface PrivateRoundPlanPayload {
 }
 
 const PRIVATE_ROUND_PLAN_TURNS = 10;
+
+const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+const MOVE_TO_CODE: Record<string, number> = {
+    stunned: 0,
+    punch: 1,
+    kick: 2,
+    block: 3,
+    special: 4,
+};
+
+let poseidonPromise: Promise<any> | null = null;
+async function getPoseidon(): Promise<any> {
+    if (!poseidonPromise) {
+        poseidonPromise = buildPoseidon();
+    }
+    return poseidonPromise;
+}
+
+function toFieldBigint(text: string): bigint {
+    const digestHex = createHash("sha256").update(text).digest("hex");
+    return BigInt(`0x${digestHex}`) % BN254_FIELD_PRIME;
+}
+
+function normalizeHex32(input: string): string {
+    const trimmed = input.trim().toLowerCase();
+    if (!/^0x[0-9a-f]+$/.test(trimmed)) {
+        throw new Error("Invalid 0x hex string");
+    }
+    const raw = trimmed.slice(2);
+    if (raw.length === 0 || raw.length > 64) {
+        throw new Error("Hex value exceeds 32 bytes");
+    }
+    return `0x${raw.padStart(64, "0")}`;
+}
+
+function parsePublicInputsFirstAsHex32(publicInputs: unknown): string {
+    const decodeMaybeBase64 = (value: unknown): Buffer | null => {
+        if (typeof value !== "string") return null;
+        const text = value.trim();
+        if (!text.startsWith("base64:")) return null;
+        return Buffer.from(text.slice("base64:".length), "base64");
+    };
+
+    const parseArrayFirst = (arr: unknown[]): string => {
+        if (arr.length < 1) {
+            throw new Error("publicInputs must have at least 1 element");
+        }
+        const first = arr[0];
+        if (typeof first === "string") {
+            const t = first.trim();
+            if (/^0x[0-9a-fA-F]+$/.test(t)) return normalizeHex32(t);
+            if (/^[0-9]+$/.test(t)) {
+                const n = BigInt(t);
+                return normalizeHex32(`0x${n.toString(16)}`);
+            }
+        }
+        if (typeof first === "number" && Number.isFinite(first) && Number.isInteger(first) && first >= 0) {
+            return normalizeHex32(`0x${BigInt(first).toString(16)}`);
+        }
+        throw new Error("publicInputs[0] must be a hex or decimal scalar");
+    };
+
+    if (Array.isArray(publicInputs)) {
+        return parseArrayFirst(publicInputs);
+    }
+
+    if (typeof publicInputs === "string") {
+        const decoded = decodeMaybeBase64(publicInputs);
+        if (decoded) {
+            const asText = decoded.toString("utf8").trim();
+            if (asText.startsWith("[")) {
+                const parsed = JSON.parse(asText);
+                if (!Array.isArray(parsed)) throw new Error("publicInputs base64 JSON must decode to array");
+                return parseArrayFirst(parsed);
+            }
+
+            if (decoded.length === 0) throw new Error("publicInputs base64 payload is empty");
+            if (decoded.length < 32) throw new Error("publicInputs base64 payload must include at least 32 bytes");
+            return normalizeHex32(`0x${decoded.subarray(0, 32).toString("hex")}`);
+        }
+
+        const trimmed = publicInputs.trim();
+        if (trimmed.startsWith("[")) {
+            const parsed = JSON.parse(trimmed);
+            if (!Array.isArray(parsed)) throw new Error("publicInputs JSON must be an array");
+            return parseArrayFirst(parsed);
+        }
+    }
+
+    throw new Error("Unsupported publicInputs format");
+}
+
+function toSurgeCode(cardId?: PowerSurgeCardId | null): bigint {
+    if (!cardId) return 0n;
+    const idx = POWER_SURGE_CARD_IDS.indexOf(cardId);
+    if (idx < 0) return 0n;
+    return BigInt(idx + 1);
+}
+
+async function computeRoundPlanCommitmentHex(params: {
+    matchId: string;
+    roundNumber: number;
+    turnNumber: number;
+    playerAddress: string;
+    surgeCardId?: PowerSurgeCardId | null;
+    nonceDecimal: string;
+    movePlan: MoveType[];
+}): Promise<string> {
+    const poseidon = await getPoseidon();
+
+    if (!Number.isInteger(params.roundNumber) || params.roundNumber < 1) throw new Error("roundNumber must be >= 1");
+    if (!Number.isInteger(params.turnNumber) || params.turnNumber < 1) throw new Error("turnNumber must be >= 1");
+    if (!Array.isArray(params.movePlan) || params.movePlan.length !== PRIVATE_ROUND_PLAN_TURNS) {
+        throw new Error(`movePlan must have exactly ${PRIVATE_ROUND_PLAN_TURNS} moves`);
+    }
+
+    const nonce = BigInt(params.nonceDecimal);
+    const matchIdField = toFieldBigint(params.matchId);
+    const playerField = toFieldBigint(params.playerAddress);
+    const surgeCode = toSurgeCode(params.surgeCardId ?? null);
+
+    const moveCodes = params.movePlan.map((move) => {
+        const code = MOVE_TO_CODE[String(move)] ?? MOVE_TO_CODE.block;
+        return BigInt(code);
+    });
+
+    const preimage: bigint[] = [
+        matchIdField,
+        BigInt(params.roundNumber),
+        BigInt(params.turnNumber),
+        playerField,
+        surgeCode,
+        nonce,
+        ...moveCodes,
+    ];
+
+    const out = poseidon(preimage);
+    const asBigint: bigint = poseidon.F.toObject(out);
+    return normalizeHex32(`0x${asBigint.toString(16)}`);
+}
 
 type ResolveLockState = "acquired" | "in_progress" | "resolved";
 
@@ -424,8 +569,22 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             return Response.json({ error: "Invalid commitment format" }, { status: 400 });
         }
 
+        let commitmentNormalized: string;
+        try {
+            commitmentNormalized = normalizeHex32(commitment);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return Response.json({ error: `Invalid commitment: ${msg}` }, { status: 400 });
+        }
+
         if (!body.transcriptHash?.trim()) {
             return Response.json({ error: "Commit payload is missing transcriptHash/nonce" }, { status: 400 });
+        }
+
+        // For Groth16 calldata mode we must have public inputs so we can bind proof↔commitment server-side
+        // (on-chain already enforces it, but this closes DB/UX loopholes and gives earlier feedback).
+        if (ZK_ONCHAIN_COMMIT_GATE && (body.publicInputs === undefined || body.publicInputs === null)) {
+            return Response.json({ error: "Commit payload is missing publicInputs" }, { status: 400 });
         }
 
         const parsedCommitPlan = parseStoredPlan(body.encryptedPlan);
@@ -543,6 +702,29 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
             });
         }
 
+        // Ensure the public input commitment matches the submitted commitment.
+        // This prevents storing/relaying mismatched (commitment,proof,publicInputs) tuples.
+        if (body.publicInputs !== undefined && body.publicInputs !== null) {
+            try {
+                const publicCommitment = parsePublicInputsFirstAsHex32(body.publicInputs);
+                if (publicCommitment !== commitmentNormalized) {
+                    return Response.json(
+                        {
+                            error: "Commitment mismatch (publicInputs[0] != commitment)",
+                            details: {
+                                commitment: commitmentNormalized,
+                                publicInputs0: publicCommitment,
+                            },
+                        },
+                        { status: 409 },
+                    );
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                return Response.json({ error: `Invalid publicInputs: ${msg}` }, { status: 400 });
+            }
+        }
+
         let onChainCommitTxHash = body.onChainCommitTxHash || null;
         let onChainVerificationTxHash: string | null = null;
 
@@ -553,7 +735,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                     match_id: matchId,
                     round_number: roundNumber,
                     player_address: address,
-                    commitment,
+                    commitment: commitmentNormalized,
                     encrypted_plan: body.encryptedPlan || null,
                     proof_public_inputs: body.publicInputs ?? null,
                     transcript_hash: body.transcriptHash ?? null,
@@ -1046,6 +1228,37 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
         const incomingTranscriptHash = String(body.transcriptHash || "").trim();
         if (!committedTranscriptHash || committedTranscriptHash !== incomingTranscriptHash) {
             return Response.json({ error: "Reveal transcript hash does not match committed transcript hash" }, { status: 409 });
+        }
+
+        // Recompute Poseidon commitment from the revealed plan and committed nonce.
+        // This binds the DB-stored encrypted plan → revealed plan → ZK commitment (single public input).
+        try {
+            const expectedCommitment = await computeRoundPlanCommitmentHex({
+                matchId,
+                roundNumber,
+                turnNumber,
+                playerAddress: address,
+                surgeCardId: resolvedSurge,
+                nonceDecimal: incomingTranscriptHash,
+                movePlan: incomingMovePlan,
+            });
+
+            const storedCommitment = normalizeHex32(String((submitterCommit as any).commitment || ""));
+            if (storedCommitment !== expectedCommitment) {
+                return Response.json(
+                    {
+                        error: "Reveal does not match committed Poseidon commitment",
+                        details: {
+                            storedCommitment,
+                            expectedCommitment,
+                        },
+                    },
+                    { status: 409 },
+                );
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return Response.json({ error: `Failed to validate reveal commitment binding: ${msg}` }, { status: 400 });
         }
 
         const committedPublicInputs = canonicalJson((submitterCommit as any).proof_public_inputs);
