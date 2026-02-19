@@ -1,11 +1,14 @@
 /**
  * MP4 Video Exporter
- * Renders ReplayScene in a hidden Phaser game and records frames/audio using WebCodecs.
+ * Renders replay in a hidden Phaser game
+ * Records canvas and encodes to MP4 with audio
+ * Captures Phaser's internal audio output (BGM + SFX) while keeping speakers silent
  */
 
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import type { PowerSurgeCardId } from "@/types/power-surge";
 
+// Replay data type (duplicated to avoid import chain issues)
 export interface ReplayRoundData {
     roundNumber: number;
     player1Move: string;
@@ -15,6 +18,14 @@ export interface ReplayRoundData {
     player1HealthAfter: number;
     player2HealthAfter: number;
     winnerAddress: string | null;
+    // Power surge effects
+    player1EnergyDrained?: number;
+    player2EnergyDrained?: number;
+    player1HpRegen?: number;
+    player2HpRegen?: number;
+    player1Lifesteal?: number;
+    player2Lifesteal?: number;
+    // Power surge data
     surgeCardIds?: PowerSurgeCardId[];
     player1SurgeSelection?: PowerSurgeCardId;
     player2SurgeSelection?: PowerSurgeCardId;
@@ -43,36 +54,26 @@ export interface MP4ExportOptions {
     onError?: (error: Error) => void;
 }
 
+/**
+ * Check if VideoEncoder and AudioEncoder APIs are available
+ */
 export function isMP4ExportSupported(): boolean {
     if (typeof window === "undefined") return false;
     return (
-        typeof (window as any).VideoEncoder !== "undefined" &&
-        typeof (window as any).AudioEncoder !== "undefined" &&
-        typeof (window as any).OffscreenCanvas !== "undefined"
+        typeof VideoEncoder !== "undefined" &&
+        typeof AudioEncoder !== "undefined" &&
+        typeof OffscreenCanvas !== "undefined"
     );
 }
 
-export async function fetchReplayData(matchId: string): Promise<ReplayData> {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || window.location.origin;
-    const response = await fetch(`${apiBase}/api/replay-data?matchId=${encodeURIComponent(matchId)}`);
-    if (!response.ok) {
-        throw new Error(await response.text());
-    }
-    return (await response.json()) as ReplayData;
-}
-
-export function downloadBlob(blob: Blob, filename: string): void {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2500);
-}
-
-export async function exportReplayToMP4(replayData: ReplayData, options: MP4ExportOptions = {}): Promise<Blob> {
+/**
+ * Export a replay to MP4 format with audio
+ * Reroutes Phaser's audio to MP4 encoder while muting speaker output
+ */
+export async function exportReplayToMP4(
+    replayData: ReplayData,
+    options: MP4ExportOptions = {}
+): Promise<Blob> {
     const {
         width = 1280,
         height = 720,
@@ -83,21 +84,19 @@ export async function exportReplayToMP4(replayData: ReplayData, options: MP4Expo
         onError,
     } = options;
 
+    // Check support
     if (!isMP4ExportSupported()) {
-        const err = new Error("WebCodecs is not supported. Use Chrome/Edge.");
-        onError?.(err);
-        throw err;
+        const error = new Error(
+            "VideoEncoder/AudioEncoder API is not supported. Please use Chrome, Edge, or Opera."
+        );
+        onError?.(error);
+        throw error;
     }
 
-    const [{ default: Phaser }, { ReplayScene }, { EventBus }] = await Promise.all([
-        import("phaser"),
-        import("@/game/scenes/ReplayScene"),
-        import("@/game/EventBus"),
-    ]);
-
-    return await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         onProgress?.(5, "Initializing...");
 
+        // Create hidden container for Phaser
         const container = document.createElement("div");
         container.style.cssText = `
             position: fixed;
@@ -110,234 +109,343 @@ export async function exportReplayToMP4(replayData: ReplayData, options: MP4Expo
         `;
         document.body.appendChild(container);
 
-        const sampleRate = 48_000;
+        // Audio setup
+        const sampleRate = 48000;
         const numberOfChannels = 2;
         let audioContext: AudioContext | null = null;
         let scriptProcessor: ScriptProcessorNode | null = null;
 
-        let isComplete = false;
-        let frameCount = 0;
-        const frameDurationMicros = Math.round(1_000_000 / frameRate);
+        // Dynamically import Phaser and scene
+        Promise.all([
+            import("phaser"),
+            import("@/game/scenes/ReplayScene"),
+            import("@/game/EventBus"),
+        ])
+            .then(async ([PhaserModule, ReplaySceneModule, EventBusModule]) => {
+                const Phaser = PhaserModule.default || PhaserModule;
+                const { ReplayScene } = ReplaySceneModule;
+                const { EventBus } = EventBusModule;
 
-        try {
-            audioContext = new AudioContext({ sampleRate });
-        } catch {
-            // If AudioContext fails, we still can export silent video
-            audioContext = null;
-        }
+                // Create custom AudioContext
+                audioContext = new AudioContext({ sampleRate });
 
-        const muxer = new Muxer({
-            target: new ArrayBufferTarget(),
-            video: {
-                codec: "avc",
-                width,
-                height,
-            },
-            audio: {
-                codec: "aac",
-                numberOfChannels,
-                sampleRate,
-            },
-            fastStart: "in-memory",
-        });
+                // MP4 Muxer setup
+                const target = new ArrayBufferTarget();
+                const muxerOptions: any = {
+                    target,
+                    video: {
+                        codec: "avc",
+                        width,
+                        height,
+                    },
+                    audio: {
+                        codec: "aac",
+                        numberOfChannels,
+                        sampleRate,
+                    },
+                    fastStart: "in-memory",
+                };
 
-        const videoEncoder = new (window as any).VideoEncoder({
-            output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta ?? undefined),
-            error: (e: any) => {
-                onError?.(new Error(`VideoEncoder error: ${e?.message || String(e)}`));
-            },
-        });
+                const muxer = new Muxer(muxerOptions);
 
-        videoEncoder.configure({
-            codec: "avc1.42001f",
-            width,
-            height,
-            bitrate: videoBitrate,
-            framerate: frameRate,
-        });
+                // Video encoder
+                let frameCount = 0;
+                let isComplete = false;
+                const frameDurationMicros = 1_000_000 / frameRate;
 
-        let audioTimestamp = 0;
-        const audioEncoder = new (window as any).AudioEncoder({
-            output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta ?? undefined),
-            error: () => {
-                // ignore
-            },
-        });
-        audioEncoder.configure({
-            codec: "mp4a.40.2",
-            numberOfChannels,
-            sampleRate,
-            bitrate: audioBitrate,
-        });
-
-        const gameConfig: Phaser.Types.Core.GameConfig = {
-            type: Phaser.CANVAS,
-            parent: container,
-            width,
-            height,
-            backgroundColor: "#0a0a0a",
-            scene: [],
-            audio: {
-                noAudio: false,
-                context: audioContext ?? undefined,
-            },
-            fps: { target: 60, forceSetTimeOut: false },
-            render: { antialias: true, pixelArt: false },
-        };
-
-        const game = new Phaser.Game(gameConfig);
-
-        const sceneConfig = {
-            matchId: replayData.matchId,
-            player1Address: replayData.player1Address,
-            player2Address: replayData.player2Address,
-            player1Character: replayData.player1Character,
-            player2Character: replayData.player2Character,
-            winnerAddress: replayData.winnerAddress,
-            player1RoundsWon: replayData.player1RoundsWon,
-            player2RoundsWon: replayData.player2RoundsWon,
-            rounds: replayData.rounds,
-            muteAudio: false,
-        };
-
-        const estimatedDurationMs = (1.2 + replayData.rounds.length * 1.9 + 1.5) * 1000;
-
-        const cleanup = () => {
-            try {
-                (EventBus as any).off("replay:complete");
-                document.removeEventListener("visibilitychange", handleVisibilityChange);
-                if (scriptProcessor) scriptProcessor.disconnect();
-                if (audioContext && audioContext.state !== "closed") audioContext.close();
-                game.destroy(true);
-                container.remove();
-            } catch {
-                // ignore
-            }
-        };
-
-        let captureIntervalId: ReturnType<typeof setInterval> | null = null;
-        let isPaused = false;
-
-        const finalize = async () => {
-            if (isComplete) return;
-            isComplete = true;
-            onProgress?.(92, "Finalizing...");
-
-            try {
-                if (captureIntervalId) clearInterval(captureIntervalId);
-                await videoEncoder.flush();
-                await audioEncoder.flush();
-                videoEncoder.close();
-                audioEncoder.close();
-                muxer.finalize();
-                const buffer = muxer.target.buffer;
-                const blob = new Blob([buffer], { type: "video/mp4" });
-                onProgress?.(100, "Complete");
-                cleanup();
-                resolve(blob);
-            } catch (e) {
-                cleanup();
-                const err = e instanceof Error ? e : new Error(String(e));
-                onError?.(err);
-                reject(err);
-            }
-        };
-
-        const captureFrame = () => {
-            if (isComplete || isPaused) return;
-            const canvas = (game as any).canvas as HTMLCanvasElement | undefined;
-            if (!canvas) return;
-            try {
-                const timestamp = frameCount * frameDurationMicros;
-                const videoFrame = new (window as any).VideoFrame(canvas, {
-                    timestamp,
-                    duration: frameDurationMicros,
+                const videoEncoder = new VideoEncoder({
+                    output: (chunk, meta) => {
+                        muxer.addVideoChunk(chunk, meta ?? undefined);
+                    },
+                    error: (e) => {
+                        console.error("VideoEncoder error:", e);
+                        onError?.(new Error(`VideoEncoder error: ${e.message}`));
+                    },
                 });
-                videoEncoder.encode(videoFrame, { keyFrame: frameCount % (frameRate * 2) === 0 });
-                videoFrame.close();
-                frameCount++;
-                const elapsedMs = frameCount * (1000 / frameRate);
-                const progress = Math.min(85, 10 + Math.round((elapsedMs / estimatedDurationMs) * 75));
-                onProgress?.(progress, `Recording... (${frameCount} frames)`);
-            } catch {
-                // ignore
-            }
-        };
 
-        const handleVisibilityChange = () => {
-            if (isComplete) return;
-            if (document.hidden) {
-                isPaused = true;
-                (game as any).loop?.sleep?.();
-                onProgress?.(Math.min(85, 10 + Math.round((frameCount * (1000 / frameRate) / estimatedDurationMs) * 75)), "Paused (tab hidden)...");
-            } else {
-                isPaused = false;
-                (game as any).loop?.wake?.();
-            }
-        };
+                videoEncoder.configure({
+                    codec: "avc1.42001f",
+                    width,
+                    height,
+                    bitrate: videoBitrate,
+                    framerate: frameRate,
+                });
 
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+                // Audio encoder
+                let audioTimestamp = 0;
+                const audioEncoder = new AudioEncoder({
+                    output: (chunk, meta) => {
+                        muxer.addAudioChunk(chunk, meta ?? undefined);
+                    },
+                    error: (e) => {
+                        console.error("AudioEncoder error:", e);
+                    },
+                });
 
-        game.events.on("ready", () => {
-            onProgress?.(10, "Starting replay...");
+                audioEncoder.configure({
+                    codec: "mp4a.40.2", // AAC-LC
+                    numberOfChannels,
+                    sampleRate,
+                    bitrate: audioBitrate,
+                });
 
-            // Capture Phaser mixed audio silently (optional)
-            if (audioContext && (game as any).sound) {
-                const soundManager = (game as any).sound;
-                const masterNode = soundManager.masterVolumeNode as GainNode | undefined;
+                // Create Phaser game with AUDIO ENABLED, passing our context
+                const gameConfig: Phaser.Types.Core.GameConfig = {
+                    type: Phaser.CANVAS,
+                    parent: container,
+                    width,
+                    height,
+                    backgroundColor: "#0a0a0a",
+                    scene: [],
+                    audio: {
+                        noAudio: false,
+                        context: audioContext, // Use our context
+                    },
+                    fps: {
+                        target: 60,
+                        forceSetTimeOut: false,
+                    },
+                    render: {
+                        antialias: true,
+                        pixelArt: false,
+                    },
+                };
 
-                if (masterNode) {
+                const game = new Phaser.Game(gameConfig);
+
+                // Validate replay data
+                if (!replayData.player1Address || !replayData.player2Address) {
+                    console.error("Invalid replay data:", replayData);
+                    const error = new Error("Invalid replay data: missing player addresses");
+                    onError?.(error);
+                    container.remove();
+                    reject(error);
+                    return;
+                }
+
+                // Scene config
+                const sceneConfig = {
+                    matchId: replayData.matchId,
+                    player1Address: replayData.player1Address,
+                    player2Address: replayData.player2Address,
+                    player1Character: replayData.player1Character,
+                    player2Character: replayData.player2Character,
+                    winnerAddress: replayData.winnerAddress,
+                    player1RoundsWon: replayData.player1RoundsWon,
+                    player2RoundsWon: replayData.player2RoundsWon,
+                    rounds: replayData.rounds,
+                    muteAudio: false, // Let the scene play full audio
+                };
+
+                const estimatedDurationMs = (1.5 + replayData.rounds.length * 5 + 3) * 1000;
+
+                const cleanup = () => {
                     try {
-                        masterNode.disconnect();
-                    } catch {
-                        // ignore
+                        EventBus.off("replay:complete");
+                        if (scriptProcessor) scriptProcessor.disconnect();
+                        if (audioContext && audioContext.state !== "closed") audioContext.close();
+                        game.destroy(true);
+                        container.remove();
+                    } catch (e) {
+                        console.warn("Cleanup error:", e);
+                    }
+                };
+
+                // Frame capture loop variables (declared early for audio pausing)
+                let captureIntervalId: ReturnType<typeof setInterval> | null = null;
+                let isPaused = false;
+
+                game.events.on("ready", () => {
+                    onProgress?.(10, "Starting replay...");
+
+                    // REROUTE AUDIO: Phaser -> Encoder (Silent Speaker)
+                    if (audioContext && game.sound) {
+                        const soundManager = game.sound as any;
+                        const masterNode = soundManager.masterVolumeNode as GainNode;
+
+                        if (masterNode) {
+                            try {
+                                masterNode.disconnect();
+                            } catch {
+                                // ignore
+                            }
+
+                            scriptProcessor = audioContext.createScriptProcessor(4096, 2, 2);
+                            const silentGain = audioContext.createGain();
+                            silentGain.gain.value = 0;
+
+                            masterNode.connect(scriptProcessor);
+                            scriptProcessor.connect(silentGain);
+                            silentGain.connect(audioContext.destination);
+
+                            scriptProcessor.onaudioprocess = (e) => {
+                                if (isComplete || isPaused) return;
+
+                                const left = e.inputBuffer.getChannelData(0);
+                                const right = e.inputBuffer.getChannelData(1);
+
+                                try {
+                                    const audioData = new AudioData({
+                                        format: "f32-planar",
+                                        sampleRate,
+                                        numberOfFrames: left.length,
+                                        numberOfChannels,
+                                        timestamp: audioTimestamp,
+                                        data: new Float32Array([...left, ...right]),
+                                    });
+
+                                    audioEncoder.encode(audioData);
+                                    audioData.close();
+
+                                    audioTimestamp += (left.length / sampleRate) * 1_000_000;
+                                } catch {
+                                    // Ignore encoding errors
+                                }
+                            };
+                        }
                     }
 
-                    scriptProcessor = audioContext.createScriptProcessor(4096, 2, 2);
-                    const silentGain = audioContext.createGain();
-                    silentGain.gain.value = 0;
+                    // Add and start the scene
+                    game.scene.add("ReplayScene", ReplayScene, true, sceneConfig);
 
-                    masterNode.connect(scriptProcessor);
-                    scriptProcessor.connect(silentGain);
-                    silentGain.connect(audioContext.destination);
+                    const scene = game.scene.getScene("ReplayScene");
+                    if (!scene) {
+                        cleanup();
+                        reject(new Error("Failed to get ReplayScene"));
+                        return;
+                    }
 
-                    scriptProcessor.onaudioprocess = (e) => {
-                        if (isComplete || isPaused) return;
-                        try {
-                            const left = e.inputBuffer.getChannelData(0);
-                            const right = e.inputBuffer.getChannelData(1);
-                            const audioData = new (window as any).AudioData({
-                                format: "f32-planar",
-                                sampleRate,
-                                numberOfFrames: left.length,
-                                numberOfChannels,
-                                timestamp: audioTimestamp,
-                                data: new Float32Array([...left, ...right]),
-                            });
-                            audioEncoder.encode(audioData);
-                            audioData.close();
-                            audioTimestamp += (left.length / sampleRate) * 1_000_000;
-                        } catch {
-                            // ignore
+                    // Frame capture loop
+                    const captureIntervalMs = 1000 / frameRate;
+
+                    const captureFrame = () => {
+                        if (isComplete) {
+                            if (captureIntervalId) clearInterval(captureIntervalId);
+                            return;
+                        }
+                        if (isPaused) return;
+
+                        const canvas = game.canvas;
+                        if (canvas) {
+                            try {
+                                const timestamp = frameCount * frameDurationMicros;
+                                const videoFrame = new VideoFrame(canvas, {
+                                    timestamp,
+                                    duration: frameDurationMicros,
+                                });
+
+                                videoEncoder.encode(videoFrame, {
+                                    keyFrame: frameCount % (frameRate * 2) === 0,
+                                });
+                                videoFrame.close();
+                                frameCount++;
+
+                                const elapsedMs = frameCount * captureIntervalMs;
+                                const progress = Math.min(
+                                    85,
+                                    10 + Math.round((elapsedMs / estimatedDurationMs) * 75)
+                                );
+                                onProgress?.(progress, `Recording... (${frameCount} frames)`);
+                            } catch (e) {
+                                console.warn("Frame capture error:", e);
+                            }
                         }
                     };
-                }
-            }
 
-            game.scene.add("ReplayScene", ReplayScene, true, sceneConfig);
+                    const handleVisibilityChange = () => {
+                        if (isComplete) return;
+                        if (document.hidden) {
+                            isPaused = true;
+                            try { game.loop.sleep(); } catch { /* ignore if already destroyed */ }
+                            onProgress?.(
+                                Math.min(85, 10 + Math.round((frameCount * captureIntervalMs / estimatedDurationMs) * 75)),
+                                "Paused (tab hidden)..."
+                            );
+                        } else {
+                            isPaused = false;
+                            try { game.loop.wake(); } catch { /* ignore if already destroyed */ }
+                            onProgress?.(
+                                Math.min(85, 10 + Math.round((frameCount * captureIntervalMs / estimatedDurationMs) * 75)),
+                                `Recording... (${frameCount} frames)`
+                            );
+                        }
+                    };
 
-            // Frame capture loop
-            captureIntervalId = setInterval(captureFrame, 1000 / frameRate);
-        });
+                    document.addEventListener("visibilitychange", handleVisibilityChange);
 
-        // Stop when the replay scene signals completion
-        (EventBus as any).on("replay:complete", () => {
-            finalize();
-        });
+                    const extendedCleanup = () => {
+                        document.removeEventListener("visibilitychange", handleVisibilityChange);
+                        if (captureIntervalId) clearInterval(captureIntervalId);
+                        cleanup();
+                    };
 
-        // Safety timeout
-        setTimeout(() => {
-            if (!isComplete) finalize();
-        }, Math.max(10_000, estimatedDurationMs + 12_000));
+                    EventBus.off("replay:complete");
+                    EventBus.on("replay:complete", async () => {
+                        if (isComplete) return;
+                        isComplete = true;
+
+                        onProgress?.(90, "Finalizing video...");
+
+                        try {
+                            await videoEncoder.flush();
+                            await audioEncoder.flush();
+                            muxer.finalize();
+
+                            const buffer = target.buffer;
+                            const blob = new Blob([buffer], { type: "video/mp4" });
+
+                            onProgress?.(100, "Complete!");
+                            extendedCleanup();
+                            resolve(blob);
+                        } catch (err) {
+                            extendedCleanup();
+                            reject(err);
+                        }
+                    });
+
+                    captureIntervalId = setInterval(captureFrame, captureIntervalMs);
+                });
+
+                // Timeout safety
+                setTimeout(() => {
+                    if (!isComplete) {
+                        isComplete = true;
+                        onError?.(new Error("Export timed out"));
+                        cleanup();
+                        reject(new Error("Export timed out"));
+                    }
+                }, 5 * 60 * 1000);
+            })
+            .catch((err) => {
+                container.remove();
+                onError?.(err);
+                reject(err);
+            });
     });
+}
+
+/**
+ * Download a blob as a file
+ */
+export function downloadBlob(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    // Do NOT append to body — avoids React Router's document click handler
+    // picking up the blob URL and trying to pushState with it (SecurityError).
+    a.dispatchEvent(new MouseEvent("click", { bubbles: false, cancelable: true, view: window }));
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/**
+ * Fetch replay data from API
+ */
+export async function fetchReplayData(matchId: string): Promise<ReplayData> {
+    const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || window.location.origin;
+    const response = await fetch(`${apiBase}/api/replay-data?matchId=${encodeURIComponent(matchId)}`);
+    if (!response.ok) {
+        throw new Error(await response.text());
+    }
+    return (await response.json()) as ReplayData;
 }

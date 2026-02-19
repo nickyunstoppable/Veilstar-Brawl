@@ -23,7 +23,7 @@ export async function handleGetMatch(matchId: string, req?: Request): Promise<Re
         const { data: match, error } = await supabase
             .from("matches")
             .select(lite
-                ? "id,status,player1_address,player2_address,winner_address,player1_rounds_won,player2_rounds_won,fight_phase,updated_at"
+                ? "id,status,player1_address,player2_address,winner_address,player1_rounds_won,player2_rounds_won,fight_phase,onchain_result_tx_hash,updated_at"
                 : "*")
             .eq("id", matchId)
             .single();

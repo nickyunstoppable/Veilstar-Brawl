@@ -39,6 +39,10 @@ export function ExportMP4Button({ matchId, disabled = false }: ExportMP4ButtonPr
                 onError: (e) => setError(e.message),
             });
 
+            if (!blob || blob.size === 0) {
+                throw new Error("Export produced an empty file — try again in Chrome/Edge.");
+            }
+
             const timestamp = new Date().toISOString().slice(0, 10);
             const filename = `VeilstarBrawl_Match_${matchId.slice(0, 8)}_${timestamp}.mp4`;
             downloadBlob(blob, filename);

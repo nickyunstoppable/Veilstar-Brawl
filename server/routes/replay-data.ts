@@ -8,6 +8,51 @@
 import { getSupabase } from "../lib/supabase";
 import { normalizeStoredDeck } from "../lib/power-surge";
 
+// Card order must match the client's POWER_SURGE_CARDS array in src/types/power-surge.ts exactly.
+const CLIENT_POWER_SURGE_CARD_IDS = [
+    "dag-overclock",
+    "block-fortress",
+    "tx-storm",
+    "mempool-congest",
+    "blue-set-heal",
+    "orphan-smasher",
+    "10bps-barrage",
+    "pruned-rage",
+    "sompi-shield",
+    "hash-hurricane",
+    "ghost-dag",
+    "finality-fist",
+    "bps-blitz",
+    "vaultbreaker",
+    "chainbreaker",
+] as const;
+
+/**
+ * Mirrors getDeterministicPowerSurgeCards() from veilstar-brawl-frontend/src/types/power-surge.ts.
+ * Uses FNV-1a with seed "{matchId}:{roundNumber}" — must stay in sync with client.
+ */
+function getDeterministicSurgeCardIds(matchId: string, roundNumber: number, count = 3): string[] {
+    const normalized = `${matchId}:${roundNumber}`;
+    let hash = 2166136261;
+    for (let i = 0; i < normalized.length; i++) {
+        hash ^= normalized.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+
+    const available: string[] = [...CLIENT_POWER_SURGE_CARD_IDS];
+    const selected: string[] = [];
+    const targetCount = Math.min(count, available.length);
+
+    for (let pick = 0; pick < targetCount; pick++) {
+        const seed = Math.abs(hash + pick * 1013904223);
+        const idx = seed % available.length;
+        selected.push(available[idx]);
+        available.splice(idx, 1);
+    }
+
+    return selected;
+}
+
 type MoveType = "punch" | "kick" | "block" | "special" | "stunned";
 
 export interface ReplayRoundData {
@@ -81,6 +126,17 @@ export async function handleGetReplayData(req: Request): Promise<Response> {
 
         const deck = normalizeStoredDeck(match.power_surge_deck);
 
+        // Query the power_surges table — ZK-path stores selections here (not in power_surge_deck)
+        const { data: powerSurgesRows } = await supabase
+            .from("power_surges")
+            .select("round_number, player1_card_id, player2_card_id")
+            .eq("match_id", matchId);
+
+        const powerSurgesByRound = new Map<number, { player1_card_id: string | null; player2_card_id: string | null }>();
+        for (const ps of powerSurgesRows || []) {
+            powerSurgesByRound.set(Number(ps.round_number), ps);
+        }
+
         // Filter rounds with valid moves
         const filtered = (rounds || []).filter((r: any) => isValidMove(r.player1_move) && isValidMove(r.player2_move));
 
@@ -93,6 +149,24 @@ export async function handleGetReplayData(req: Request): Promise<Response> {
             const isFirstTurnOfGameRound = i === 0 || Boolean(filtered[i - 1]?.winner_address);
 
             const deckRound = isFirstTurnOfGameRound ? deck.rounds[String(currentGameRound)] : undefined;
+            // ZK path stores selections in power_surges table; legacy path uses power_surge_deck
+            const powerSurgeRow = isFirstTurnOfGameRound ? powerSurgesByRound.get(r.round_number) : undefined;
+
+            // Merge: ZK table wins over legacy deck for selections
+            const rawP1Selection = powerSurgeRow?.player1_card_id || deckRound?.player1Selection || null;
+            const rawP2Selection = powerSurgeRow?.player2_card_id || deckRound?.player2Selection || null;
+
+            // Card pool to display: use dealt deck if available, otherwise re-derive deterministically
+            let surgeCardIds: string[] | undefined = deckRound?.player1Cards;
+            if (!surgeCardIds?.length && (rawP1Selection || rawP2Selection)) {
+                // ZK mode: dealt cards were never persisted — regenerate using the same
+                // client-side algorithm (FNV-1a, seed "{matchId}:{roundNumber}").
+                surgeCardIds = getDeterministicSurgeCardIds(match.id, r.round_number);
+            }
+
+            // Fallback: if a player timed out (null selection), show first card in pool
+            const p1Selection = rawP1Selection || surgeCardIds?.[0] || undefined;
+            const p2Selection = rawP2Selection || surgeCardIds?.[0] || undefined;
 
             outRounds.push({
                 roundNumber: r.round_number,
@@ -103,9 +177,9 @@ export async function handleGetReplayData(req: Request): Promise<Response> {
                 player1HealthAfter: r.player1_health_after ?? 100,
                 player2HealthAfter: r.player2_health_after ?? 100,
                 winnerAddress: r.winner_address ?? null,
-                surgeCardIds: deckRound?.player1Cards,
-                player1SurgeSelection: deckRound?.player1Selection ?? undefined,
-                player2SurgeSelection: deckRound?.player2Selection ?? undefined,
+                surgeCardIds,
+                player1SurgeSelection: p1Selection,
+                player2SurgeSelection: p2Selection,
             });
 
             if (r.winner_address) {

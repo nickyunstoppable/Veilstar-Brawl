@@ -276,10 +276,16 @@ async function backgroundRetryEndGame(params: {
             const txHash = onChainResult.txHash || null;
             if (txHash) {
                 const supabase = getSupabase();
-                await supabase
+                const { error: persistError } = await supabase
                     .from("matches")
                     .update({ onchain_result_tx_hash: txHash })
                     .eq("id", params.matchId);
+
+                if (persistError) {
+                    console.warn(
+                        `[ZK Finalize] Failed to persist onchain_result_tx_hash (non-fatal) match=${params.matchId}: ${persistError.message}`,
+                    );
+                }
             }
 
             console.log(`[ZK Finalize] backgroundRetryEndGame end_game OK match=${params.matchId} tx=${txHash || "n/a"}`);
@@ -593,10 +599,16 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
 
                     if (onChainResult.success && onChainResult.txHash) {
                         onChainTxHash = onChainResult.txHash;
-                        await supabase
+                        const { error: persistError } = await supabase
                             .from("matches")
                             .update({ onchain_result_tx_hash: onChainTxHash })
                             .eq("id", matchId);
+
+                        if (persistError) {
+                            console.warn(
+                                `[ZK Finalize] Failed to persist onchain_result_tx_hash (non-fatal) match=${matchId}: ${persistError.message}`,
+                            );
+                        }
 
                         console.log(`[ZK Finalize] end_game accepted even though verifications not observed match=${matchId} tx=${onChainTxHash}`);
                     } else {
@@ -664,10 +676,16 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
                     console.log(`[ZK Finalize] On-chain finalize complete for match ${matchId}, tx=${onChainTxHash || "n/a"}`);
 
                     if (onChainTxHash) {
-                        await supabase
+                        const { error: persistError } = await supabase
                             .from("matches")
                             .update({ onchain_result_tx_hash: onChainTxHash })
                             .eq("id", matchId);
+
+                        if (persistError) {
+                            console.warn(
+                                `[ZK Finalize] Failed to persist onchain_result_tx_hash (non-fatal) match=${matchId}: ${persistError.message}`,
+                            );
+                        }
                     }
                 }
             }
