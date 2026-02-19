@@ -9,6 +9,8 @@ import PracticePage from './pages/PracticePage';
 import QueuePage from './pages/QueuePage';
 import LeaderboardPage from './pages/LeaderboardPage';
 import PlayerProfilePage from './pages/PlayerProfilePage';
+import MatchPublicPage from './pages/MatchPublicPage';
+import ReplayPage from './pages/ReplayPage';
 
 // Lazy load the CharacterSelectClient for code splitting
 const CharacterSelectClient = lazy(() =>
@@ -56,6 +58,18 @@ function extractMatchId(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Extract matchId from /m/:matchId (public match details) */
+function extractPublicMatchId(path: string): string | null {
+  const m = path.match(/^\/m\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
+/** Extract matchId from /replay/:matchId */
+function extractReplayMatchId(path: string): string | null {
+  const m = path.match(/^\/replay\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
 /** Extract address from /player/:address */
 function extractPlayerAddress(path: string): string | null {
   const m = path.match(/^\/player\/([A-Z0-9]+)$/);
@@ -94,6 +108,18 @@ export default function App() {
   const playerAddress = extractPlayerAddress(path);
   if (playerAddress) {
     return <PlayerProfilePage address={playerAddress} />;
+  }
+
+  // Public match details — /m/:matchId
+  const publicMatchId = extractPublicMatchId(path);
+  if (publicMatchId) {
+    return <MatchPublicPage matchId={publicMatchId} />;
+  }
+
+  // Replay — /replay/:matchId
+  const replayMatchId = extractReplayMatchId(path);
+  if (replayMatchId) {
+    return <ReplayPage matchId={replayMatchId} />;
   }
 
   // Match route — /match/:matchId → CharacterSelectScene → FightScene

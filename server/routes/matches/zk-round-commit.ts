@@ -925,8 +925,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                                 })
                                 .eq("match_id", matchId)
                                 .eq("round_number", roundNumber)
-                                .eq("player_address", address)
-                                .is("resolved_round_id", null);
+                                .eq("player_address", address);
                         } catch (dbErr) {
                             const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
                             console.error(`[ZK Round Commit] Failed to persist async commit tx hash: ${msg}`);

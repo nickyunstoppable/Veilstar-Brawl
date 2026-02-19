@@ -96,6 +96,45 @@ function readStakePaidFlags(rawState: any): { player1Paid: boolean; player2Paid:
     return { player1Paid, player2Paid };
 }
 
+function readStakeDeadlineSeconds(rawState: any): number | null {
+    const state = unwrapPossibleResult(rawState);
+    if (!state || typeof state !== "object") return null;
+
+    const raw = (state as any).stake_deadline_ts ?? (state as any).stakeDeadlineTs ?? (state as any).stakeDeadlineTS;
+    if (raw === null || raw === undefined || raw === "") return null;
+
+    try {
+        const asBigInt = typeof raw === "bigint" ? raw : BigInt(String(raw));
+        if (asBigInt <= 0n) return null;
+        const asNumber = Number(asBigInt);
+        if (!Number.isFinite(asNumber) || asNumber <= 0) return null;
+        return asNumber;
+    } catch {
+        return null;
+    }
+}
+
+async function trySyncStakeDeadlineFromChain(matchId: string, match: any): Promise<void> {
+    const hasStake = parseStroops(match?.stake_amount_stroops) > 0n;
+    if (!hasStake) return;
+
+    const onChainContractId = (match?.onchain_contract_id || "").trim() || undefined;
+    const onChainSessionId = typeof match?.onchain_session_id === "number" ? match.onchain_session_id : null;
+    const rawState = onChainSessionId !== null
+        ? await getOnChainMatchStateBySession(onChainSessionId, { contractId: onChainContractId })
+        : await getOnChainMatchState(matchId);
+
+    const deadlineSec = readStakeDeadlineSeconds(rawState);
+    if (!deadlineSec) return;
+
+    const deadlineIso = new Date(deadlineSec * 1000).toISOString();
+    const supabase = getSupabase();
+    await supabase
+        .from("matches")
+        .update({ stake_deadline_at: deadlineIso })
+        .eq("id", matchId);
+}
+
 function didPlayerStakeOnChain(match: any, paidFlags: { player1Paid: boolean; player2Paid: boolean }, address: string): boolean {
     if (address === match?.player1_address) return paidFlags.player1Paid;
     if (address === match?.player2_address) return paidFlags.player2Paid;
@@ -299,6 +338,15 @@ export async function handlePrepareStakeDeposit(
                     }
 
                     console.warn(`[Stake Prepare] Configure call failed but on-chain stake is already configured for match ${matchId.slice(0, 8)}…, continuing`);
+                }
+
+                // When stake is configured on-chain late (auto-configure), the on-chain deposit window
+                // starts at that moment. Sync our DB deadline to the on-chain deadline so we don't
+                // incorrectly treat the window as expired and call expire_stake too early.
+                try {
+                    await trySyncStakeDeadlineFromChain(matchId, effectiveMatch);
+                } catch {
+                    // best-effort sync only
                 }
 
                 prepared = await prepareStakeDepositOnChain(matchId, body.address, { sessionId: onChainSessionId, contractId: onChainContractId });
@@ -577,6 +625,43 @@ export async function handleExpireStakeDepositWindow(
                 reason: "deadline_not_reached",
                 remainingMs: Math.max(0, deadlineMs - Date.now()),
             });
+        }
+
+        // DB deadline can be stale if stake was configured on-chain later (auto-configure path).
+        // Double-check the on-chain deadline before calling expire_stake to avoid Contract #13.
+        try {
+            const onChainContractId = ((match as any).onchain_contract_id || "").trim() || undefined;
+            const onChainSessionId = typeof (match as any).onchain_session_id === "number" ? (match as any).onchain_session_id : null;
+            const rawState = onChainSessionId !== null
+                ? await getOnChainMatchStateBySession(onChainSessionId, { contractId: onChainContractId })
+                : await getOnChainMatchState(matchId);
+            const onChainDeadlineSec = readStakeDeadlineSeconds(rawState);
+            if (onChainDeadlineSec) {
+                const nowSec = Math.floor(Date.now() / 1000);
+                if (nowSec < onChainDeadlineSec) {
+                    const remainingMs = (onChainDeadlineSec - nowSec) * 1000;
+                    const deadlineIso = new Date(onChainDeadlineSec * 1000).toISOString();
+
+                    // Best-effort: sync the DB deadline forward to match chain.
+                    try {
+                        await getSupabase()
+                            .from("matches")
+                            .update({ stake_deadline_at: deadlineIso })
+                            .eq("id", matchId);
+                    } catch {
+                        // ignore
+                    }
+
+                    return Response.json({
+                        success: true,
+                        cancelled: false,
+                        reason: "deadline_not_reached_onchain",
+                        remainingMs: Math.max(0, remainingMs),
+                    });
+                }
+            }
+        } catch {
+            // If chain lookup fails, fall back to DB behavior.
         }
 
         const player1Paid = !!match.player1_stake_confirmed_at;

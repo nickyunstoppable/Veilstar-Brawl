@@ -29,9 +29,11 @@ import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleRe
 import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
+import { handleGetReplayData } from "./routes/replay-data";
 import { handleSweepFeesCron } from "./routes/cron/sweep-fees";
 import { startAbandonmentMonitor } from "./lib/abandonment-monitor";
 import { ensureEnvLoaded } from "./lib/env";
+import { handleGetMatchPublic } from "./routes/matches/public";
 
 ensureEnvLoaded();
 
@@ -102,6 +104,13 @@ async function handleRequest(req: Request): Promise<Response> {
     }
 
     // -----------------------------------------------
+    // Replay Data (for public replay + MP4 export)
+    // -----------------------------------------------
+    if (pathname === "/api/replay-data" && method === "GET") {
+        return corsResponse(await handleGetReplayData(req), req);
+    }
+
+    // -----------------------------------------------
     // Matchmaking Queue
     // -----------------------------------------------
     if (pathname === "/api/matchmaking/queue") {
@@ -150,6 +159,11 @@ async function handleRequest(req: Request): Promise<Response> {
     // -----------------------------------------------
     const matchId = extractMatchId(pathname);
     if (matchId) {
+        // GET /api/matches/:matchId/public
+        if (pathname === `/api/matches/${matchId}/public` && method === "GET") {
+            return corsResponse(await handleGetMatchPublic(matchId), req);
+        }
+
         // GET /api/matches/:matchId
         if (pathname === `/api/matches/${matchId}` && method === "GET") {
             return corsResponse(await handleGetMatch(matchId, req), req);

@@ -545,6 +545,27 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             }
             onChainOutcomeTxHash = outcomeProofResult.txHash || null;
 
+            // Best-effort persistence so the public match page can show the outcome-proof tx.
+            // Not all deployments may have this column yet, so do not fail finalize if it errors.
+            if (onChainOutcomeTxHash) {
+                try {
+                    const { error: outcomePersistError } = await supabase
+                        .from("matches")
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        .update({ onchain_outcome_tx_hash: onChainOutcomeTxHash } as any)
+                        .eq("id", matchId);
+
+                    if (outcomePersistError) {
+                        console.warn(
+                            `[ZK Finalize] Failed to persist onchain_outcome_tx_hash (non-fatal) match=${matchId}: ${outcomePersistError.message}`,
+                        );
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    console.warn(`[ZK Finalize] Persist onchain_outcome_tx_hash threw (non-fatal) match=${matchId}: ${msg}`);
+                }
+            }
+
             // end_game requires BOTH players to have at least one on-chain verification submitted when ZK gate is enabled.
             // Verification submission is async during gameplay for UX, so finalize waits briefly for it to land.
             const waitResult = await waitForOnChainZkVerifications({
@@ -555,20 +576,60 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             });
 
             if (!waitResult.ok) {
-                onChainResultPending = true;
-                onChainResultError = `Waiting for on-chain submit_zk_verification (p1=${waitResult.counts.p1 ?? "?"}, p2=${waitResult.counts.p2 ?? "?"})`;
-                console.warn(
-                    `[ZK Finalize] Skipping end_game for now (verifications not yet observed) match=${matchId} waitedMs=${waitResult.waitedMs} p1=${waitResult.counts.p1 ?? "?"} p2=${waitResult.counts.p2 ?? "?"}`,
-                );
+                // Try end_game anyway as a best-effort improvement: some contract deployments
+                // may accept end_game before verifications are observed, and we prefer to
+                // capture the tx hash for the public match page.
+                try {
+                    const onChainResult = await reportMatchResultOnChain(
+                        matchId,
+                        match.player1_address,
+                        match.player2_address,
+                        winnerAddress,
+                        {
+                            sessionId: onChainSessionId,
+                            contractId: onChainContractId || undefined,
+                        },
+                    );
 
-                void backgroundRetryEndGame({
-                    matchId,
-                    sessionId: onChainSessionId,
-                    contractId: onChainContractId || undefined,
-                    player1Address: match.player1_address,
-                    player2Address: match.player2_address,
-                    winnerAddress,
-                });
+                    if (onChainResult.success && onChainResult.txHash) {
+                        onChainTxHash = onChainResult.txHash;
+                        await supabase
+                            .from("matches")
+                            .update({ onchain_result_tx_hash: onChainTxHash })
+                            .eq("id", matchId);
+
+                        console.log(`[ZK Finalize] end_game accepted even though verifications not observed match=${matchId} tx=${onChainTxHash}`);
+                    } else {
+                        onChainResultPending = true;
+                        onChainResultError = `Waiting for on-chain submit_zk_verification (p1=${waitResult.counts.p1 ?? "?"}, p2=${waitResult.counts.p2 ?? "?"})`;
+                        console.warn(
+                            `[ZK Finalize] Skipping end_game for now (verifications not yet observed) match=${matchId} waitedMs=${waitResult.waitedMs} p1=${waitResult.counts.p1 ?? "?"} p2=${waitResult.counts.p2 ?? "?"}`,
+                        );
+
+                        void backgroundRetryEndGame({
+                            matchId,
+                            sessionId: onChainSessionId,
+                            contractId: onChainContractId || undefined,
+                            player1Address: match.player1_address,
+                            player2Address: match.player2_address,
+                            winnerAddress,
+                        });
+                    }
+                } catch (err) {
+                    onChainResultPending = true;
+                    const msg = err instanceof Error ? err.message : String(err);
+                    onChainResultError = `end_game attempt threw; waiting for verifications (p1=${waitResult.counts.p1 ?? "?"}, p2=${waitResult.counts.p2 ?? "?"})`;
+                    console.warn(`[ZK Finalize] end_game best-effort attempt threw match=${matchId}: ${msg}`);
+
+                    void backgroundRetryEndGame({
+                        matchId,
+                        sessionId: onChainSessionId,
+                        contractId: onChainContractId || undefined,
+                        player1Address: match.player1_address,
+                        player2Address: match.player2_address,
+                        winnerAddress,
+                    });
+                }
             } else {
                 console.log(`[ZK Finalize] Reporting on-chain result for match ${matchId}`);
                 const onChainResult = await reportMatchResultOnChain(

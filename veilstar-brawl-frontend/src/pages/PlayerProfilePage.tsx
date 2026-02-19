@@ -312,6 +312,17 @@ export default function PlayerProfilePage({ address }: { address: string }) {
                                                     {match.opponentName || formatAddress(match.opponentAddress)}
                                                 </button>
                                             </div>
+
+                                            {/* Match details link */}
+                                            <div className="ml-4 flex items-center gap-2 shrink-0">
+                                                <a
+                                                    href={`/m/${match.matchId}`}
+                                                    className="text-cyber-gray hover:text-cyber-gold group-hover:translate-x-1 transition-all font-mono text-lg"
+                                                    aria-label="Open match details"
+                                                >
+                                                    →
+                                                </a>
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
