@@ -1,0 +1,151 @@
+import { Buffer } from "buffer";
+import { Client as ZkBettingClient, BetSide } from "../../../../bindings/zk_betting/src/index";
+import type { ContractSigner } from "../../types/signer";
+import { NETWORK_PASSPHRASE, RPC_URL, getContractId } from "../../utils/constants";
+
+export type BetSideLabel = "player1" | "player2";
+
+export interface CommitBetResult {
+  txHash?: string;
+  commitmentHex: string;
+  saltHex: string;
+}
+
+function sideToEnum(side: BetSideLabel): BetSide {
+  return side === "player1" ? BetSide.Player1 : BetSide.Player2;
+}
+
+function extractTxHash(sentTx: unknown): string | undefined {
+  const tx = sentTx as any;
+  return tx?.hash || tx?.txHash || tx?.sendTransactionResponse?.hash || tx?.result?.hash;
+}
+
+async function sha256(input: Uint8Array): Promise<Uint8Array> {
+  const bytes = input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength) as ArrayBuffer;
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return new Uint8Array(digest);
+}
+
+function randomBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return bytes;
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function fromHex(hex: string): Uint8Array {
+  const clean = hex.trim().replace(/^0x/i, "");
+  if (clean.length % 2 !== 0) throw new Error("Invalid hex length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function getContractClient(publicKey: string, signer: ContractSigner): ZkBettingClient {
+  const contractId = getContractId("zk-betting");
+  if (!contractId) {
+    throw new Error("Missing VITE_ZK_BETTING_CONTRACT_ID");
+  }
+
+  return new ZkBettingClient({
+    contractId,
+    publicKey,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    rpcUrl: RPC_URL,
+    signAuthEntry: signer.signAuthEntry,
+    signTransaction: signer.signTransaction,
+  });
+}
+
+async function signAndSend(tx: any): Promise<any> {
+  const simulated = await tx.simulate();
+  try {
+    return await simulated.signAndSend();
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("NoSignatureNeeded") || message.includes("read call")) {
+      return await simulated.signAndSend({ force: true });
+    }
+    throw err;
+  }
+}
+
+export async function commitBetOnChain(params: {
+  poolId: number;
+  bettor: string;
+  side: BetSideLabel;
+  amount: bigint;
+  signer: ContractSigner;
+}): Promise<CommitBetResult> {
+  const sideByte = params.side === "player1" ? 0 : 1;
+  const salt = randomBytes(32);
+  const preimage = new Uint8Array(33);
+  preimage[0] = sideByte;
+  preimage.set(salt, 1);
+  const commitment = await sha256(preimage);
+
+  const client = getContractClient(params.bettor, params.signer);
+  const tx = await client.commit_bet({
+    pool_id: params.poolId,
+    bettor: params.bettor,
+    commitment: Buffer.from(commitment),
+    amount: params.amount,
+  });
+
+  const sentTx = await signAndSend(tx);
+  return {
+    txHash: extractTxHash(sentTx),
+    commitmentHex: toHex(commitment),
+    saltHex: toHex(salt),
+  };
+}
+
+export async function revealBetOnChain(params: {
+  poolId: number;
+  bettor: string;
+  side: BetSideLabel;
+  saltHex: string;
+  signer: ContractSigner;
+}): Promise<{ txHash?: string }> {
+  const client = getContractClient(params.bettor, params.signer);
+  const tx = await client.reveal_bet({
+    pool_id: params.poolId,
+    bettor: params.bettor,
+    side: sideToEnum(params.side),
+    salt: Buffer.from(fromHex(params.saltHex)),
+  });
+
+  const sentTx = await signAndSend(tx);
+  return { txHash: extractTxHash(sentTx) };
+}
+
+export async function claimPayoutOnChain(params: {
+  poolId: number;
+  bettor: string;
+  signer: ContractSigner;
+}): Promise<{ txHash?: string; payoutAmount?: bigint }> {
+  const client = getContractClient(params.bettor, params.signer);
+  const tx = await client.claim_payout({
+    pool_id: params.poolId,
+    bettor: params.bettor,
+  });
+
+  const sentTx = await signAndSend(tx);
+  const result = (sentTx as any)?.result;
+  let payoutAmount: bigint | undefined;
+  if (typeof result === "bigint") payoutAmount = result;
+  if (typeof result === "number") payoutAmount = BigInt(result);
+  if (typeof result === "string" && /^-?\d+$/.test(result)) payoutAmount = BigInt(result);
+
+  return {
+    txHash: extractTxHash(sentTx),
+    payoutAmount,
+  };
+}

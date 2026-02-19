@@ -8,10 +8,22 @@ import PlayerProfilePage from './pages/PlayerProfilePage';
 import MatchPublicPage from './pages/MatchPublicPage';
 import ReplayPage from './pages/ReplayPage';
 
-// Lazy load the CharacterSelectClient for code splitting
+// Lazy load heavy components for code splitting
 const CharacterSelectClient = lazy(() =>
   import('./components/fight/CharacterSelectClient').then((mod) => ({
     default: mod.CharacterSelectClient,
+  }))
+);
+
+const SpectatePage = lazy(() => import('./pages/SpectatePage'));
+const SpectatorClient = lazy(() =>
+  import('./components/spectate/SpectatorClient').then((mod) => ({
+    default: mod.SpectatorClient,
+  }))
+);
+const BotSpectatorClient = lazy(() =>
+  import('./components/spectate/BotSpectatorClient').then((mod) => ({
+    default: mod.BotSpectatorClient,
   }))
 );
 
@@ -68,6 +80,20 @@ function extractPlayerAddress(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Extract matchId from /spectate/:matchId (PvP spectating) */
+function extractSpectateMatchId(path: string): string | null {
+  // Must NOT match /spectate/bot/... 
+  if (path.startsWith('/spectate/bot/')) return null;
+  const m = path.match(/^\/spectate\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
+/** Extract matchId from /spectate/bot/:matchId */
+function extractBotSpectateMatchId(path: string): string | null {
+  const m = path.match(/^\/spectate\/bot\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
 export default function App() {
   const path = useSimpleRouter();
 
@@ -89,6 +115,62 @@ export default function App() {
   // Matchmaking queue (immersive HUD)
   if (path === '/queue') {
     return <QueuePage />;
+  }
+
+  // Spectate page
+  if (path === '/spectate') {
+    return (
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 bg-black flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-cyber-gold border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-cyber-gold font-orbitron tracking-widest text-sm">LOADING...</p>
+            </div>
+          </div>
+        }
+      >
+        <SpectatePage />
+      </Suspense>
+    );
+  }
+
+  // PvP spectating — /spectate/:matchId
+  const spectateMatchId = extractSpectateMatchId(path);
+  if (spectateMatchId) {
+    return (
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 bg-black flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-cyber-gold border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-cyber-gold font-orbitron tracking-widest text-sm">LOADING SPECTATOR...</p>
+            </div>
+          </div>
+        }
+      >
+        <SpectatorClient matchId={spectateMatchId} />
+      </Suspense>
+    );
+  }
+
+  // Bot match spectating — /spectate/bot/:matchId
+  const botSpectateMatchId = extractBotSpectateMatchId(path);
+  if (botSpectateMatchId) {
+    return (
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 bg-black flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-cyber-gold border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-cyber-gold font-orbitron tracking-widest text-sm">LOADING BOT MATCH...</p>
+            </div>
+          </div>
+        }
+      >
+        <BotSpectatorClient matchId={botSpectateMatchId} />
+      </Suspense>
+    );
   }
 
   // Leaderboard

@@ -8,6 +8,7 @@ members = [
   "contracts/dice-duel",
   "contracts/zk-groth16-verifier",
   "contracts/veilstar-brawl",
+  "contracts/zk-betting",
 ]
 
 [workspace.dependencies]

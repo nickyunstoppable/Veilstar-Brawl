@@ -34,6 +34,9 @@ import { handleSweepFeesCron } from "./routes/cron/sweep-fees";
 import { startAbandonmentMonitor } from "./lib/abandonment-monitor";
 import { ensureEnvLoaded } from "./lib/env";
 import { handleGetMatchPublic } from "./routes/matches/public";
+import { handleGetLiveMatches } from "./routes/matches/live";
+import { handleGetBotGames, handleBotGamesSync } from "./routes/bot-games";
+import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleRevealBotBet, handleClaimBotBet } from "./routes/betting";
 
 ensureEnvLoaded();
 
@@ -136,6 +139,51 @@ async function handleRequest(req: Request): Promise<Response> {
     // -----------------------------------------------
     if (pathname === "/api/leaderboard" && method === "GET") {
         return corsResponse(await handleGetLeaderboard(req), req);
+    }
+
+    // -----------------------------------------------
+    // Spectate — Live Matches
+    // -----------------------------------------------
+    if (pathname === "/api/matches/live" && method === "GET") {
+        return corsResponse(await handleGetLiveMatches(), req);
+    }
+
+    // -----------------------------------------------
+    // Bot Games
+    // -----------------------------------------------
+    if (pathname === "/api/bot-games" && method === "GET") {
+        return corsResponse(await handleGetBotGames(req), req);
+    }
+    if (pathname === "/api/bot-games/sync" && method === "GET") {
+        return corsResponse(await handleBotGamesSync(req), req);
+    }
+
+    // -----------------------------------------------
+    // Betting — PvP
+    // -----------------------------------------------
+    const bettingPoolMatch = pathname.match(/^\/api\/betting\/pool\/([a-f0-9-]+)$/i);
+    if (bettingPoolMatch && method === "GET") {
+        return corsResponse(await handleGetBettingPool(bettingPoolMatch[1], req), req);
+    }
+    if (pathname === "/api/betting/place" && method === "POST") {
+        return corsResponse(await handlePlaceBet(req), req);
+    }
+
+    // -----------------------------------------------
+    // Betting — Bot
+    // -----------------------------------------------
+    const botBettingPoolMatch = pathname.match(/^\/api\/bot-betting\/pool\/([a-f0-9-]+)$/i);
+    if (botBettingPoolMatch && method === "GET") {
+        return corsResponse(await handleGetBotBettingPool(botBettingPoolMatch[1], req), req);
+    }
+    if (pathname === "/api/bot-betting/place" && method === "POST") {
+        return corsResponse(await handlePlaceBotBet(req), req);
+    }
+    if (pathname === "/api/bot-betting/reveal" && method === "POST") {
+        return corsResponse(await handleRevealBotBet(req), req);
+    }
+    if (pathname === "/api/bot-betting/claim" && method === "POST") {
+        return corsResponse(await handleClaimBotBet(req), req);
     }
 
     // -----------------------------------------------
@@ -325,6 +373,7 @@ console.log(`
 const server = Bun.serve({
     port: PORT,
     fetch: handleRequest,
+    idleTimeout: 60,
     error(error) {
         console.error("[Server] Unhandled error:", error);
         return corsResponse(Response.json(

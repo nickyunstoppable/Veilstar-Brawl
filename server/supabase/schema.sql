@@ -1,6 +1,36 @@
 -- WARNING: This schema is for context only and is not meant to be run.
 -- Table order and constraints may not be valid for execution.
 
+CREATE TABLE public.bets (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  pool_id uuid NOT NULL,
+  bettor_address text NOT NULL,
+  bet_on text NOT NULL CHECK (bet_on = ANY (ARRAY['player1'::text, 'player2'::text])),
+  amount bigint NOT NULL,
+  fee_paid bigint NOT NULL DEFAULT 0,
+  net_amount bigint NOT NULL,
+  tx_id text,
+  payout_amount bigint,
+  status text NOT NULL DEFAULT 'pending'::text CHECK (status = ANY (ARRAY['pending'::text, 'confirmed'::text, 'won'::text, 'lost'::text, 'refunded'::text])),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT bets_pkey PRIMARY KEY (id),
+  CONSTRAINT bets_pool_id_fkey FOREIGN KEY (pool_id) REFERENCES public.betting_pools(id)
+);
+CREATE TABLE public.betting_pools (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  match_id text NOT NULL,
+  match_type text NOT NULL DEFAULT 'pvp'::text CHECK (match_type = ANY (ARRAY['pvp'::text, 'bot'::text])),
+  player1_total bigint NOT NULL DEFAULT 0,
+  player2_total bigint NOT NULL DEFAULT 0,
+  total_pool bigint NOT NULL DEFAULT 0,
+  total_fees bigint NOT NULL DEFAULT 0,
+  status text NOT NULL DEFAULT 'open'::text CHECK (status = ANY (ARRAY['open'::text, 'locked'::text, 'resolved'::text, 'refunded'::text])),
+  winner text CHECK (winner = ANY (ARRAY['player1'::text, 'player2'::text])),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT betting_pools_pkey PRIMARY KEY (id)
+);
 CREATE TABLE public.fight_state_snapshots (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   match_id uuid NOT NULL UNIQUE,
@@ -136,7 +166,6 @@ CREATE TABLE public.round_private_commits (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT round_private_commits_pkey PRIMARY KEY (id),
-  CONSTRAINT round_private_commits_match_round_player_key UNIQUE (match_id, round_number, player_address),
   CONSTRAINT round_private_commits_match_id_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
   CONSTRAINT round_private_commits_resolved_round_id_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id)
 );
@@ -151,7 +180,6 @@ CREATE TABLE public.round_resolution_locks (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT round_resolution_locks_pkey PRIMARY KEY (id),
-  CONSTRAINT round_resolution_locks_match_round_key UNIQUE (match_id, round_number),
   CONSTRAINT round_resolution_locks_match_id_fkey FOREIGN KEY (match_id) REFERENCES public.matches(id),
   CONSTRAINT round_resolution_locks_resolved_round_id_fkey FOREIGN KEY (resolved_round_id) REFERENCES public.rounds(id)
 );

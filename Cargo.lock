@@ -1845,6 +1845,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zk-betting"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "zk-groth16-verifier"
 version = "0.1.0"
 dependencies = [

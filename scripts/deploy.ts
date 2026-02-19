@@ -322,10 +322,13 @@ for (const contract of contracts) {
     console.log("  Deploying and initializing...");
     let deployResult: string;
     
-    // veilstar-brawl requires additional constructor arguments: treasury and xlm_token
+    // veilstar-brawl and zk-betting require additional constructor arguments
     if (contract.packageName === 'veilstar-brawl') {
       deployResult =
         await $`stellar contract deploy --wasm-hash ${wasmHash} --source-account ${adminSecret} --network ${NETWORK} --rpc-url ${RPC_URL} --network-passphrase ${NETWORK_PASSPHRASE} -- --admin ${adminAddress} --game-hub ${mockGameHubId} --treasury ${adminAddress} --xlm-token ${XLM_TOKEN_TESTNET}`.text();
+    } else if (contract.packageName === 'zk-betting') {
+      deployResult =
+        await $`stellar contract deploy --wasm-hash ${wasmHash} --source-account ${adminSecret} --network ${NETWORK} --rpc-url ${RPC_URL} --network-passphrase ${NETWORK_PASSPHRASE} -- --admin ${adminAddress} --treasury ${adminAddress} --xlm-token ${XLM_TOKEN_TESTNET}`.text();
     } else {
       deployResult =
         await $`stellar contract deploy --wasm-hash ${wasmHash} --source-account ${adminSecret} --network ${NETWORK} --rpc-url ${RPC_URL} --network-passphrase ${NETWORK_PASSPHRASE} -- --admin ${adminAddress} --game-hub ${mockGameHubId}`.text();
