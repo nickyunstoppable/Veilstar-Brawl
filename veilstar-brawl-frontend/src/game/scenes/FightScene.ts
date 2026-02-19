@@ -4529,12 +4529,14 @@ export class FightScene extends Phaser.Scene {
     // Check database to see if both players have submitted their Power Surge selections
     const areBothSurgesComplete = await this.checkBothSurgesComplete(currentRound);
 
-    // Grace period after surge deadline (15 seconds from round start) for selections to propagate
-    // If we're well past the surge window, proceed even if not both complete (opponent timed out)
-    const surgeDeadlinePassed = Date.now() > (moveDeadlineAt - 5000); // Surge ends ~5s before move deadline
-
-    if (!areBothSurgesComplete && !surgeDeadlinePassed) {
+    if (!areBothSurgesComplete) {
       console.log(`[FightScene] *** Waiting for both players to complete Power Surge selections`);
+      this.phase = "waiting";
+      this.setMoveButtonsVisible(false);
+      this.turnIndicatorText.setText("Phase 1/3: Waiting for both Power Surge picks...");
+      this.turnIndicatorText.setColor("#fbbf24");
+      this.roundTimerText.setText("--");
+      this.roundTimerText.setColor("#fbbf24");
       // Retry after 500ms
       this.time.delayedCall(500, () => {
         this.startSynchronizedSelectionPhase(moveDeadlineAt);
@@ -4542,11 +4544,7 @@ export class FightScene extends Phaser.Scene {
       return;
     }
 
-    if (!areBothSurgesComplete && surgeDeadlinePassed) {
-      console.log(`[FightScene] *** Surge deadline passed, opponent likely timed out - proceeding anyway`);
-    } else {
-      console.log(`[FightScene] *** Both players completed Power Surge or no surge this round - starting timer`);
-    }
+    console.log(`[FightScene] *** Both players completed Power Surge selections - starting Phase 2 timer`);
 
     this.phase = "selecting";
     this.setMoveButtonsVisible(true);
@@ -5531,11 +5529,15 @@ export class FightScene extends Phaser.Scene {
 
   /**
    * Check if both players have completed their Power Surge selections for this round.
-   * Returns true if both players submitted, or if no surge exists for this round.
+   * Returns true only when both player selections are known.
    */
   private async checkBothSurgesComplete(roundNumber: number): Promise<boolean> {
-    if (PRIVATE_ROUNDS_ENABLED) {
+    if (this.activeSurges.player1 && this.activeSurges.player2) {
       return true;
+    }
+
+    if (PRIVATE_ROUNDS_ENABLED) {
+      return false;
     }
 
     try {
@@ -5550,14 +5552,12 @@ export class FightScene extends Phaser.Scene {
         .maybeSingle();
 
       if (error) {
-        // No surge row exists yet - this means no surge for this round
-        console.log(`[FightScene] No surge row found for round ${roundNumber}, proceeding`);
-        return true;
+        console.warn(`[FightScene] Failed to read surge completion for round ${roundNumber}:`, error);
+        return false;
       }
 
       if (!surge) {
-        // No surge for this round
-        return true;
+        return false;
       }
 
       // Check if both players have selected (both card_id fields are set)
@@ -5568,8 +5568,7 @@ export class FightScene extends Phaser.Scene {
       return bothComplete;
     } catch (error) {
       console.error("[FightScene] Error checking surge completion:", error);
-      // On error, assume complete to not block gameplay
-      return true;
+      return false;
     }
   }
 
