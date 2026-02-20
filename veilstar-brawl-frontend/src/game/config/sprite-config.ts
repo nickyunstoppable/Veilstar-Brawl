@@ -22,7 +22,7 @@ export const CHAR_SPRITE_CONFIG: Record<string, Record<string, { frameWidth: num
     "special": { frameWidth: 400, frameHeight: 263 },
     "dead": { frameWidth: 434, frameHeight: 304 },
   },
-  "block-bruiser": {
+  "ledger-titan": {
     "idle": { frameWidth: 305, frameHeight: 260 },
     "run": { frameWidth: 291, frameHeight: 298 },
     "punch": { frameWidth: 318, frameHeight: 263 },
@@ -58,7 +58,7 @@ export const CHAR_SPRITE_CONFIG: Record<string, Record<string, { frameWidth: num
     "special": { frameWidth: 396, frameHeight: 441 },
     "dead": { frameWidth: 389, frameHeight: 332 },
   },
-  "dag-warrior": {
+  "soroban-sage": {
     "idle": { frameWidth: 301, frameHeight: 253 },
     "run": { frameWidth: 285, frameHeight: 211 },
     "punch": { frameWidth: 406, frameHeight: 232 },
@@ -187,14 +187,14 @@ export const CHAR_SPRITE_CONFIG: Record<string, Record<string, { frameWidth: num
 };
 
 /** Tank characters that get 20% larger display size */
-export const TANK_CHARACTERS = ["block-bruiser", "heavy-loader", "gene-smasher", "bastion-hulk", "scrap-goliath"];
+export const TANK_CHARACTERS = ["ledger-titan", "heavy-loader", "gene-smasher", "bastion-hulk", "scrap-goliath"];
 
 /**
  * Manual scale overrides for specific characters and animations.
  * These override the dynamic calculation.
  */
 export const MANUAL_SCALE_OVERRIDES: Record<string, Record<string, number>> = {
-  "block-bruiser": {
+  "ledger-titan": {
     "run": 1.328,
     "punch": 1.328,
     "kick": 1.321,
@@ -227,7 +227,7 @@ export const MANUAL_SCALE_OVERRIDES: Record<string, Record<string, number>> = {
     "special": 1.135,
     "dead": 1.143,
   },
-  "dag-warrior": {
+  "soroban-sage": {
     "idle": 1.207,
     "run": 1.207,
     "kick": 1.207,
@@ -403,7 +403,7 @@ export const MANUAL_Y_OFFSET_OVERRIDES: Record<string, Record<string, number>> =
     "special": -1,
     "dead": -1,
   },
-  "block-bruiser": {
+  "ledger-titan": {
     "idle": -15,
     "run": -15,
     "punch": -15,
@@ -537,13 +537,13 @@ export function getAnimationScale(charId: string, animType: string): number {
  * Base characters that have their own unique sound effects.
  * Others will fallback to cyber-ninja.
  */
-export const BASE_CHARS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
+export const BASE_CHARS = ["cyber-ninja", "ledger-titan", "soroban-sage", "hash-hunter"];
 
 /**
  * Default sound delay overrides for specific characters and animations (in ms).
  */
 export const DEFAULT_SOUND_DELAYS: Record<string, Record<string, number>> = {
-  "block-bruiser": {
+  "ledger-titan": {
     "special": 1150,
     "punch": 900,
     "kick": 650,
@@ -630,7 +630,7 @@ export const SFX_KEY_OVERRIDES: Record<string, Record<string, string>> = {
     "special": "sfx_cyber-ninja_punch"
   },
   "heavy-loader": {
-    "special": "sfx_block-bruiser_special"
+    "special": "sfx_ledger-titan_special"
   },
   "nano-brawler": {
     "punch": "sfx_nano-brawler_punch",

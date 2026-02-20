@@ -10,8 +10,8 @@ const DEFAULT_CAPS: CharacterCombatCaps = {
 
 const CAPS_BY_CHARACTER_ID: Record<string, CharacterCombatCaps> = {
   "cyber-ninja": { maxHp: 96, maxEnergy: 105 },
-  "dag-warrior": { maxHp: 100, maxEnergy: 100 },
-  "block-bruiser": { maxHp: 115, maxEnergy: 90 },
+  "soroban-sage": { maxHp: 100, maxEnergy: 100 },
+  "ledger-titan": { maxHp: 115, maxEnergy: 90 },
   "hash-hunter": { maxHp: 98, maxEnergy: 105 },
 
   "neon-wraith": { maxHp: 92, maxEnergy: 120 },

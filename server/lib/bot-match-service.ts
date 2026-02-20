@@ -67,9 +67,9 @@ export interface BotMatch {
 const BOT_CHARACTERS = [
     { id: "cyber-ninja", name: "Cyber Ninja" },
     { id: "sonic-striker", name: "Sonic Striker" },
-    { id: "block-bruiser", name: "Block Bruiser" },
+    { id: "ledger-titan", name: "Ledger Titan" },
     { id: "heavy-loader", name: "Heavy Loader" },
-    { id: "dag-warrior", name: "DAG Warrior" },
+    { id: "soroban-sage", name: "Soroban Sage" },
     { id: "technomancer", name: "Technomancer" },
     { id: "hash-hunter", name: "Hash Hunter" },
     { id: "prism-duelist", name: "Prism Duelist" },

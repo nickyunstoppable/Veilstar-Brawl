@@ -53,7 +53,7 @@ const SPEED_CHARACTERS: Character[] = [
 
 // Tank Characters (5)
 const TANK_CHARACTERS: Character[] = [
-  createCharacter("block-bruiser", "Block Bruiser", "Armored juggernaut built for endurance", "tank", { primary: "#F59E0B", secondary: "#D97706", accent: "#FCD34D" }),
+  createCharacter("ledger-titan", "Ledger Titan", "Armored juggernaut built on the Stellar ledger", "tank", { primary: "#F59E0B", secondary: "#D97706", accent: "#FCD34D" }),
   createCharacter("heavy-loader", "Heavy Loader", "Industrial powerhouse with hydraulic fists", "tank", { primary: "#EF4444", secondary: "#DC2626", accent: "#FCA5A5" }),
   createCharacter("gene-smasher", "Gene Smasher", "Mutated brawler with unstable DNA", "tank", { primary: "#84CC16", secondary: "#65A30D", accent: "#BEF264" }),
   createCharacter("bastion-hulk", "Bastion Hulk", "Defensive titan with impenetrable armor", "tank", { primary: "#6366F1", secondary: "#4F46E5", accent: "#A5B4FC" }),
@@ -62,7 +62,7 @@ const TANK_CHARACTERS: Character[] = [
 
 // Tech Characters (5)
 const TECH_CHARACTERS: Character[] = [
-  createCharacter("dag-warrior", "DAG Warrior", "Blockchain-powered fighter channeling the DAG", "tech", { primary: "#22C55E", secondary: "#16A34A", accent: "#86EFAC" }),
+  createCharacter("soroban-sage", "Soroban Sage", "Blockchain-powered fighter channeling Soroban smart contracts", "tech", { primary: "#22C55E", secondary: "#16A34A", accent: "#86EFAC" }),
   createCharacter("technomancer", "Technomancer", "Wizard of circuits blending magic and tech", "tech", { primary: "#A855F7", secondary: "#9333EA", accent: "#D8B4FE" }),
   createCharacter("nano-brawler", "Nano Brawler", "Microscopic warrior with nanite swarm powers", "tech", { primary: "#14B8A6", secondary: "#0D9488", accent: "#5EEAD4" }),
   createCharacter("razor-bot-7", "Razor Bot 7", "Military-grade automaton designed for combat", "tech", { primary: "#F97316", secondary: "#EA580C", accent: "#FDBA74" }),

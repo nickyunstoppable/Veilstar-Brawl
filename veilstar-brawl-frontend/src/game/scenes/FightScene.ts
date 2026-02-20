@@ -1,4 +1,4 @@
-﻿/**
+/**
  * FightScene - Main battle arena for KaspaClash
  * Core Phaser scene for 1v1 fighting matches with full combat logic
  */
@@ -461,8 +461,8 @@ export class FightScene extends Phaser.Scene {
    */
   preload(): void {
     // Use optimized loading - only load the 2 characters in this match
-    const player1Char = this.config?.player1Character || "dag-warrior";
-    const player2Char = this.config?.player2Character || "dag-warrior";
+    const player1Char = this.config?.player1Character || "soroban-sage";
+    const player2Char = this.config?.player2Character || "soroban-sage";
 
     preloadFightSceneAssets(this, player1Char, player2Char);
 
@@ -481,14 +481,14 @@ export class FightScene extends Phaser.Scene {
 
     // Initialize combat engine
     this.combatEngine = new CombatEngine(
-      this.config.player1Character || "dag-warrior",
-      this.config.player2Character || "dag-warrior",
+      this.config.player1Character || "soroban-sage",
+      this.config.player2Character || "soroban-sage",
       "best_of_3"
     );
 
     // Create animations only for the characters in this match
-    const player1Char = this.config?.player1Character || "dag-warrior";
-    const player2Char = this.config?.player2Character || "dag-warrior";
+    const player1Char = this.config?.player1Character || "soroban-sage";
+    const player2Char = this.config?.player2Character || "soroban-sage";
     createCharacterAnimations(this, [player1Char, player2Char]);
 
     // Load audio settings from localStorage
@@ -597,8 +597,8 @@ export class FightScene extends Phaser.Scene {
   private createAnimations(): void {
     // All 20 characters
     const allCharacters = [
-      "aeon-guard", "bastion-hulk", "block-bruiser", "chrono-drifter",
-      "cyber-ninja", "cyber-paladin", "dag-warrior", "gene-smasher",
+      "aeon-guard", "bastion-hulk", "ledger-titan", "chrono-drifter",
+      "cyber-ninja", "cyber-paladin", "soroban-sage", "gene-smasher",
       "hash-hunter", "heavy-loader", "kitsune-09", "nano-brawler",
       "neon-wraith", "prism-duelist", "razor-bot-7", "scrap-goliath",
       "sonic-striker", "technomancer", "viperblade", "void-reaper"
@@ -1261,8 +1261,8 @@ export class FightScene extends Phaser.Scene {
   // ===========================================================================
 
   private createCharacterSprites(): void {
-    const p1Char = this.config.player1Character || "dag-warrior";
-    const p2Char = this.config.player2Character || "dag-warrior";
+    const p1Char = this.config.player1Character || "soroban-sage";
+    const p2Char = this.config.player2Character || "soroban-sage";
 
     // Using getCharacterScale from sprite-config.ts which calculates:
     // scale = targetHeight / idleFrameHeight (280px regular, 336px tanks)
@@ -2976,8 +2976,8 @@ export class FightScene extends Phaser.Scene {
     this.playSFX(isLocalWinner ? "sfx_victory" : "sfx_defeat");
 
     // Play victory/dead animations with correct scaling
-    const p1Char = this.config.player1Character || "dag-warrior";
-    const p2Char = this.config.player2Character || "dag-warrior";
+    const p1Char = this.config.player1Character || "soroban-sage";
+    const p2Char = this.config.player2Character || "soroban-sage";
 
     // Helper to apply animation and scale safely
     const playEndAnim = (sprite: Phaser.GameObjects.Sprite, charId: string, animType: "victory" | "dead") => {
@@ -3605,7 +3605,7 @@ export class FightScene extends Phaser.Scene {
       if (payload.stage === "onchain_verify_submitting") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "⛓ On-chain verify pending…",
+          message: "⏳ On-chain verify pending...",
           color: "#f97316",
         });
       }
@@ -3613,7 +3613,7 @@ export class FightScene extends Phaser.Scene {
       if (payload.stage === "onchain_verify_ok") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "✅ On-chain verified",
+          message: "✓ On-chain verified",
           color: "#22c55e",
         });
       }
@@ -3621,7 +3621,7 @@ export class FightScene extends Phaser.Scene {
       if (payload.stage === "onchain_verify_failed" || payload.stage === "onchain_verify_exception") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "⚠ On-chain verify failed",
+          message: "✗ On-chain verify failed",
           color: "#ef4444",
         });
       }
@@ -4948,7 +4948,7 @@ export class FightScene extends Phaser.Scene {
         // Stun is a *turn-start* status in this game flow.
         // The roundResolved payload may reflect "stunned next" (e.g., guard break), and applying
         // it immediately makes the defender look stunned right after the narrative shows
-        // "Special beats Block" — which feels like a desync.
+        // "Special beats Block" � which feels like a desync.
         // We keep current stun state here and rely on the next round_starting/stateSync to
         // introduce stun at the correct time.
         player1IsStunned: this.serverState?.player1IsStunned ?? false,
@@ -4960,8 +4960,8 @@ export class FightScene extends Phaser.Scene {
       const p1StunnedAtTurnStart = Boolean(this.serverState?.player1IsStunned);
       const p2StunnedAtTurnStart = Boolean(this.serverState?.player2IsStunned);
 
-      const p1Char = this.config.player1Character || "dag-warrior";
-      const p2Char = this.config.player2Character || "dag-warrior";
+      const p1Char = this.config.player1Character || "soroban-sage";
+      const p2Char = this.config.player2Character || "soroban-sage";
 
     // Using centralized getAnimationScale(charId, animType) from sprite-config.ts
     // All scale values are managed in MANUAL_SCALE_OVERRIDES or calculated dynamically
@@ -5343,7 +5343,7 @@ export class FightScene extends Phaser.Scene {
               }
 
               // Keep isResolving true during the short rest so we don't instantly start the next
-              // turn (which looks like "middle → back → immediately middle again").
+              // turn (which looks like "middle ? back ? immediately middle again").
               this.time.delayedCall(REST_MS, () => {
                 // If match is over, do not continue turn flow.
                 if (payload.isMatchOver) {
@@ -5378,7 +5378,7 @@ export class FightScene extends Phaser.Scene {
                   return;
                 }
 
-                // Round ended → show round end UI.
+                // Round ended ? show round end UI.
                 if (payload.isRoundOver) {
                   this.showRoundEndFromServer(payload.roundWinner, payload.player1RoundsWon, payload.player2RoundsWon);
                   return;
@@ -5505,8 +5505,8 @@ export class FightScene extends Phaser.Scene {
   ): void {
     this.phase = "round_end";
 
-    const p1Char = this.config.player1Character || "dag-warrior";
-    const p2Char = this.config.player2Character || "dag-warrior";
+    const p1Char = this.config.player1Character || "soroban-sage";
+    const p2Char = this.config.player2Character || "soroban-sage";
 
     // Handle DRAW case (both characters ran out of HP in the same turn)
     if (roundWinner === null) {
@@ -5606,8 +5606,8 @@ export class FightScene extends Phaser.Scene {
    * Resets sprites and processes pending round start.
    */
   private processRoundEndCountdownComplete(): void {
-    const p1Char = this.roundEndData?.p1Char || this.config.player1Character || "dag-warrior";
-    const p2Char = this.roundEndData?.p2Char || this.config.player2Character || "dag-warrior";
+    const p1Char = this.roundEndData?.p1Char || this.config.player1Character || "soroban-sage";
+    const p2Char = this.roundEndData?.p2Char || this.config.player2Character || "soroban-sage";
     this.roundEndData = undefined;
 
     // Hide countdown text

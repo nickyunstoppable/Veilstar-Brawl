@@ -11,8 +11,8 @@ import { GAME_CONSTANTS } from "../../lib/game-types";
 // Available character IDs for bot selection
 const BOT_CHARACTER_IDS = [
     "cyber-ninja", "sonic-striker", "chrono-drifter", "neon-wraith", "viperblade",
-    "block-bruiser", "heavy-loader", "gene-smasher", "bastion-hulk", "scrap-goliath",
-    "dag-warrior", "technomancer", "nano-brawler", "razor-bot-7", "cyber-paladin",
+    "ledger-titan", "heavy-loader", "gene-smasher", "bastion-hulk", "scrap-goliath",
+    "soroban-sage", "technomancer", "nano-brawler", "razor-bot-7", "cyber-paladin",
     "hash-hunter", "prism-duelist", "kitsune-09", "void-reaper", "aeon-guard",
 ];
 

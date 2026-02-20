@@ -59,7 +59,7 @@ const AUDIO_ASSETS = {
     { key: "sfx_cd_fight", path: "/assets/audio/3-2-1-fight.mp3" },
   ],
   // Character-specific SFX - base characters have full sets
-  baseCharSfx: ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"],
+  baseCharSfx: ["cyber-ninja", "ledger-titan", "soroban-sage", "hash-hunter"],
   // Additional character-specific SFX
   additionalSfx: [
     { key: "sfx_nano-brawler_punch", path: "/assets/audio/nano-brawler-punch.mp3" },
