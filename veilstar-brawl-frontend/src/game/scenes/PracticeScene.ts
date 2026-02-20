@@ -32,6 +32,11 @@ import { getCharacter, getRandomCharacter } from "@/data/characters";
 import type { MoveType, Character } from "@/types/game";
 import { isMobileDevice } from "@/utils/device";
 
+const PRACTICE_PLAN_TURNS = 10;
+const PRACTICE_PLAN_TIMER_SECONDS = 90;
+const PRACTICE_PLAN_MAX_ENERGY = 100;
+const PRACTICE_PLAN_ENERGY_REGEN = 8;
+
 /**
  * Practice scene configuration.
  */
@@ -79,9 +84,12 @@ export class PracticeScene extends Phaser.Scene {
   // Move buttons (same structure as FightScene)
   private moveButtons: Map<MoveType, Phaser.GameObjects.Container> = new Map();
   private selectedMove: MoveType | null = null;
+  private privateRoundPlannedMoves: Array<"punch" | "kick" | "block" | "special"> = [];
+  private aiPlannedMoves: Array<"punch" | "kick" | "block" | "special"> = [];
+  private privateRoundPlanEnergyPreview: number = PRACTICE_PLAN_MAX_ENERGY;
 
   // Timer
-  private turnTimer: number = 15;
+  private turnTimer: number = PRACTICE_PLAN_TIMER_SECONDS;
   private timerEvent?: Phaser.Time.TimerEvent;
 
   // State (same phases as FightScene)
@@ -147,9 +155,12 @@ export class PracticeScene extends Phaser.Scene {
 
     // Reset state
     this.selectedMove = null;
-    this.turnTimer = 15;
+    this.turnTimer = PRACTICE_PLAN_TIMER_SECONDS;
     this.phase = "countdown";
     this.moveButtons.clear();
+    this.privateRoundPlannedMoves = [];
+    this.aiPlannedMoves = [];
+    this.privateRoundPlanEnergyPreview = PRACTICE_PLAN_MAX_ENERGY;
 
     // Precompute Power Surge decks and AI selections for all rounds
     this.precomputePowerSurgeDecks();
@@ -755,7 +766,7 @@ export class PracticeScene extends Phaser.Scene {
       this,
       UI_POSITIONS.TIMER.X,
       UI_POSITIONS.TIMER.Y,
-      "15"
+      `${PRACTICE_PLAN_TIMER_SECONDS}`
     ).setOrigin(0.5);
   }
 
@@ -873,7 +884,7 @@ export class PracticeScene extends Phaser.Scene {
 
     // Hover effects
     container.on("pointerover", () => {
-      if (this.phase === "selecting" && this.combatEngine.canAffordMove("player1", move)) {
+      if (this.phase === "selecting" && this.canAffordMoveForSelection(move)) {
         this.sound.play("sfx_hover", { volume: 0.5 });
         this.tweens.add({
           targets: container,
@@ -931,37 +942,117 @@ export class PracticeScene extends Phaser.Scene {
       return;
     }
 
-    // Check if affordable
-    if (!this.combatEngine.canAffordMove("player1", move)) {
+    if (move === "stunned") {
+      this.showFloatingText("Cannot preplan stunned", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
+      return;
+    }
+
+    if (this.privateRoundPlannedMoves.length >= PRACTICE_PLAN_TURNS) {
+      return;
+    }
+
+    const moveCost = this.getPlannedMoveEnergyCost(move, "player1");
+    if (this.privateRoundPlanEnergyPreview < moveCost) {
       this.showFloatingText("Not enough energy!", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
       return;
     }
 
-    // Deselect previous
-    if (this.selectedMove) {
-      this.updateButtonState(this.selectedMove, false);
-    }
+    this.privateRoundPlannedMoves.push(move as "punch" | "kick" | "block" | "special");
+    const afterCost = Math.max(0, this.privateRoundPlanEnergyPreview - moveCost);
+    this.privateRoundPlanEnergyPreview = Math.min(PRACTICE_PLAN_MAX_ENERGY, afterCost + PRACTICE_PLAN_ENERGY_REGEN);
 
     this.selectedMove = move;
     this.updateButtonState(move, true);
+    this.updateMoveButtonAffordability();
 
-    // Update turn indicator
-    this.turnIndicatorText.setText("AI is thinking...");
-    this.turnIndicatorText.setColor("#f97316");
+    const progress = `${this.privateRoundPlannedMoves.length}/${PRACTICE_PLAN_TURNS}`;
+    this.turnIndicatorText.setText(`Phase 2/3: Plan moves (${progress})`);
+    this.turnIndicatorText.setColor("#40e0d0");
 
-    // Disable buttons while AI thinks
-    this.moveButtons.forEach(btn => btn.setAlpha(0.4).disableInteractive());
+    if (this.privateRoundPlannedMoves.length >= PRACTICE_PLAN_TURNS) {
+      if (this.timerEvent) {
+        this.timerEvent.destroy();
+        this.timerEvent = undefined;
+      }
+      this.startPlannedFightPlayback();
+    }
+  }
 
-    // Stop timer
-    if (this.timerEvent) {
-      this.timerEvent.destroy();
-      this.timerEvent = undefined;
+  private getPlannedMoveEnergyCost(
+    move: MoveType,
+    role: "player1" | "player2"
+  ): number {
+    const baseCost = BASE_MOVE_STATS[move].energyCost;
+    if (move !== "special") return baseCost;
+
+    const surgeEffects = calculateSurgeEffects(
+      this.activeSurges.player1,
+      this.activeSurges.player2,
+    );
+
+    const roleMods = role === "player1"
+      ? surgeEffects.player1Modifiers
+      : surgeEffects.player2Modifiers;
+    const extra = Math.max(0, Math.floor(Number(roleMods.specialEnergyCost ?? 0)));
+    return baseCost + extra;
+  }
+
+  private canAffordMoveForSelection(move: MoveType): boolean {
+    if (move === "stunned") return false;
+    if (this.privateRoundPlannedMoves.length >= PRACTICE_PLAN_TURNS) return false;
+    return this.privateRoundPlanEnergyPreview >= this.getPlannedMoveEnergyCost(move, "player1");
+  }
+
+  private buildAIPlan(): Array<"punch" | "kick" | "block" | "special"> {
+    const state = this.combatEngine.getState();
+    let aiEnergyPreview = state.player2.energy;
+    const plan: Array<"punch" | "kick" | "block" | "special"> = [];
+
+    for (let i = 0; i < PRACTICE_PLAN_TURNS; i++) {
+      let move = this.ai.decide().move;
+      if (move === "stunned") move = "block";
+
+      const typedMove = move as "punch" | "kick" | "block" | "special";
+      const moveCost = this.getPlannedMoveEnergyCost(typedMove, "player2");
+      const finalMove = aiEnergyPreview < moveCost ? "block" : typedMove;
+      const finalCost = this.getPlannedMoveEnergyCost(finalMove, "player2");
+
+      aiEnergyPreview = Math.min(
+        PRACTICE_PLAN_MAX_ENERGY,
+        Math.max(0, aiEnergyPreview - finalCost) + PRACTICE_PLAN_ENERGY_REGEN,
+      );
+
+      plan.push(finalMove);
     }
 
-    // AI makes decision after "thinking" delay
-    const thinkTime = getAIThinkTime(this.config.aiDifficulty);
-    this.time.delayedCall(thinkTime, () => {
-      this.aiMakeDecision();
+    return plan;
+  }
+
+  private startPlannedFightPlayback(): void {
+    if (this.privateRoundPlannedMoves.length < PRACTICE_PLAN_TURNS) {
+      while (this.privateRoundPlannedMoves.length < PRACTICE_PLAN_TURNS) {
+        this.privateRoundPlannedMoves.push("block");
+      }
+    }
+
+    this.aiPlannedMoves = this.buildAIPlan();
+    this.phase = "resolving";
+
+    this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+    this.turnIndicatorText.setColor("#22c55e");
+    this.roundTimerText.setText("✓");
+    this.roundTimerText.setColor("#22c55e");
+
+    this.moveButtons.forEach(btn => btn.setAlpha(0.3).disableInteractive());
+
+    this.time.delayedCall(250, () => {
+      const playerMove = this.privateRoundPlannedMoves.shift();
+      const aiMove = this.aiPlannedMoves.shift();
+      if (!playerMove || !aiMove) {
+        this.startSelectionPhase();
+        return;
+      }
+      this.resolveRound(playerMove, aiMove);
     });
   }
 
@@ -994,11 +1085,11 @@ export class PracticeScene extends Phaser.Scene {
 
       } else {
         // Unselected state
-        const isAffordable = this.combatEngine.canAffordMove("player1", move);
+        const isAffordable = this.canAffordMoveForSelection(move);
 
         this.tweens.add({
           targets: button,
-          alpha: isAffordable ? (isSelected ? 0.5 : 1) : 0.3,
+          alpha: isAffordable ? 1 : 0.3,
           scaleX: 1,
           scaleY: 1,
           y: GAME_DIMENSIONS.HEIGHT - 100,
@@ -1085,7 +1176,7 @@ export class PracticeScene extends Phaser.Scene {
     const blockDisabled = isBlockDisabled(surgeEffects.player1Modifiers, surgeEffects.player2Modifiers);
 
     moves.forEach((move) => {
-      const canAfford = this.combatEngine.canAffordMove("player1", move);
+      const canAfford = this.canAffordMoveForSelection(move);
       const container = this.moveButtons.get(move);
       if (container) {
         // Check if this specific move should be disabled
@@ -1153,6 +1244,8 @@ export class PracticeScene extends Phaser.Scene {
 
   private startRound(): void {
     this.phase = "countdown";
+    this.turnIndicatorText.setText("Phase 1/3: Pick your Power Surge");
+    this.turnIndicatorText.setColor("#fbbf24");
 
     // Get current round number
     const state = this.combatEngine.getState();
@@ -1480,10 +1573,13 @@ export class PracticeScene extends Phaser.Scene {
 
     this.phase = "selecting";
     this.selectedMove = null;
-    this.turnTimer = 15;
+    this.turnTimer = PRACTICE_PLAN_TIMER_SECONDS;
+    this.privateRoundPlannedMoves = [];
+    this.aiPlannedMoves = [];
 
     // Get current state to check if player is stunned
     const state = this.combatEngine.getState();
+    this.privateRoundPlanEnergyPreview = state.player1.energy;
 
     // Clear stun visual effects for players who are no longer stunned
     // This happens after a stunned turn completes
@@ -1644,10 +1740,11 @@ export class PracticeScene extends Phaser.Scene {
       // Show visual stun effect on bot
       this.showStunVisualEffect("player2");
     } else {
-      this.turnIndicatorText.setText("Select your move!");
-      this.turnIndicatorText.setColor("#888888");
+      this.turnIndicatorText.setText(`Phase 2/3: Plan moves (0/${PRACTICE_PLAN_TURNS})`);
+      this.turnIndicatorText.setColor("#40e0d0");
     }
     this.roundTimerText.setColor("#40e0d0");
+    this.roundTimerText.setText(`${this.turnTimer}`);
 
     // Reset button visuals and affordability
     this.resetButtonVisuals();
@@ -1667,7 +1764,7 @@ export class PracticeScene extends Phaser.Scene {
           this.onTimerExpired();
         }
       },
-      repeat: 14,
+      repeat: this.turnTimer - 1,
     });
 
     // Update AI context
@@ -1701,21 +1798,13 @@ export class PracticeScene extends Phaser.Scene {
       this.timerEvent = undefined;
     }
 
-    // Auto-select punch if no move selected
-    if (!this.selectedMove) {
-      this.selectedMove = "punch";
+    while (this.privateRoundPlannedMoves.length < PRACTICE_PLAN_TURNS) {
+      this.privateRoundPlannedMoves.push("block");
     }
 
-    this.turnIndicatorText.setText("Time's up! Auto-selecting...");
+    this.turnIndicatorText.setText("Time's up! Auto-completing plan...");
     this.turnIndicatorText.setColor("#ff8800");
-
-    this.moveButtons.forEach(btn => btn.setAlpha(0.4).disableInteractive());
-
-    // AI makes its decision
-    const thinkTime = getAIThinkTime(this.config.aiDifficulty);
-    this.time.delayedCall(thinkTime, () => {
-      this.aiMakeDecision();
-    });
+    this.startPlannedFightPlayback();
   }
 
   private aiMakeDecision(): void {
@@ -1754,6 +1843,8 @@ export class PracticeScene extends Phaser.Scene {
 
   private resolveRound(playerMove: MoveType, aiMove: MoveType): void {
     this.phase = "resolving";
+    this.turnIndicatorText.setText("Phase 3/3: Enjoy the fight!");
+    this.turnIndicatorText.setColor("#22c55e");
 
     // Store previous health for damage calculation
     const prevState = this.combatEngine.getState();
@@ -2159,6 +2250,16 @@ export class PracticeScene extends Phaser.Scene {
                 this.showMatchEnd();
               } else if (state.isRoundOver) {
                 this.showRoundEnd();
+              } else if (this.privateRoundPlannedMoves.length > 0 && this.aiPlannedMoves.length > 0) {
+                this.time.delayedCall(450, () => {
+                  const nextPlayerMove = this.privateRoundPlannedMoves.shift();
+                  const nextAiMove = this.aiPlannedMoves.shift();
+                  if (!nextPlayerMove || !nextAiMove) {
+                    this.startSelectionPhase();
+                    return;
+                  }
+                  this.resolveRound(nextPlayerMove, nextAiMove);
+                });
               } else {
                 this.startSelectionPhase();
               }

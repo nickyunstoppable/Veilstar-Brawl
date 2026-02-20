@@ -5,11 +5,6 @@ import {
   Gamepad2,
   Trophy,
   Eye,
-  Ticket,
-  Target,
-  Store,
-  Flame,
-  Award,
   Menu,
   X,
 } from 'lucide-react';
@@ -32,36 +27,6 @@ const NAV_ITEMS = [
     href: '/spectate',
     icon: Eye,
     color: 'text-purple-400',
-  },
-  {
-    label: 'Battle Pass',
-    href: '/battle-pass',
-    icon: Ticket,
-    color: 'text-emerald-400',
-  },
-  {
-    label: 'Quests',
-    href: '/quests',
-    icon: Target,
-    color: 'text-blue-400',
-  },
-  {
-    label: 'Shop',
-    href: '/shop',
-    icon: Store,
-    color: 'text-pink-400',
-  },
-  {
-    label: 'Survival',
-    href: '/survival',
-    icon: Flame,
-    color: 'text-red-500',
-  },
-  {
-    label: 'Achievements',
-    href: '/achievements',
-    icon: Award,
-    color: 'text-amber-400',
   },
 ];
 

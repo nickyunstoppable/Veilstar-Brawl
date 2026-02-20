@@ -16,6 +16,7 @@ const CharacterSelectClient = lazy(() =>
 );
 
 const SpectatePage = lazy(() => import('./pages/SpectatePage'));
+const BetHistoryPage = lazy(() => import('./pages/BetHistoryPage'));
 const SpectatorClient = lazy(() =>
   import('./components/spectate/SpectatorClient').then((mod) => ({
     default: mod.SpectatorClient,
@@ -131,6 +132,24 @@ export default function App() {
         }
       >
         <SpectatePage />
+      </Suspense>
+    );
+  }
+
+  // Bet history page
+  if (path === '/bet-history') {
+    return (
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 bg-black flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-cyber-gold border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-cyber-gold font-orbitron tracking-widest text-sm">LOADING HISTORY...</p>
+            </div>
+          </div>
+        }
+      >
+        <BetHistoryPage />
       </Suspense>
     );
   }

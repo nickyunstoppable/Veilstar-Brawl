@@ -4,7 +4,7 @@
  */
 
 import { getSupabase } from "../lib/supabase";
-import { getActiveMatch } from "../lib/bot-match-service";
+import { getActiveMatch, simulateBotMatch } from "../lib/bot-match-service";
 
 const lastBotPoolSnapshotLog = new Map<string, string>();
 
@@ -71,6 +71,14 @@ async function reconcileBotBetStatusIfResolved(params: {
 // =============================================================================
 
 export async function handleGetBettingPool(matchId: string, req: Request): Promise<Response> {
+    return Response.json(
+        {
+            error: "PvP betting is disabled. Use bot betting only.",
+            code: "PVP_BETTING_DISABLED",
+        },
+        { status: 410 }
+    );
+
     try {
         const supabase = getSupabase();
         const url = new URL(req.url);
@@ -131,6 +139,14 @@ export async function handleGetBettingPool(matchId: string, req: Request): Promi
 }
 
 export async function handlePlaceBet(req: Request): Promise<Response> {
+    return Response.json(
+        {
+            error: "PvP betting is disabled. Use bot betting only.",
+            code: "PVP_BETTING_DISABLED",
+        },
+        { status: 410 }
+    );
+
     try {
         const body = await req.json();
         const { matchId, betOn, amount, bettorAddress } = body;
@@ -640,5 +656,169 @@ export async function handleGetUnresolvedBotBets(req: Request): Promise<Response
     } catch (error) {
         console.error("[BotBetting] Unresolved bets error:", error);
         return Response.json({ error: "Failed to get unresolved bets" }, { status: 500 });
+    }
+}
+
+export async function handleGetBotBetHistory(req: Request): Promise<Response> {
+    try {
+        const supabase = getSupabase();
+        const url = new URL(req.url);
+        const bettorAddress = url.searchParams.get("address");
+        const limitParam = url.searchParams.get("limit");
+        const offsetParam = url.searchParams.get("offset");
+
+        if (!bettorAddress) {
+            return Response.json({ success: false, error: "Address parameter is required" }, { status: 400 });
+        }
+
+        const limit = limitParam ? Math.min(Math.max(parseInt(limitParam, 10), 1), 50) : 10;
+        const offset = offsetParam ? Math.max(parseInt(offsetParam, 10), 0) : 0;
+
+        const { data: betsData, error: betsError } = await supabase
+            .from("bets")
+            .select("id,pool_id,bet_on,amount,fee_paid,net_amount,payout_amount,status,created_at,tx_id,claim_tx_id")
+            .eq("bettor_address", bettorAddress)
+            .order("created_at", { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        if (betsError) {
+            console.error("[BotBetHistory] Failed to fetch bets:", betsError);
+            return Response.json({ success: false, error: "Failed to fetch bet history" }, { status: 500 });
+        }
+
+        const { count: totalCount, error: countError } = await supabase
+            .from("bets")
+            .select("id", { count: "exact", head: true })
+            .eq("bettor_address", bettorAddress);
+
+        if (countError) {
+            console.error("[BotBetHistory] Failed to count bets:", countError);
+        }
+
+        const poolIds = Array.from(new Set((betsData || []).map((bet) => bet.pool_id).filter(Boolean)));
+        let poolById = new Map<string, {
+            id: string;
+            match_id: string;
+            match_type: string;
+            winner: "player1" | "player2" | null;
+        }>();
+
+        if (poolIds.length > 0) {
+            const { data: poolsData, error: poolsError } = await supabase
+                .from("betting_pools")
+                .select("id,match_id,match_type,winner")
+                .in("id", poolIds)
+                .eq("match_type", "bot");
+
+            if (poolsError) {
+                console.error("[BotBetHistory] Failed to fetch pools:", poolsError);
+            } else {
+                poolById = new Map((poolsData || []).map((pool) => [pool.id, pool]));
+            }
+        }
+
+        const activeMatch = getActiveMatch();
+        const reconstructedMatchMeta = new Map<string, {
+            bot1Name: string;
+            bot2Name: string;
+            bot1CharacterId: string;
+            bot2CharacterId: string;
+        }>();
+
+        const history = (betsData || [])
+            .map((bet) => {
+                const pool = poolById.get(bet.pool_id);
+                if (!pool) return null;
+
+                const activeMetadata = activeMatch && activeMatch.id === pool.match_id
+                    ? {
+                        bot1Name: activeMatch.bot1Name,
+                        bot2Name: activeMatch.bot2Name,
+                        bot1CharacterId: activeMatch.bot1CharacterId,
+                        bot2CharacterId: activeMatch.bot2CharacterId,
+                    }
+                    : null;
+
+                let fallbackMetadata = reconstructedMatchMeta.get(pool.match_id);
+                if (!fallbackMetadata) {
+                    const simulated = simulateBotMatch(pool.match_id);
+                    fallbackMetadata = {
+                        bot1Name: simulated.bot1Name,
+                        bot2Name: simulated.bot2Name,
+                        bot1CharacterId: simulated.bot1CharacterId,
+                        bot2CharacterId: simulated.bot2CharacterId,
+                    };
+                    reconstructedMatchMeta.set(pool.match_id, fallbackMetadata);
+                }
+
+                return {
+                    id: bet.id,
+                    matchId: pool.match_id,
+                    matchType: "bot" as const,
+                    player1Name: activeMetadata?.bot1Name || fallbackMetadata.bot1Name,
+                    player2Name: activeMetadata?.bot2Name || fallbackMetadata.bot2Name,
+                    player1CharacterId: activeMetadata?.bot1CharacterId || fallbackMetadata.bot1CharacterId,
+                    player2CharacterId: activeMetadata?.bot2CharacterId || fallbackMetadata.bot2CharacterId,
+                    betOn: bet.bet_on,
+                    amount: String(bet.amount ?? 0),
+                    feeAmount: String(bet.fee_paid ?? 0),
+                    netAmount: String(bet.net_amount ?? 0),
+                    payoutAmount: bet.payout_amount == null ? null : String(bet.payout_amount),
+                    status: bet.status,
+                    winner: pool.winner,
+                    createdAt: bet.created_at,
+                    paidAt: null,
+                    txId: bet.tx_id || "",
+                    payoutTxId: bet.claim_tx_id || null,
+                };
+            })
+            .filter(Boolean);
+
+        const { data: allBotBets } = await supabase
+            .from("bets")
+            .select("amount,payout_amount,status,pool_id")
+            .eq("bettor_address", bettorAddress);
+
+        const allBotPoolIds = Array.from(new Set((allBotBets || []).map((bet) => bet.pool_id).filter(Boolean)));
+        let allBotPools = new Set<string>();
+
+        if (allBotPoolIds.length > 0) {
+            const { data: allPoolsData } = await supabase
+                .from("betting_pools")
+                .select("id")
+                .in("id", allBotPoolIds)
+                .eq("match_type", "bot");
+
+            allBotPools = new Set((allPoolsData || []).map((pool) => pool.id));
+        }
+
+        const botOnlyBets = (allBotBets || []).filter((bet) => allBotPools.has(bet.pool_id));
+
+        const stats = {
+            totalBets: botOnlyBets.length,
+            wonBets: botOnlyBets.filter((bet) => bet.status === "won").length,
+            lostBets: botOnlyBets.filter((bet) => bet.status === "lost").length,
+            pendingBets: botOnlyBets.filter((bet) => bet.status === "pending" || bet.status === "confirmed").length,
+            totalWagered: botOnlyBets.reduce((sum, bet) => sum + BigInt(bet.amount || 0), BigInt(0)).toString(),
+            totalWon: botOnlyBets
+                .filter((bet) => bet.status === "won" && bet.payout_amount != null)
+                .reduce((sum, bet) => sum + BigInt(bet.payout_amount || 0), BigInt(0))
+                .toString(),
+        };
+
+        return Response.json({
+            success: true,
+            history,
+            stats,
+            pagination: {
+                limit,
+                offset,
+                total: totalCount || 0,
+                hasMore: offset + limit < (totalCount || 0),
+            },
+        });
+    } catch (error) {
+        console.error("[BotBetHistory] Error:", error);
+        return Response.json({ success: false, error: "Internal server error" }, { status: 500 });
     }
 }

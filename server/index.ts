@@ -36,7 +36,7 @@ import { ensureEnvLoaded } from "./lib/env";
 import { handleGetMatchPublic } from "./routes/matches/public";
 import { handleGetLiveMatches } from "./routes/matches/live";
 import { handleGetBotGames, handleBotGamesSync } from "./routes/bot-games";
-import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleGetUnresolvedBotBets } from "./routes/betting";
+import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleGetUnresolvedBotBets, handleGetBotBetHistory } from "./routes/betting";
 
 ensureEnvLoaded();
 
@@ -181,6 +181,9 @@ async function handleRequest(req: Request): Promise<Response> {
     }
     if (pathname === "/api/bot-betting/unresolved" && method === "GET") {
         return corsResponse(await handleGetUnresolvedBotBets(req), req);
+    }
+    if (pathname === "/api/bot-betting/history" && method === "GET") {
+        return corsResponse(await handleGetBotBetHistory(req), req);
     }
     // -----------------------------------------------
     // Player Profile & Match History
