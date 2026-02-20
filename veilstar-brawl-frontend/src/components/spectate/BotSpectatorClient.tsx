@@ -17,6 +17,7 @@ import type { BotBattleSceneConfig } from "../../game/scenes/BotBattleScene";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const BOT_MATCH_SIDE_CACHE_KEY = "bot_betting_match_side_cache_v1";
+const BOT_MATCH_SIDE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const BETTING_DURATION_MS = 30000;
 const BOT_MAX_HP = 100;
 const BOT_MAX_ENERGY = 100;
@@ -51,10 +52,24 @@ function navigate(path: string) {
 
 function readCachedMatchBet(matchId: string): { side: "player1" | "player2"; amount?: number | string | null } | null {
     try {
+        const now = Date.now();
         const raw = localStorage.getItem(BOT_MATCH_SIDE_CACHE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
-        const cached = parsed?.[matchId];
+        if (!parsed || typeof parsed !== "object") return null;
+
+        const prunedEntries = Object.entries(parsed).filter(([, value]) => {
+            const entry = value as { ts?: unknown };
+            const ts = Number(entry?.ts);
+            return Number.isFinite(ts) && now - ts <= BOT_MATCH_SIDE_CACHE_TTL_MS;
+        });
+        const pruned = Object.fromEntries(prunedEntries);
+
+        if (JSON.stringify(pruned) !== JSON.stringify(parsed)) {
+            localStorage.setItem(BOT_MATCH_SIDE_CACHE_KEY, JSON.stringify(pruned));
+        }
+
+        const cached = pruned?.[matchId] as { side?: unknown; amount?: unknown } | undefined;
         if (!cached) return null;
         const side = cached.side;
         if (side !== "player1" && side !== "player2") return null;

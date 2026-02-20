@@ -20,6 +20,7 @@ import { ClashShardsIcon } from "../currency/ClashShardsIcon";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const BOT_MATCH_SIDE_CACHE_KEY = "bot_betting_match_side_cache_v1";
+const BOT_MATCH_SIDE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 const QUICK_BETS = [1, 5, 10, 25, 50, 100];
 
@@ -33,14 +34,22 @@ interface BotBettingPanelProps {
 
 function writeMatchSideCache(matchId: string, side: "player1" | "player2", amountStroops?: number | string | null) {
     try {
+        const now = Date.now();
         const raw = localStorage.getItem(BOT_MATCH_SIDE_CACHE_KEY);
         const parsed = raw ? JSON.parse(raw) : {};
+        const source = parsed && typeof parsed === "object" ? parsed : {};
+        const prunedEntries = Object.entries(source).filter(([, value]) => {
+            const entry = value as { ts?: unknown };
+            const ts = Number(entry?.ts);
+            return Number.isFinite(ts) && now - ts <= BOT_MATCH_SIDE_CACHE_TTL_MS;
+        });
+        const pruned = Object.fromEntries(prunedEntries);
         const next = {
-            ...(parsed && typeof parsed === "object" ? parsed : {}),
+            ...pruned,
             [matchId]: {
                 side,
                 amount: amountStroops ?? null,
-                ts: Date.now(),
+                ts: now,
             },
         };
         localStorage.setItem(BOT_MATCH_SIDE_CACHE_KEY, JSON.stringify(next));
