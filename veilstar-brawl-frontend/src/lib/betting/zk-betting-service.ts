@@ -2,6 +2,7 @@ import { Buffer } from "buffer";
 import { Client as ZkBettingClient, BetSide } from "../../../../bindings/zk_betting/src/index";
 import type { ContractSigner } from "../../types/signer";
 import { NETWORK_PASSPHRASE, RPC_URL, getContractId } from "../../utils/constants";
+import { signAndSendViaLaunchtube } from "../../utils/transactionHelper";
 
 export type BetSideLabel = "player1" | "player2";
 
@@ -65,16 +66,7 @@ function getContractClient(publicKey: string, signer: ContractSigner): ZkBetting
 }
 
 async function signAndSend(tx: any): Promise<any> {
-  const simulated = await tx.simulate();
-  try {
-    return await simulated.signAndSend();
-  } catch (err: any) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("NoSignatureNeeded") || message.includes("read call")) {
-      return await simulated.signAndSend({ force: true });
-    }
-    throw err;
-  }
+  return signAndSendViaLaunchtube(tx);
 }
 
 export async function commitBetOnChain(params: {
@@ -99,7 +91,23 @@ export async function commitBetOnChain(params: {
     amount: params.amount,
   });
 
-  const sentTx = await signAndSend(tx);
+  let sentTx: any;
+  try {
+    sentTx = await signAndSend(tx);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error ?? "");
+    if (msg.includes("Error(Contract, #18)")) {
+      throw new Error("Betting deadline passed for this match. Please wait for the next one.");
+    }
+    if (msg.includes("Error(Contract, #7)")) {
+      throw new Error("You already placed a bet for this match.");
+    }
+    if (msg.includes("Error(Contract, #2)")) {
+      throw new Error("Betting is closed for this pool.");
+    }
+    throw error;
+  }
+
   return {
     txHash: extractTxHash(sentTx),
     commitmentHex: toHex(commitment),

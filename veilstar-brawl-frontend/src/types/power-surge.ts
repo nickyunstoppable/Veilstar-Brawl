@@ -177,11 +177,11 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "blue-set-heal",
     name: "Blue Set Heal",
-    description: "Restore 10 HP over time",
+    description: "Restore 5 HP over time",
     glowColor: 0x0088ff,
     iconKey: "surge_blue-set-heal",
     effectType: "hp_regen",
-    effectParams: { hpRegen: 10 },
+    effectParams: { hpRegen: 5 },
   },
   {
     id: "orphan-smasher",
@@ -213,11 +213,11 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "sompi-shield",
     name: "Sompi Shield",
-    description: "Take 45% less damage",
+    description: "Take 25% less damage",
     glowColor: 0xffd700,
     iconKey: "surge_sompi-shield",
     effectType: "damage_reduction",
-    effectParams: { incomingDamageReduction: 0.45 },
+    effectParams: { incomingDamageReduction: 0.25 },
   },
   {
     id: "hash-hurricane",

@@ -295,7 +295,11 @@ export function resolveRound(
     const {
         player1Move, player2Move,
         player1Health, player2Health,
+        player1MaxHealth = GAME_CONSTANTS.MAX_HEALTH,
+        player2MaxHealth = GAME_CONSTANTS.MAX_HEALTH,
         player1Energy, player2Energy,
+        player1MaxEnergy = GAME_CONSTANTS.MAX_ENERGY,
+        player2MaxEnergy = GAME_CONSTANTS.MAX_ENERGY,
         player1Guard, player2Guard,
     } = input;
 
@@ -461,11 +465,11 @@ export function resolveRound(
     let p2HpRegen = 0;
     if (surges) {
         const p1Before = p1HealthAfter;
-        p1HealthAfter = applyHpEffects(p1Mods!, p1HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
+        p1HealthAfter = applyHpEffects(p1Mods!, p1HealthAfter, player1MaxHealth);
         p1HpRegen = Math.max(0, p1HealthAfter - p1Before);
 
         const p2Before = p2HealthAfter;
-        p2HealthAfter = applyHpEffects(p2Mods!, p2HealthAfter, GAME_CONSTANTS.MAX_HEALTH);
+        p2HealthAfter = applyHpEffects(p2Mods!, p2HealthAfter, player2MaxHealth);
         p2HpRegen = Math.max(0, p2HealthAfter - p2Before);
     }
 
@@ -475,11 +479,11 @@ export function resolveRound(
     if (surges) {
         if (p1Mods!.lifestealPercent > 0 && p1Damage > 0 && p1HealthAfter > 0) {
             p1Lifesteal = Math.floor(p1Damage * p1Mods!.lifestealPercent);
-            p1HealthAfter = Math.min(GAME_CONSTANTS.MAX_HEALTH, p1HealthAfter + p1Lifesteal);
+            p1HealthAfter = Math.min(player1MaxHealth, p1HealthAfter + p1Lifesteal);
         }
         if (p2Mods!.lifestealPercent > 0 && p2Damage > 0 && p2HealthAfter > 0) {
             p2Lifesteal = Math.floor(p2Damage * p2Mods!.lifestealPercent);
-            p2HealthAfter = Math.min(GAME_CONSTANTS.MAX_HEALTH, p2HealthAfter + p2Lifesteal);
+            p2HealthAfter = Math.min(player2MaxHealth, p2HealthAfter + p2Lifesteal);
         }
     }
 
@@ -490,6 +494,9 @@ export function resolveRound(
     // (e.g. player appears to "kick" but server resolves as block and energy mysteriously drops).
     let p1EnergyAfter = calculateEnergyAfter(player1Energy, player1PlannedMove);
     let p2EnergyAfter = calculateEnergyAfter(player2Energy, player2PlannedMove);
+
+    p1EnergyAfter = Math.max(0, Math.min(player1MaxEnergy, p1EnergyAfter));
+    p2EnergyAfter = Math.max(0, Math.min(player2MaxEnergy, p2EnergyAfter));
 
     // Surge energy effects (burn/steal/extra cost/regen bonus)
     let p1EnergyDrained = 0;
@@ -516,8 +523,8 @@ export function resolveRound(
         p2EnergyAfter += p2EnergyEffects.energyRegenBonus;
 
         // Clamp
-        p1EnergyAfter = Math.max(0, Math.min(GAME_CONSTANTS.MAX_ENERGY, p1EnergyAfter));
-        p2EnergyAfter = Math.max(0, Math.min(GAME_CONSTANTS.MAX_ENERGY, p2EnergyAfter));
+        p1EnergyAfter = Math.max(0, Math.min(player1MaxEnergy, p1EnergyAfter));
+        p2EnergyAfter = Math.max(0, Math.min(player2MaxEnergy, p2EnergyAfter));
     }
 
     // Guard after moves
@@ -544,8 +551,8 @@ export function resolveRound(
             winner = "player1";
         }
     } else if (isTurnLimitReached) {
-        const p1Pct = GAME_CONSTANTS.MAX_HEALTH > 0 ? p1HealthAfter / GAME_CONSTANTS.MAX_HEALTH : 0;
-        const p2Pct = GAME_CONSTANTS.MAX_HEALTH > 0 ? p2HealthAfter / GAME_CONSTANTS.MAX_HEALTH : 0;
+        const p1Pct = player1MaxHealth > 0 ? p1HealthAfter / player1MaxHealth : 0;
+        const p2Pct = player2MaxHealth > 0 ? p2HealthAfter / player2MaxHealth : 0;
 
         if (p1Pct > p2Pct) winner = "player1";
         else if (p2Pct > p1Pct) winner = "player2";

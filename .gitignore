@@ -44,6 +44,6 @@ frontend-template/*.tsbuildinfo
 Thumbs.db
 
 # External repositories
-# KaspaClash/
+KaspaClash/
 noir/
 stellar-docs/

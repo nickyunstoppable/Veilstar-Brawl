@@ -4,18 +4,22 @@
  */
 
 import React, { useState, useCallback, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { LockKeyIcon, Tick02Icon, Time03Icon, RoboticIcon } from "@hugeicons/core-free-icons";
 import {
     formatXlm,
-    formatOdds,
     xlmToStroops,
     calculateHouseFee,
     calculateHousePayout,
     calculateHouseTotalCost,
 } from "../../lib/betting/betting-service";
 import { useWalletStandalone } from "../../hooks/useWalletStandalone";
-import { claimPayoutOnChain, commitBetOnChain, revealBetOnChain } from "../../lib/betting/zk-betting-service";
+import { commitBetOnChain } from "../../lib/betting/zk-betting-service";
+import { ClashShardsIcon } from "../currency/ClashShardsIcon";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const BOT_MATCH_SIDE_CACHE_KEY = "bot_betting_match_side_cache_v1";
 
 const QUICK_BETS = [1, 5, 10, 25, 50, 100];
 
@@ -27,6 +31,24 @@ interface BotBettingPanelProps {
     isBettingOpen: boolean;
 }
 
+function writeMatchSideCache(matchId: string, side: "player1" | "player2", amountStroops?: number | string | null) {
+    try {
+        const raw = localStorage.getItem(BOT_MATCH_SIDE_CACHE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const next = {
+            ...(parsed && typeof parsed === "object" ? parsed : {}),
+            [matchId]: {
+                side,
+                amount: amountStroops ?? null,
+                ts: Date.now(),
+            },
+        };
+        localStorage.setItem(BOT_MATCH_SIDE_CACHE_KEY, JSON.stringify(next));
+    } catch {
+        // Ignore cache write issues
+    }
+}
+
 export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRemaining, isBettingOpen }: BotBettingPanelProps) {
     const { publicKey, isConnected, isConnecting, connect, getContractSigner } = useWalletStandalone();
     const [selectedBot, setSelectedBot] = useState<"player1" | "player2" | null>(null);
@@ -34,8 +56,9 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
     const [placing, setPlacing] = useState(false);
     const [betPlaced, setBetPlaced] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [revealing, setRevealing] = useState(false);
-    const [claiming, setClaiming] = useState(false);
+    const [success, setSuccess] = useState<string | null>(null);
+    const [forceClosed, setForceClosed] = useState(false);
+    const [forceClosedReason, setForceClosedReason] = useState<string | null>(null);
     const [onchainPoolId, setOnchainPoolId] = useState<number | null>(null);
     const [userBet, setUserBet] = useState<any | null>(null);
 
@@ -62,6 +85,9 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
                     }
                     setUserBet(data.userBet || null);
                     setBetPlaced(Boolean(data.userBet));
+                    if (data.userBet?.bet_on === "player1" || data.userBet?.bet_on === "player2") {
+                        writeMatchSideCache(matchId, data.userBet.bet_on, data.userBet?.amount ?? null);
+                    }
                     setError(null);
                 } else {
                     setError("Betting service unavailable");
@@ -82,12 +108,20 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
         setBetAmount("");
         setBetPlaced(false);
         setError(null);
+        setSuccess(null);
+        setForceClosed(false);
+        setForceClosedReason(null);
         setUserBet(null);
         setOnchainPoolId(null);
     }, [matchId]);
 
     const handlePlaceBet = useCallback(async () => {
         if (!selectedBot || !betAmount || placing) return;
+
+        if (!isBettingOpen || bettingSecondsRemaining <= 0) {
+            setError("Betting already closed for this match");
+            return;
+        }
 
         const amount = parseFloat(betAmount);
         if (isNaN(amount) || amount <= 0) {
@@ -97,6 +131,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
 
         setPlacing(true);
         setError(null);
+        setSuccess(null);
 
         try {
             let address = bettorAddress;
@@ -111,6 +146,20 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
 
             if (!onchainPoolId) {
                 throw new Error("On-chain pool not ready yet. Please try again in a moment.");
+            }
+
+            const activeMatchRes = await fetch(`${API_BASE}/api/bot-games?matchId=${encodeURIComponent(matchId)}`);
+            if (!activeMatchRes.ok) {
+                throw new Error("Unable to verify active match. Please try again.");
+            }
+            const activeMatchPayload = await activeMatchRes.json();
+            const activeMatch = activeMatchPayload?.match;
+            if (!activeMatch || activeMatch.id !== matchId) {
+                throw new Error("This match has expired. Wait for the next bot match.");
+            }
+            const elapsedMs = Date.now() - Number(activeMatch.createdAt || 0);
+            if (!Number.isFinite(elapsedMs) || elapsedMs >= 30000) {
+                throw new Error("Betting window closed. Wait for the next match.");
             }
 
             let contractSigner;
@@ -153,114 +202,36 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
 
             const payload = await response.json();
             setBetPlaced(true);
+            setSuccess("Bet placed successfully");
             if (payload?.bet) {
                 setUserBet(payload.bet);
+                if (payload.bet?.bet_on === "player1" || payload.bet?.bet_on === "player2") {
+                    writeMatchSideCache(matchId, payload.bet.bet_on, payload.bet?.amount ?? null);
+                }
+            } else {
+                writeMatchSideCache(matchId, selectedBot, Number(xlmToStroops(amount)));
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to place bet");
+            const message = err instanceof Error ? err.message : "Failed to place bet";
+            setError(message);
+            if (message.toLowerCase().includes("deadline passed") || message.toLowerCase().includes("betting window closed")) {
+                setForceClosed(true);
+                setForceClosedReason("Betting closed for this round");
+            }
         } finally {
             setPlacing(false);
         }
-    }, [selectedBot, betAmount, matchId, placing, bettorAddress, connect, publicKey, onchainPoolId, getContractSigner]);
-
-    const handleRevealBet = useCallback(async () => {
-        if (!userBet || revealing) return;
-        setRevealing(true);
-        setError(null);
-        try {
-            const address = bettorAddress;
-            if (!address) throw new Error("Connect wallet first");
-            if (!onchainPoolId) throw new Error("On-chain pool missing");
-            if (!userBet.reveal_salt) throw new Error("Missing reveal salt for this bet");
-
-            let contractSigner;
-            try {
-                contractSigner = getContractSigner();
-            } catch {
-                contractSigner = undefined;
-            }
-            if (!contractSigner) throw new Error("Wallet signer unavailable");
-
-            const revealed = await revealBetOnChain({
-                poolId: onchainPoolId,
-                bettor: address,
-                side: userBet.bet_on,
-                saltHex: userBet.reveal_salt,
-                signer: contractSigner,
-            });
-
-            await fetch(`${API_BASE}/api/bot-betting/reveal`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    matchId,
-                    bettorAddress: address,
-                    revealTxId: revealed.txHash,
-                }),
-            });
-
-            setUserBet((prev: any) => prev ? { ...prev, revealed: true, reveal_tx_id: revealed.txHash } : prev);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to reveal bet");
-        } finally {
-            setRevealing(false);
-        }
-    }, [userBet, revealing, bettorAddress, onchainPoolId, matchId, getContractSigner]);
-
-    const handleClaimPayout = useCallback(async () => {
-        if (!userBet || claiming) return;
-        setClaiming(true);
-        setError(null);
-        try {
-            const address = bettorAddress;
-            if (!address) throw new Error("Connect wallet first");
-            if (!onchainPoolId) throw new Error("On-chain pool missing");
-
-            let contractSigner;
-            try {
-                contractSigner = getContractSigner();
-            } catch {
-                contractSigner = undefined;
-            }
-            if (!contractSigner) throw new Error("Wallet signer unavailable");
-
-            const claimed = await claimPayoutOnChain({
-                poolId: onchainPoolId,
-                bettor: address,
-                signer: contractSigner,
-            });
-
-            await fetch(`${API_BASE}/api/bot-betting/claim`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    matchId,
-                    bettorAddress: address,
-                    claimTxId: claimed.txHash,
-                    payoutAmount: claimed.payoutAmount ? claimed.payoutAmount.toString() : null,
-                }),
-            });
-
-            setUserBet((prev: any) => prev ? {
-                ...prev,
-                claim_tx_id: claimed.txHash,
-                payout_amount: claimed.payoutAmount ? claimed.payoutAmount.toString() : prev.payout_amount,
-            } : prev);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to claim payout");
-        } finally {
-            setClaiming(false);
-        }
-    }, [userBet, claiming, bettorAddress, onchainPoolId, matchId, getContractSigner]);
+    }, [selectedBot, betAmount, placing, isBettingOpen, bettingSecondsRemaining, bettorAddress, connect, publicKey, onchainPoolId, matchId, getContractSigner]);
 
     const stakeAmount = betAmount ? xlmToStroops(parseFloat(betAmount) || 0) : 0n;
     const houseFee = stakeAmount > 0n ? calculateHouseFee(stakeAmount) : 0n;
     const totalCost = stakeAmount > 0n ? calculateHouseTotalCost(stakeAmount) : 0n;
     const housePayout = stakeAmount > 0n ? calculateHousePayout(stakeAmount) : 0n;
 
-    const canBet = isBettingOpen && !betPlaced;
-    const canReveal = !isBettingOpen && !!betPlaced && !!userBet && !userBet.revealed;
-    const canClaim = !!userBet && userBet.revealed && userBet.status === "won" && !userBet.claim_tx_id;
+    const canBet = isBettingOpen && !forceClosed && !betPlaced;
+    const hasClaimRecorded = Boolean(userBet?.claim_tx_id);
+    const autoSettling = !!userBet && !isBettingOpen && !userBet.revealed;
+    const autoClaiming = !!userBet && userBet.revealed && userBet.status === "won" && !hasClaimRecorded;
 
     // Countdown timer display
     const minutes = Math.floor(bettingSecondsRemaining / 60);
@@ -268,358 +239,210 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
     const timerDisplay = `${minutes}:${String(seconds).padStart(2, "0")}`;
     const isTimeLow = bettingSecondsRemaining <= 10;
 
+    if (!canBet && !betPlaced) {
+        return (
+            <div className="bg-black/60 backdrop-blur-sm rounded-xl border border-gray-600/30 p-4">
+                <div className="text-center">
+                    <div className="text-red-400 font-orbitron text-sm mb-2 flex items-center justify-center gap-2">
+                        <HugeiconsIcon icon={LockKeyIcon} className="w-4 h-4" /> BETTING CLOSED
+                    </div>
+                    <div className="mt-3 text-xs text-gray-500">
+                        {forceClosedReason || "Wait for the next match to place bets"}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
-        <div
-            style={{
-                borderRadius: "12px",
-                background: "rgba(0, 0, 0, 0.6)",
-                border: `1px solid ${isTimeLow && canBet ? "rgba(239, 68, 68, 0.4)" : "rgba(249, 115, 22, 0.25)"}`,
-                backdropFilter: "blur(12px)",
-                overflow: "hidden",
-                transition: "border-color 0.3s",
-            }}
+        <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-black/60 backdrop-blur-sm rounded-xl border border-orange-500/30 p-3 sm:p-4"
         >
             {/* Header */}
-            <div
-                style={{
-                    padding: "14px 16px",
-                    background: "linear-gradient(to right, rgba(249, 115, 22, 0.2), rgba(234, 179, 8, 0.1), transparent)",
-                    borderBottom: "1px solid rgba(249, 115, 22, 0.2)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                }}
-            >
-                <span
-                    style={{
-                        color: "#fb923c",
-                        fontFamily: "'Orbitron', sans-serif",
-                        fontSize: "13px",
-                        fontWeight: 700,
-                        letterSpacing: "0.08em",
-                    }}
-                >
-                    🤖 BOT BETTING
-                </span>
-                {/* Countdown */}
-                {canBet && (
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <div
-                            style={{
-                                width: "8px",
-                                height: "8px",
-                                borderRadius: "50%",
-                                background: isTimeLow ? "#ef4444" : "#22c55e",
-                                animation: isTimeLow ? "pulse 0.5s infinite" : "pulse 2s infinite",
-                            }}
-                        />
-                        <span
-                            style={{
-                                fontFamily: "'Orbitron', sans-serif",
-                                fontSize: "14px",
-                                fontWeight: 700,
-                                color: isTimeLow ? "#ef4444" : "#22c55e",
-                            }}
-                        >
-                            {timerDisplay}
-                        </span>
-                    </div>
-                )}
+            <div className="flex items-center justify-between mb-4">
+                <h3 className="text-orange-400 font-orbitron text-xs sm:text-sm font-bold tracking-wider flex items-center gap-2">
+                    <ClashShardsIcon className="w-4 h-4 sm:w-5 sm:h-5" /> BOT BETTING
+                </h3>
+                <div className="flex items-center gap-2">
+                    <HugeiconsIcon icon={Time03Icon} className="w-4 h-4 text-orange-400" />
+                    <span className={`text-xs font-mono font-bold ${isTimeLow ? "text-red-400" : bettingSecondsRemaining <= 10 ? "text-yellow-400" : "text-green-400"}`}>
+                        {timerDisplay}
+                    </span>
+                </div>
             </div>
 
-            <div style={{ padding: "16px" }}>
-                {betPlaced ? (
-                    <div style={{ textAlign: "center", padding: "24px 0" }}>
-                        <div style={{ fontSize: "40px", marginBottom: "12px" }}>✅</div>
-                        <p style={{ color: "#22c55e", fontFamily: "'Orbitron', sans-serif", fontSize: "14px", fontWeight: 700 }}>
-                            BET PLACED!
-                        </p>
-                        <p style={{ color: "#9ca3af", fontSize: "12px", marginTop: "8px" }}>
-                            Watch the battle to see the result!
-                        </p>
+            {/* House Model Badge */}
+            <div className="mb-4 p-2 bg-gradient-to-r from-yellow-500/10 to-orange-500/10 rounded-lg border border-yellow-500/30">
+                <div className="text-center">
+                    <div className="text-yellow-400 font-orbitron text-lg font-bold">2x PAYOUT</div>
+                    <div className="text-xs text-gray-400">Fixed odds • 1% fee • Win double your bet!</div>
+                </div>
+            </div>
 
-                        {canReveal && (
-                            <button
-                                onClick={handleRevealBet}
-                                disabled={revealing || isConnecting}
-                                style={{
-                                    width: "100%",
-                                    padding: "10px",
-                                    borderRadius: "8px",
-                                    marginTop: "12px",
-                                    background: "rgba(59, 130, 246, 0.2)",
-                                    color: "#93c5fd",
-                                    fontFamily: "'Orbitron', sans-serif",
-                                    fontSize: "13px",
-                                    fontWeight: 700,
-                                    border: "1px solid rgba(59, 130, 246, 0.45)",
-                                    cursor: revealing || isConnecting ? "not-allowed" : "pointer",
-                                    opacity: revealing || isConnecting ? 0.6 : 1,
-                                }}
-                            >
-                                {revealing ? "REVEALING..." : "REVEAL BET"}
-                            </button>
-                        )}
+            {betPlaced ? (
+                <div className="text-center py-5">
+                    <div className="text-4xl mb-2">✅</div>
+                    <p className="text-green-400 font-orbitron text-sm font-bold">
+                        BET PLACED!
+                    </p>
+                    <p className="text-gray-400 text-xs mt-2">
+                        Watch the battle to see the result!
+                    </p>
 
-                        {canClaim && (
-                            <button
-                                onClick={handleClaimPayout}
-                                disabled={claiming || isConnecting}
-                                style={{
-                                    width: "100%",
-                                    padding: "10px",
-                                    borderRadius: "8px",
-                                    marginTop: "8px",
-                                    background: "rgba(34, 197, 94, 0.2)",
-                                    color: "#22c55e",
-                                    fontFamily: "'Orbitron', sans-serif",
-                                    fontSize: "13px",
-                                    fontWeight: 700,
-                                    border: "1px solid rgba(34, 197, 94, 0.45)",
-                                    cursor: claiming || isConnecting ? "not-allowed" : "pointer",
-                                    opacity: claiming || isConnecting ? 0.6 : 1,
-                                }}
-                            >
-                                {claiming ? "CLAIMING..." : "CLAIM PAYOUT"}
-                            </button>
-                        )}
-                    </div>
-                ) : !isBettingOpen ? (
-                    <div style={{ textAlign: "center", padding: "24px 0" }}>
-                        <div style={{ fontSize: "40px", marginBottom: "12px" }}>🔒</div>
-                        <p style={{ color: "#9ca3af", fontFamily: "'Orbitron', sans-serif", fontSize: "14px" }}>
-                            BETTING CLOSED
+                    {autoSettling && (
+                        <p className="text-blue-300 text-xs mt-3">
+                            Settling bet automatically...
                         </p>
-                        <p style={{ color: "#6b7280", fontSize: "12px", marginTop: "8px" }}>
-                            Wait for the next match to bet
+                    )}
+                    {autoClaiming && (
+                        <p className="text-green-400 text-xs mt-3">
+                            Processing payout automatically...
                         </p>
-                    </div>
-                ) : (
-                    <>
-                        {/* Bot Selection */}
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "16px" }}>
-                            {(["player1", "player2"] as const).map((bot) => {
-                                const isSelected = selectedBot === bot;
-                                const botOdds = 2.0;
-                                const percentage = 50;
-                                const name = bot === "player1" ? bot1Name : bot2Name;
-                                const color = bot === "player1" ? "#fb923c" : "#fbbf24";
-
-                                return (
-                                    <button
-                                        key={bot}
-                                        onClick={() => setSelectedBot(bot)}
-                                        style={{
-                                            padding: "12px",
-                                            borderRadius: "8px",
-                                            border: `2px solid ${isSelected ? color : "rgba(75, 85, 99, 0.3)"}`,
-                                            background: isSelected ? `${color}22` : "rgba(17, 24, 39, 0.6)",
-                                            cursor: "pointer",
-                                            transition: "all 0.2s",
-                                            textAlign: "center",
-                                        }}
-                                    >
-                                        <p style={{ fontSize: "16px", marginBottom: "4px" }}>🤖</p>
-                                        <p
-                                            style={{
-                                                color: isSelected ? color : "#d1d5db",
-                                                fontFamily: "'Orbitron', sans-serif",
-                                                fontSize: "11px",
-                                                fontWeight: 700,
-                                                overflow: "hidden",
-                                                textOverflow: "ellipsis",
-                                                whiteSpace: "nowrap",
-                                            }}
-                                        >
-                                            {name}
-                                        </p>
-                                        <p style={{ color: "#6b7280", fontSize: "11px", marginTop: "4px" }}>
-                                            {formatOdds(botOdds)} • {percentage.toFixed(0)}%
-                                        </p>
-                                    </button>
-                                );
-                            })}
-                        </div>
-
-                        <div
-                            style={{
-                                padding: "8px 10px",
-                                borderRadius: "8px",
-                                background: "rgba(249, 115, 22, 0.08)",
-                                border: "1px solid rgba(249, 115, 22, 0.3)",
-                                color: "#fdba74",
-                                fontSize: "11px",
-                                marginBottom: "12px",
-                                textAlign: "center",
-                            }}
+                    )}
+                    {hasClaimRecorded && (
+                        <p className="text-green-400 text-xs mt-3">
+                            Payout completed ✅
+                        </p>
+                    )}
+                </div>
+            ) : (
+                <>
+                    {/* Bot Selection */}
+                    <div className="grid grid-cols-2 gap-2 sm:gap-3 mb-4">
+                        <button
+                            onClick={() => setSelectedBot("player1")}
+                            className={`relative p-2 sm:p-3 rounded-lg border-2 transition-all ${selectedBot === "player1"
+                                ? "border-orange-400 bg-orange-500/20"
+                                : "border-gray-700 bg-gray-800/50 hover:border-orange-400/50"
+                                }`}
                         >
-                            House odds: 2.00x • Fee: 1% (you pay stake + fee)
-                        </div>
+                            <div className="text-xs text-gray-400 mb-1 truncate flex items-center justify-center gap-1">
+                                <HugeiconsIcon icon={RoboticIcon} className="w-3 h-3" /> {bot1Name}
+                            </div>
+                            <div className="text-lg sm:text-xl font-bold text-orange-400 font-orbitron">
+                                2.00x
+                            </div>
+                            <div className="text-xs text-gray-500">Win double!</div>
+                        </button>
 
-                        {/* Amount Input */}
-                        <div style={{ marginBottom: "12px" }}>
-                            <label style={{ fontSize: "11px", color: "#9ca3af", marginBottom: "4px", display: "block" }}>
-                                Amount (XLM)
-                            </label>
-                            <input
-                                type="number"
-                                value={betAmount}
-                                onChange={(e) => setBetAmount(e.target.value)}
-                                placeholder="0.00"
-                                min="0.01"
-                                step="0.01"
-                                style={{
-                                    width: "100%",
-                                    padding: "10px 12px",
-                                    borderRadius: "8px",
-                                    background: "rgba(17, 24, 39, 0.8)",
-                                    border: "1px solid #374151",
-                                    color: "#fff",
-                                    fontSize: "16px",
-                                    fontFamily: "'Orbitron', sans-serif",
-                                    outline: "none",
-                                    boxSizing: "border-box",
-                                }}
-                            />
-                        </div>
+                        <button
+                            onClick={() => setSelectedBot("player2")}
+                            className={`relative p-2 sm:p-3 rounded-lg border-2 transition-all ${selectedBot === "player2"
+                                ? "border-cyan-400 bg-cyan-500/20"
+                                : "border-gray-700 bg-gray-800/50 hover:border-cyan-400/50"
+                                }`}
+                        >
+                            <div className="text-xs text-gray-400 mb-1 truncate flex items-center justify-center gap-1">
+                                <HugeiconsIcon icon={RoboticIcon} className="w-3 h-3" /> {bot2Name}
+                            </div>
+                            <div className="text-lg sm:text-xl font-bold text-cyan-400 font-orbitron">
+                                2.00x
+                            </div>
+                            <div className="text-xs text-gray-500">Win double!</div>
+                        </button>
+                    </div>
 
-                        {/* Quick Bets */}
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "16px" }}>
+                    <div className="mb-4">
+                        <label className="text-xs text-gray-400 mb-2 block">Bet Amount (XLM)</label>
+                        <input
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={betAmount}
+                            onChange={(e) => setBetAmount(e.target.value)}
+                            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white font-orbitron focus:border-orange-500 focus:outline-none"
+                        />
+
+                        <div className="flex gap-1 flex-wrap mt-2">
                             {QUICK_BETS.map((amount) => (
                                 <button
                                     key={amount}
                                     onClick={() => setBetAmount(String(amount))}
-                                    style={{
-                                        padding: "4px 10px",
-                                        borderRadius: "6px",
-                                        background: "rgba(17, 24, 39, 0.8)",
-                                        border: "1px solid #374151",
-                                        color: "#d1d5db",
-                                        fontSize: "12px",
-                                        cursor: "pointer",
-                                    }}
+                                    className="px-2 py-1 text-xs rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
                                 >
                                     {amount} XLM
                                 </button>
                             ))}
                         </div>
+                    </div>
 
-                        {/* Potential Winnings */}
-                        {stakeAmount > 0n && parseFloat(betAmount) > 0 && (
-                            <div
-                                style={{
-                                    padding: "10px 12px",
-                                    borderRadius: "8px",
-                                    background: "rgba(34, 197, 94, 0.1)",
-                                    border: "1px solid rgba(34, 197, 94, 0.3)",
-                                    marginBottom: "16px",
-                                }}
-                            >
-                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px" }}>
-                                    <span style={{ color: "#9ca3af" }}>Potential Payout (2x)</span>
-                                    <span style={{ color: "#22c55e", fontWeight: 700 }}>{formatXlm(housePayout)}</span>
+                    {stakeAmount > 0n && parseFloat(betAmount) > 0 && (
+                        <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 rounded-lg p-3 mb-4 border border-green-500/30">
+                            <div className="flex justify-between items-center">
+                                <div>
+                                    <div className="text-xs text-gray-400 mb-1">If you win</div>
+                                    <div className="text-xl font-bold text-green-400 font-orbitron">
+                                        {formatXlm(housePayout)}
+                                    </div>
                                 </div>
-                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginTop: "4px" }}>
-                                    <span style={{ color: "#9ca3af" }}>Fee (1%)</span>
-                                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>{formatXlm(houseFee)}</span>
-                                </div>
-                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginTop: "4px" }}>
-                                    <span style={{ color: "#9ca3af" }}>Total Charged</span>
-                                    <span style={{ color: "#e5e7eb", fontWeight: 700 }}>{formatXlm(totalCost)}</span>
+                                <div className="text-right">
+                                    <div className="text-xs text-gray-500">You send</div>
+                                    <div className="text-xs text-orange-400 font-mono">
+                                        {formatXlm(totalCost)}
+                                    </div>
+                                    <div className="text-xs text-gray-500 mt-1">
+                                        (stake + {formatXlm(houseFee)} fee)
+                                    </div>
                                 </div>
                             </div>
-                        )}
+                        </div>
+                    )}
 
-                        {/* Error */}
+                    <AnimatePresence>
                         {error && (
-                            <p style={{ color: "#ef4444", fontSize: "12px", marginBottom: "8px", textAlign: "center" }}>{error}</p>
-                        )}
-
-                        {/* Place Bet */}
-                        <button
-                            onClick={handlePlaceBet}
-                            disabled={!selectedBot || !betAmount || placing || isConnecting}
-                            style={{
-                                width: "100%",
-                                padding: "12px",
-                                borderRadius: "8px",
-                                background: selectedBot
-                                    ? "linear-gradient(to right, #f97316, #f59e0b)"
-                                    : "rgba(75, 85, 99, 0.5)",
-                                color: "#fff",
-                                fontFamily: "'Orbitron', sans-serif",
-                                fontSize: "14px",
-                                fontWeight: 700,
-                                letterSpacing: "0.08em",
-                                border: "none",
-                                cursor: selectedBot && betAmount && !placing && !isConnecting ? "pointer" : "not-allowed",
-                                opacity: selectedBot && betAmount && !placing && !isConnecting ? 1 : 0.5,
-                            }}
-                        >
-                            {isConnecting
-                                ? "CONNECTING WALLET..."
-                                : placing
-                                    ? "PLACING..."
-                                    : isConnected
-                                        ? "PLACE BET"
-                                        : "CONNECT WALLET & BET"}
-                        </button>
-
-                        {canReveal && (
-                            <button
-                                onClick={handleRevealBet}
-                                disabled={revealing || isConnecting}
-                                style={{
-                                    width: "100%",
-                                    padding: "10px",
-                                    borderRadius: "8px",
-                                    marginTop: "8px",
-                                    background: "rgba(59, 130, 246, 0.2)",
-                                    color: "#93c5fd",
-                                    fontFamily: "'Orbitron', sans-serif",
-                                    fontSize: "13px",
-                                    fontWeight: 700,
-                                    border: "1px solid rgba(59, 130, 246, 0.45)",
-                                    cursor: revealing || isConnecting ? "not-allowed" : "pointer",
-                                    opacity: revealing || isConnecting ? 0.6 : 1,
-                                }}
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="text-red-400 text-sm mb-3 p-2 bg-red-500/10 rounded"
                             >
-                                {revealing ? "REVEALING..." : "REVEAL BET"}
-                            </button>
+                                {error}
+                            </motion.div>
                         )}
-
-                        {canClaim && (
-                            <button
-                                onClick={handleClaimPayout}
-                                disabled={claiming || isConnecting}
-                                style={{
-                                    width: "100%",
-                                    padding: "10px",
-                                    borderRadius: "8px",
-                                    marginTop: "8px",
-                                    background: "rgba(34, 197, 94, 0.2)",
-                                    color: "#22c55e",
-                                    fontFamily: "'Orbitron', sans-serif",
-                                    fontSize: "13px",
-                                    fontWeight: 700,
-                                    border: "1px solid rgba(34, 197, 94, 0.45)",
-                                    cursor: claiming || isConnecting ? "not-allowed" : "pointer",
-                                    opacity: claiming || isConnecting ? 0.6 : 1,
-                                }}
+                        {success && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="text-green-400 text-sm mb-3 p-2 bg-green-500/10 rounded flex items-center gap-2"
                             >
-                                {claiming ? "CLAIMING..." : "CLAIM PAYOUT"}
-                            </button>
+                                <HugeiconsIcon icon={Tick02Icon} className="w-4 h-4" /> {success}
+                            </motion.div>
                         )}
-                    </>
-                )}
-            </div>
+                    </AnimatePresence>
 
-            <style>{`
-                @keyframes pulse {
-                    0%, 100% { opacity: 1; }
-                    50% { opacity: 0.3; }
-                }
-            `}</style>
-        </div>
+                    <button
+                        onClick={handlePlaceBet}
+                        disabled={!selectedBot || !betAmount || placing || isConnecting}
+                        className="w-full bg-gradient-to-r from-orange-500 to-orange-600 text-white font-orbitron hover:opacity-90 disabled:opacity-50 rounded-lg py-3 font-bold"
+                    >
+                        {isConnecting
+                            ? "CONNECTING WALLET..."
+                            : placing
+                                ? "PLACING BET..."
+                                : isConnected
+                                    ? `Bet ${betAmount || "0"} XLM on ${selectedBot === "player1" ? bot1Name : bot2Name}`
+                                    : "CONNECT WALLET"}
+                    </button>
+
+                    <div className="text-center text-xs text-gray-500 mt-2">
+                        House betting • Fixed 2x payout • 1% fee
+                    </div>
+
+                    {autoSettling && (
+                        <p className="text-blue-300 text-xs mt-2 text-center">
+                            Settling bet automatically...
+                        </p>
+                    )}
+                    {autoClaiming && (
+                        <p className="text-green-400 text-xs mt-2 text-center">
+                            Processing payout automatically...
+                        </p>
+                    )}
+                </>
+            )}
+        </motion.div>
     );
 }

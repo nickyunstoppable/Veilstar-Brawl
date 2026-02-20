@@ -53,8 +53,12 @@ export interface RoundResolutionInput {
     player2Move: MoveType;
     player1Health: number;
     player2Health: number;
+    player1MaxHealth?: number;
+    player2MaxHealth?: number;
     player1Energy: number;
     player2Energy: number;
+    player1MaxEnergy?: number;
+    player2MaxEnergy?: number;
     player1Guard: number;
     player2Guard: number;
 }

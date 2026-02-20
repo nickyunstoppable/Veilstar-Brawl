@@ -384,6 +384,31 @@ impl ZkBettingContract {
     ) -> Result<(), Error> {
         bettor.require_auth();
 
+        Self::reveal_bet_internal(env, pool_id, bettor, side, salt)
+    }
+
+    /// Admin reveal path for house-managed bot betting flow.
+    /// Uses bettor commitment + provided side/salt but does not require bettor auth.
+    pub fn admin_reveal_bet(
+        env: Env,
+        pool_id: u32,
+        bettor: Address,
+        side: BetSide,
+        salt: BytesN<32>,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        Self::reveal_bet_internal(env, pool_id, bettor, side, salt)
+    }
+
+    fn reveal_bet_internal(
+        env: Env,
+        pool_id: u32,
+        bettor: Address,
+        side: BetSide,
+        salt: BytesN<32>,
+    ) -> Result<(), Error> {
+
         let pool_key = DataKey::Pool(pool_id);
         let mut pool: BetPool = env
             .storage()
@@ -559,12 +584,21 @@ impl ZkBettingContract {
     /// House model payout:
     /// - Winning revealed bet gets fixed `2x` of stake amount.
     /// - Losing or unrevealed bet gets no payout.
-    pub fn claim_payout(
-        env: Env,
-        pool_id: u32,
-        bettor: Address,
-    ) -> Result<i128, Error> {
+    pub fn claim_payout(env: Env, pool_id: u32, bettor: Address) -> Result<i128, Error> {
         bettor.require_auth();
+
+        Self::claim_payout_internal(env, pool_id, bettor)
+    }
+
+    /// Admin claim path for house-managed bot betting flow.
+    /// Transfers payout directly to bettor without requiring bettor auth.
+    pub fn admin_claim_payout(env: Env, pool_id: u32, bettor: Address) -> Result<i128, Error> {
+        Self::require_admin(&env)?;
+
+        Self::claim_payout_internal(env, pool_id, bettor)
+    }
+
+    fn claim_payout_internal(env: Env, pool_id: u32, bettor: Address) -> Result<i128, Error> {
 
         let pool_key = DataKey::Pool(pool_id);
         let pool: BetPool = env

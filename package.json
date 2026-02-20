@@ -18,6 +18,7 @@
     "server": "bun run server/index.ts",
     "dev:zk": "bun --watch run zk_service/index.ts",
     "zk": "bun run zk_service/index.ts",
+    "smoke:bot-betting": "bun run scripts/bot-betting-smoke.ts",
     "zk:vkid": "bun run scripts/zk-vk-id.ts",
     "zk:onchain:setup": "bun run scripts/zk-onchain-setup.ts",
     "fly:secrets:sync": "bun run scripts/sync-fly-secrets.ts --app veilstar-brawl-zk",

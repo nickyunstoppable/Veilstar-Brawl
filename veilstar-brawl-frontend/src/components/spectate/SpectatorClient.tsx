@@ -57,7 +57,9 @@ export function SpectatorClient({ matchId }: SpectatorClientProps) {
     const [matchEnded, setMatchEnded] = useState(false);
     const [winner, setWinner] = useState<string | null>(null);
     const [showWinNotification, setShowWinNotification] = useState(false);
-    const [winAmount, setWinAmount] = useState<bigint>(0n);
+    const [winAmount, setWinAmount] = useState<number>(0);
+    const [winPrediction, setWinPrediction] = useState<"player1" | "player2" | "bot1" | "bot2">("player1");
+    const [winWinnerName, setWinWinnerName] = useState<string>("");
     const matchEndedRef = useRef(false);
 
     // Fetch match data
@@ -112,7 +114,19 @@ export function SpectatorClient({ matchId }: SpectatorClientProps) {
                 .then(res => res.json())
                 .then(data => {
                     if (data.userBet && data.userBet.status === "won" && data.userBet.payout_amount) {
-                        setWinAmount(BigInt(data.userBet.payout_amount));
+                        const payoutStroops = BigInt(data.userBet.payout_amount);
+                        const payoutXlm = Number(payoutStroops) / 10000000;
+                        setWinAmount(payoutXlm);
+                        
+                        const prediction = data.userBet.bet_on as "player1" | "player2";
+                        setWinPrediction(prediction);
+                        
+                        // We need to get the names from the match state, but we are in a callback.
+                        // We can use the payload or just set a generic name if we don't have it.
+                        // Actually, we can just use the current match state if we use a ref or just rely on the render.
+                        // Let's just set it to "Player 1" or "Player 2" for now, or we can use the match state if we add it to deps.
+                        setWinWinnerName(prediction === "player1" ? "Player 1" : "Player 2");
+                        
                         setShowWinNotification(true);
                     }
                 })
@@ -410,7 +424,13 @@ export function SpectatorClient({ matchId }: SpectatorClientProps) {
             </div>
 
             {/* Win Notification */}
-            <WinningNotification isOpen={showWinNotification} winAmount={winAmount} onClose={() => setShowWinNotification(false)} />
+            <WinningNotification
+                show={showWinNotification}
+                amount={winAmount}
+                prediction={winPrediction}
+                winnerName={winPrediction === "player1" ? player1Name : player2Name}
+                onClose={() => setShowWinNotification(false)}
+            />
 
             <style>{`
                 @keyframes spin { to { transform: rotate(360deg); } }

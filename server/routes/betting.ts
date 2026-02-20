@@ -4,9 +4,67 @@
  */
 
 import { getSupabase } from "../lib/supabase";
-import { createOnChainBotPool, isZkBettingConfigured } from "../lib/zk-betting-contract";
+import { getActiveMatch } from "../lib/bot-match-service";
 
-const onchainPoolCreateInFlight = new Set<string>();
+const lastBotPoolSnapshotLog = new Map<string, string>();
+
+async function reconcileBotBetStatusIfResolved(params: {
+    poolId: string;
+    bettorAddress: string;
+}): Promise<void> {
+    const supabase = getSupabase();
+
+    const { data: pool } = await supabase
+        .from("betting_pools")
+        .select("status,winner")
+        .eq("id", params.poolId)
+        .eq("match_type", "bot")
+        .single();
+
+    if (!pool || pool.status !== "resolved" || !pool.winner) return;
+
+    const { data: bet } = await supabase
+        .from("bets")
+        .select("id,status,bet_on,revealed,claim_tx_id")
+        .eq("pool_id", params.poolId)
+        .eq("bettor_address", params.bettorAddress)
+        .single();
+
+    if (!bet) return;
+
+    if (bet?.claim_tx_id && String(bet.claim_tx_id).startsWith("auto-claim:")) {
+        await supabase
+            .from("bets")
+            .update({ claim_tx_id: null })
+            .eq("id", bet.id);
+    }
+
+    const nextStatus = bet.revealed && bet.bet_on === pool.winner ? "won" : "lost";
+
+    if (bet.status === nextStatus) return;
+
+    console.log("[BotBetting][Reconcile] Updating bet status", {
+        poolId: params.poolId,
+        bettorAddress: params.bettorAddress,
+        from: bet.status,
+        to: nextStatus,
+        betOn: bet.bet_on,
+        revealed: bet.revealed,
+        poolWinner: pool.winner,
+    });
+
+    const updatePayload: Record<string, unknown> = { status: nextStatus };
+    if (nextStatus === "lost") {
+        updatePayload.payout_amount = null;
+        updatePayload.onchain_payout_amount = null;
+        updatePayload.claim_tx_id = null;
+    }
+
+    await supabase
+        .from("bets")
+        .update(updatePayload)
+        .eq("id", bet.id);
+}
 
 // =============================================================================
 // PvP Betting
@@ -51,6 +109,11 @@ export async function handleGetBettingPool(matchId: string, req: Request): Promi
         // Check user's bet
         let userBet = null;
         if (bettorAddress && pool) {
+            await reconcileBotBetStatusIfResolved({
+                poolId: pool.id,
+                bettorAddress,
+            });
+
             const { data: bet } = await supabase
                 .from("bets")
                 .select("*")
@@ -196,34 +259,13 @@ export async function handleGetBotBettingPool(matchId: string, req: Request): Pr
             pool = newPool;
         }
 
-        if (pool && !pool.onchain_pool_id && isZkBettingConfigured()) {
-            const poolKey = String(pool.id);
-            if (!onchainPoolCreateInFlight.has(poolKey)) {
-                onchainPoolCreateInFlight.add(poolKey);
-                void (async () => {
-                    try {
-                        const nowTs = Math.floor(Date.now() / 1000);
-                        const created = await createOnChainBotPool(matchId, nowTs + 30);
-                        await supabase
-                            .from("betting_pools")
-                            .update({
-                                onchain_pool_id: created.poolId,
-                                onchain_status: "open",
-                                onchain_last_tx_id: created.txHash || null,
-                            })
-                            .eq("id", pool.id)
-                            .is("onchain_pool_id", null);
-                    } catch (err) {
-                        console.error("[BotBetting] Failed to create on-chain pool:", err);
-                    } finally {
-                        onchainPoolCreateInFlight.delete(poolKey);
-                    }
-                })();
-            }
-        }
-
         let userBet = null;
         if (bettorAddress && pool) {
+            await reconcileBotBetStatusIfResolved({
+                poolId: pool.id,
+                bettorAddress,
+            });
+
             const { data: bet } = await supabase
                 .from("bets")
                 .select("*")
@@ -231,6 +273,26 @@ export async function handleGetBotBettingPool(matchId: string, req: Request): Pr
                 .eq("bettor_address", bettorAddress)
                 .single();
             userBet = bet;
+
+            const conciseSnapshot = {
+                matchId,
+                poolId: pool.id,
+                poolStatus: pool.status,
+                poolWinner: pool.winner,
+                onchainPoolId: pool.onchain_pool_id,
+                onchainStatus: pool.onchain_status,
+                betStatus: userBet?.status ?? null,
+                betOn: userBet?.bet_on ?? null,
+                revealed: userBet?.revealed ?? null,
+                hasClaimTx: Boolean(userBet?.claim_tx_id),
+            };
+            const snapshotStr = JSON.stringify(conciseSnapshot);
+            const snapshotKey = `${matchId}:${bettorAddress}`;
+            const previousSnapshot = lastBotPoolSnapshotLog.get(snapshotKey);
+            if (previousSnapshot !== snapshotStr) {
+                console.log("[BotBetting][Pool]", conciseSnapshot);
+                lastBotPoolSnapshotLog.set(snapshotKey, snapshotStr);
+            }
         }
 
         return Response.json({ pool, userBet });
@@ -244,6 +306,22 @@ export async function handlePlaceBotBet(req: Request): Promise<Response> {
     try {
         const body = await req.json();
         const { matchId, betOn, amount, bettorAddress, onchainPoolId, txId, commitmentHash, revealSalt } = body;
+
+        const activeMatch = getActiveMatch();
+        if (activeMatch && activeMatch.id !== matchId) {
+            console.warn("[BotBetting][Place] Rejected stale match bet", {
+                requestedMatchId: matchId,
+                activeMatchId: activeMatch.id,
+                bettorAddress,
+            });
+            return Response.json(
+                {
+                    error: "Match expired. Please refresh and bet on the current bot match.",
+                    activeMatchId: activeMatch.id,
+                },
+                { status: 409 }
+            );
+        }
 
         if (!matchId || !betOn || !amount || !bettorAddress) {
             return Response.json({ error: "Missing required fields" }, { status: 400 });
@@ -378,6 +456,30 @@ export async function handleRevealBotBet(req: Request): Promise<Response> {
             .eq("bettor_address", bettorAddress);
 
         if (error) return Response.json({ error: "Failed to mark reveal" }, { status: 500 });
+
+        await reconcileBotBetStatusIfResolved({
+            poolId: pool.id,
+            bettorAddress,
+        });
+
+        const { data: betAfterReveal } = await supabase
+            .from("bets")
+            .select("status,bet_on,revealed,reveal_tx_id,claim_tx_id")
+            .eq("pool_id", pool.id)
+            .eq("bettor_address", bettorAddress)
+            .single();
+
+        console.log("[BotBetting][Reveal] Reveal marked", {
+            matchId,
+            poolId: pool.id,
+            bettorAddress,
+            revealTxId,
+            betStatus: betAfterReveal?.status ?? null,
+            betOn: betAfterReveal?.bet_on ?? null,
+            revealed: betAfterReveal?.revealed ?? null,
+            claimTxId: betAfterReveal?.claim_tx_id ?? null,
+        });
+
         return Response.json({ success: true });
     } catch (error) {
         console.error("[BotBetting] Reveal bet error:", error);
@@ -402,6 +504,41 @@ export async function handleClaimBotBet(req: Request): Promise<Response> {
 
         if (!pool) return Response.json({ error: "Pool not found" }, { status: 404 });
 
+        console.log("[BotBetting][Claim] Claim request", {
+            matchId,
+            poolId: pool.id,
+            bettorAddress,
+            claimTxId,
+            payoutAmount,
+        });
+
+        await reconcileBotBetStatusIfResolved({
+            poolId: pool.id,
+            bettorAddress,
+        });
+
+        const { data: currentBet } = await supabase
+            .from("bets")
+            .select("status,revealed")
+            .eq("pool_id", pool.id)
+            .eq("bettor_address", bettorAddress)
+            .single();
+
+        if (!currentBet) {
+            return Response.json({ error: "Bet not found" }, { status: 404 });
+        }
+
+        if (!currentBet.revealed || currentBet.status !== "won") {
+            console.warn("[BotBetting][Claim] Bet not claimable", {
+                matchId,
+                poolId: pool.id,
+                bettorAddress,
+                status: currentBet.status,
+                revealed: currentBet.revealed,
+            });
+            return Response.json({ error: "Bet is not claimable yet" }, { status: 400 });
+        }
+
         const updatePayload: Record<string, unknown> = {
             claim_tx_id: claimTxId,
             status: "won",
@@ -418,9 +555,90 @@ export async function handleClaimBotBet(req: Request): Promise<Response> {
             .eq("bettor_address", bettorAddress);
 
         if (error) return Response.json({ error: "Failed to mark claim" }, { status: 500 });
+
+        console.log("[BotBetting][Claim] Claim recorded", {
+            matchId,
+            poolId: pool.id,
+            bettorAddress,
+            claimTxId,
+            payoutAmount: updatePayload.payout_amount ?? null,
+        });
+
         return Response.json({ success: true });
     } catch (error) {
         console.error("[BotBetting] Claim bet error:", error);
         return Response.json({ error: "Failed to claim bet" }, { status: 500 });
+    }
+}
+
+export async function handleGetUnresolvedBotBets(req: Request): Promise<Response> {
+    try {
+        const supabase = getSupabase();
+        const url = new URL(req.url);
+        const bettorAddress = url.searchParams.get("address");
+
+        if (!bettorAddress) {
+            return Response.json({ error: "address is required" }, { status: 400 });
+        }
+
+        const { data: bets } = await supabase
+            .from("bets")
+            .select("id,pool_id,bet_on,reveal_salt,revealed,claim_tx_id,status")
+            .eq("bettor_address", bettorAddress)
+            .is("claim_tx_id", null)
+            .not("reveal_salt", "is", null)
+            .limit(50);
+
+        if (!bets || bets.length === 0) {
+            return Response.json({ unresolved: [] });
+        }
+
+        const poolIds = Array.from(new Set(bets.map((bet) => bet.pool_id).filter(Boolean)));
+        const { data: pools } = await supabase
+            .from("betting_pools")
+            .select("id,match_id,match_type,status,winner,onchain_pool_id,onchain_status")
+            .in("id", poolIds)
+            .eq("match_type", "bot")
+            .not("onchain_pool_id", "is", null);
+
+        const poolById = new Map((pools || []).map((pool) => [pool.id, pool]));
+
+        const unresolved = (bets || [])
+            .map((bet) => {
+                const pool = poolById.get(bet.pool_id);
+                if (!pool) return null;
+
+                const isSettled = pool.status === "resolved" || pool.onchain_status === "settled";
+                const shouldReveal = isSettled && !bet.revealed;
+                const shouldClaim = isSettled
+                    && !!pool.winner
+                    && bet.bet_on === pool.winner
+                    && !bet.claim_tx_id;
+
+                if (!shouldReveal && !shouldClaim) return null;
+
+                return {
+                    betId: bet.id,
+                    matchId: pool.match_id,
+                    poolId: pool.id,
+                    onchainPoolId: Number(pool.onchain_pool_id),
+                    betOn: bet.bet_on,
+                    revealSalt: bet.reveal_salt,
+                    revealed: bet.revealed,
+                    claimTxId: bet.claim_tx_id,
+                    status: bet.status,
+                    poolStatus: pool.status,
+                    onchainStatus: pool.onchain_status,
+                    poolWinner: pool.winner,
+                    shouldReveal,
+                    shouldClaim,
+                };
+            })
+            .filter(Boolean);
+
+        return Response.json({ unresolved });
+    } catch (error) {
+        console.error("[BotBetting] Unresolved bets error:", error);
+        return Response.json({ error: "Failed to get unresolved bets" }, { status: 500 });
     }
 }

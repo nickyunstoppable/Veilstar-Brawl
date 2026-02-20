@@ -18,10 +18,13 @@ import { getCharacterScale, getCharacterYOffset, getAnimationScale, getSFXKey, g
 import { CHARACTER_ROSTER } from "../../data/characters";
 import type { Character } from "@/types/game";
 import type { PowerSurgeCardId } from "@/types/power-surge";
+import { getDeterministicPowerSurgeCards } from "@/types/power-surge";
 import type { BotTurnData } from "../../lib/chat/fake-chat-service";
 import { SpectatorPowerSurgeCards } from "../ui/SpectatorPowerSurgeCards";
 import { TextFactory } from "../ui/TextFactory";
 import { preloadFightSceneAssets, createCharacterAnimations } from "../utils/asset-loader";
+import { getCharacterCombatStats } from "../combat/CharacterStats";
+import { calculateSurgeEffects } from "../combat/SurgeEffects";
 
 /**
  * Bot battle scene configuration - receives pre-computed match data
@@ -82,6 +85,13 @@ export class BotBattleScene extends Phaser.Scene {
     private bot1RoundsWon: number = 0;
     private bot2RoundsWon: number = 0;
     private currentRound: number = 1;
+    private player1MaxHp: number = 100;
+    private player2MaxHp: number = 100;
+    private player1MaxEnergy: number = 100;
+    private player2MaxEnergy: number = 100;
+    private activeRoundP1Surge: PowerSurgeCardId | null = null;
+    private activeRoundP2Surge: PowerSurgeCardId | null = null;
+    private warnedAboutTurnFallbackData: boolean = false;
 
     // Audio
     private bgmVolume: number = 0.3;
@@ -121,6 +131,14 @@ export class BotBattleScene extends Phaser.Scene {
         // Find characters
         this.bot1Character = CHARACTER_ROSTER.find(c => c.id === data.bot1CharacterId) || CHARACTER_ROSTER[0];
         this.bot2Character = CHARACTER_ROSTER.find(c => c.id === data.bot2CharacterId) || CHARACTER_ROSTER[1];
+
+        // Use real character combat stats (authoritative for UI max values)
+        const p1Stats = getCharacterCombatStats(this.bot1Character.id);
+        const p2Stats = getCharacterCombatStats(this.bot2Character.id);
+        this.player1MaxHp = p1Stats.maxHp;
+        this.player2MaxHp = p2Stats.maxHp;
+        this.player1MaxEnergy = p1Stats.maxEnergy;
+        this.player2MaxEnergy = p2Stats.maxEnergy;
 
         // Log server sync info
         if (data.serverTime && data.elapsedMs !== undefined) {
@@ -202,7 +220,13 @@ export class BotBattleScene extends Phaser.Scene {
      */
     private fastForwardToTurn(targetTurnIndex: number): void {
         for (let i = 0; i < targetTurnIndex && i < this.config.turns.length; i++) {
-            const turn = this.config.turns[i] as BotTurnData & Record<string, unknown>;
+            const turn = this.normalizeTurn(this.config.turns[i], i);
+
+            if (turn.isRoundStart) {
+                const withSurge = this.ensureSurgeData(turn);
+                this.activeRoundP1Surge = withSurge.bot1SurgeSelection;
+                this.activeRoundP2Surge = withSurge.bot2SurgeSelection;
+            }
 
             // Track round wins
             if (turn.isRoundEnd && turn.roundWinner) {
@@ -217,7 +241,7 @@ export class BotBattleScene extends Phaser.Scene {
 
         // Set state from the turn we're starting at
         if (targetTurnIndex > 0 && targetTurnIndex <= this.config.turns.length) {
-            const currentTurn = this.config.turns[targetTurnIndex - 1];
+            const currentTurn = this.normalizeTurn(this.config.turns[targetTurnIndex - 1], targetTurnIndex - 1);
             this.updateUIFromTurn(currentTurn);
             this.roundScoreText.setText(
                 `Round ${this.currentRound}  •  ${this.bot1RoundsWon} - ${this.bot2RoundsWon}  (First to 2)`
@@ -453,7 +477,13 @@ export class BotBattleScene extends Phaser.Scene {
 
         // Process each missed turn
         for (let i = startTurn; i < endTurn; i++) {
-            const turn = this.config.turns[i] as BotTurnData & Record<string, unknown>;
+            const turn = this.normalizeTurn(this.config.turns[i], i);
+
+            if (turn.isRoundStart) {
+                const withSurge = this.ensureSurgeData(turn);
+                this.activeRoundP1Surge = withSurge.bot1SurgeSelection;
+                this.activeRoundP2Surge = withSurge.bot2SurgeSelection;
+            }
 
             // Track round wins
             if (turn.isRoundEnd && turn.roundWinner) {
@@ -470,7 +500,7 @@ export class BotBattleScene extends Phaser.Scene {
 
         // Update UI to reflect current state
         if (this.currentTurnIndex > 0 && this.currentTurnIndex <= this.config.turns.length) {
-            const currentTurn = this.config.turns[this.currentTurnIndex - 1];
+            const currentTurn = this.normalizeTurn(this.config.turns[this.currentTurnIndex - 1], this.currentTurnIndex - 1);
             this.updateUIFromTurn(currentTurn);
             this.roundScoreText.setText(
                 `Round ${this.currentRound}  •  ${this.bot1RoundsWon} - ${this.bot2RoundsWon}  (First to 2)`
@@ -620,7 +650,7 @@ export class BotBattleScene extends Phaser.Scene {
             this,
             UI_POSITIONS.HEALTH_BAR.PLAYER1.X,
             UI_POSITIONS.HEALTH_BAR.PLAYER1.Y - 18,
-            `BOT 1: ${this.config.bot1Name.toUpperCase()} (${this.config.bot1MaxHp} HP)`,
+            `BOT 1: ${this.config.bot1Name.toUpperCase()} (${this.player1MaxHp} HP)`,
             { fontSize: "12px", color: "#ff6b35", fontStyle: "bold" }
         );
 
@@ -628,7 +658,7 @@ export class BotBattleScene extends Phaser.Scene {
             this,
             UI_POSITIONS.HEALTH_BAR.PLAYER2.X + barWidth,
             UI_POSITIONS.HEALTH_BAR.PLAYER2.Y - 18,
-            `BOT 2: ${this.config.bot2Name.toUpperCase()} (${this.config.bot2MaxHp} HP)`,
+            `BOT 2: ${this.config.bot2Name.toUpperCase()} (${this.player2MaxHp} HP)`,
             { fontSize: "12px", color: "#ff6b35", fontStyle: "bold", align: "right" }
         ).setOrigin(1, 0);
 
@@ -647,10 +677,10 @@ export class BotBattleScene extends Phaser.Scene {
         ).setOrigin(0.5).setAlpha(0).setDepth(100);
 
         // Draw initial bars
-        this.updateHealthBarDisplay("player1", this.config.bot1MaxHp, this.config.bot1MaxHp);
-        this.updateHealthBarDisplay("player2", this.config.bot2MaxHp, this.config.bot2MaxHp);
-        this.updateEnergyBarDisplay("player1", this.config.bot1MaxEnergy, this.config.bot1MaxEnergy);
-        this.updateEnergyBarDisplay("player2", this.config.bot2MaxEnergy, this.config.bot2MaxEnergy);
+        this.updateHealthBarDisplay("player1", this.player1MaxHp, this.player1MaxHp);
+        this.updateHealthBarDisplay("player2", this.player2MaxHp, this.player2MaxHp);
+        this.updateEnergyBarDisplay("player1", this.player1MaxEnergy, this.player1MaxEnergy);
+        this.updateEnergyBarDisplay("player2", this.player2MaxEnergy, this.player2MaxEnergy);
         this.updateGuardMeterDisplay("player1", 0);
         this.updateGuardMeterDisplay("player2", 0);
     }
@@ -793,14 +823,13 @@ export class BotBattleScene extends Phaser.Scene {
         }
     }
 
-    private updateUIFromTurn(turn: BotTurnData): void {
-        const t = turn as BotTurnData & Record<string, unknown>;
-        this.updateHealthBarDisplay("player1", turn.bot1Hp, this.config.bot1MaxHp);
-        this.updateHealthBarDisplay("player2", turn.bot2Hp, this.config.bot2MaxHp);
-        this.updateEnergyBarDisplay("player1", (t.bot1Energy as number) ?? 0, this.config.bot1MaxEnergy);
-        this.updateEnergyBarDisplay("player2", (t.bot2Energy as number) ?? 0, this.config.bot2MaxEnergy);
-        this.updateGuardMeterDisplay("player1", (t.bot1GuardMeter as number) ?? 0);
-        this.updateGuardMeterDisplay("player2", (t.bot2GuardMeter as number) ?? 0);
+    private updateUIFromTurn(turn: NormalizedBotTurn): void {
+        this.updateHealthBarDisplay("player1", turn.bot1Hp, this.player1MaxHp);
+        this.updateHealthBarDisplay("player2", turn.bot2Hp, this.player2MaxHp);
+        this.updateEnergyBarDisplay("player1", turn.bot1Energy, this.player1MaxEnergy);
+        this.updateEnergyBarDisplay("player2", turn.bot2Energy, this.player2MaxEnergy);
+        this.updateGuardMeterDisplay("player1", turn.bot1GuardMeter);
+        this.updateGuardMeterDisplay("player2", turn.bot2GuardMeter);
     }
 
     // ==========================================================================
@@ -867,16 +896,30 @@ export class BotBattleScene extends Phaser.Scene {
             return;
         }
 
-        const turn = this.config.turns[this.currentTurnIndex] as BotTurnData & Record<string, unknown>;
+        const turn = this.normalizeTurn(this.config.turns[this.currentTurnIndex], this.currentTurnIndex);
 
-        // Check if this turn has power surge data (first turn of round)
-        if (turn.isRoundStart && turn.surgeCardIds && turn.bot1SurgeSelection && turn.bot2SurgeSelection) {
-            this.showPowerSurgeUI(turn as BotTurnData, () => {
-                this.animateTurn(turn as BotTurnData);
+        // Ensure active surges are available even when joining mid-round
+        if (!turn.isRoundStart) {
+            const roundStartTurn = this.findRoundStartTurn(turn.roundNumber, this.currentTurnIndex);
+            if (roundStartTurn) {
+                const withSurge = this.ensureSurgeData(roundStartTurn);
+                this.activeRoundP1Surge = withSurge.bot1SurgeSelection;
+                this.activeRoundP2Surge = withSurge.bot2SurgeSelection;
+            }
+        }
+
+        // Check if this turn should show power surge (first turn of round)
+        if (turn.isRoundStart) {
+            const withSurge = this.ensureSurgeData(turn);
+            this.activeRoundP1Surge = withSurge.bot1SurgeSelection;
+            this.activeRoundP2Surge = withSurge.bot2SurgeSelection;
+
+            this.showPowerSurgeUI(withSurge, () => {
+                this.animateTurn(withSurge);
                 this.currentTurnIndex++;
             });
         } else {
-            this.animateTurn(turn as BotTurnData);
+            this.animateTurn(turn);
             this.currentTurnIndex++;
         }
     }
@@ -884,9 +927,7 @@ export class BotBattleScene extends Phaser.Scene {
     /**
      * Show power surge card reveal for spectators
      */
-    private showPowerSurgeUI(turn: BotTurnData, onComplete: () => void): void {
-        const t = turn as BotTurnData & Record<string, unknown>;
-
+    private showPowerSurgeUI(turn: NormalizedBotTurn, onComplete: () => void): void {
         // Clean up any existing power surge UI
         if (this.powerSurgeUI) {
             this.powerSurgeUI.destroy();
@@ -898,20 +939,21 @@ export class BotBattleScene extends Phaser.Scene {
         this.narrativeText.setText("");
 
         // Reset HP/Energy/Guard bars for the new round BEFORE showing power surge UI
-        this.updateHealthBarDisplay("player1", this.config.bot1MaxHp, this.config.bot1MaxHp);
-        this.updateHealthBarDisplay("player2", this.config.bot2MaxHp, this.config.bot2MaxHp);
-        this.updateEnergyBarDisplay("player1", this.config.bot1MaxEnergy, this.config.bot1MaxEnergy);
-        this.updateEnergyBarDisplay("player2", this.config.bot2MaxEnergy, this.config.bot2MaxEnergy);
+        this.updateHealthBarDisplay("player1", this.player1MaxHp, this.player1MaxHp);
+        this.updateHealthBarDisplay("player2", this.player2MaxHp, this.player2MaxHp);
+        this.updateEnergyBarDisplay("player1", this.player1MaxEnergy, this.player1MaxEnergy);
+        this.updateEnergyBarDisplay("player2", this.player2MaxEnergy, this.player2MaxEnergy);
         this.updateGuardMeterDisplay("player1", 0);
         this.updateGuardMeterDisplay("player2", 0);
 
         // Create spectator power surge UI
+        const fallbackCard = turn.surgeCardIds[0] ?? "dag-overclock";
         this.powerSurgeUI = new SpectatorPowerSurgeCards({
             scene: this,
             roundNumber: turn.roundNumber,
-            cardIds: t.surgeCardIds as PowerSurgeCardId[],
-            player1Selection: t.bot1SurgeSelection as PowerSurgeCardId,
-            player2Selection: t.bot2SurgeSelection as PowerSurgeCardId,
+            cardIds: turn.surgeCardIds,
+            player1Selection: turn.bot1SurgeSelection ?? fallbackCard,
+            player2Selection: turn.bot2SurgeSelection ?? fallbackCard,
             player1SpriteY: this.player1Sprite.y,
             player2SpriteY: this.player2Sprite.y,
             player1Sprite: this.player1Sprite,
@@ -923,25 +965,75 @@ export class BotBattleScene extends Phaser.Scene {
         });
     }
 
-    private animateTurn(turn: BotTurnData): void {
-        const t = turn as BotTurnData & Record<string, unknown>;
+    private animateTurn(turn: NormalizedBotTurn): void {
         const p1Char = this.bot1Character.id;
         const p2Char = this.bot2Character.id;
         const p1OriginalX = CHARACTER_POSITIONS.PLAYER1.X;
         const p2OriginalX = CHARACTER_POSITIONS.PLAYER2.X;
         const meetingPointX = GAME_DIMENSIONS.CENTER_X;
 
-        // Calculate HP differences for damage display
-        const prevP1Health = this.currentTurnIndex > 0 ?
-            this.config.turns[this.currentTurnIndex - 1].bot1Hp : this.config.bot1MaxHp;
-        const prevP2Health = this.currentTurnIndex > 0 ?
-            this.config.turns[this.currentTurnIndex - 1].bot2Hp : this.config.bot2MaxHp;
-        const p1Damage = Math.max(0, prevP1Health - turn.bot1Hp);
-        const p2Damage = Math.max(0, prevP2Health - turn.bot2Hp);
+        // FightScene-compatible damage source and turn-start stun override
+        const prevTurn = this.currentTurnIndex > 0
+            ? this.normalizeTurn(this.config.turns[this.currentTurnIndex - 1], this.currentTurnIndex - 1)
+            : null;
+        const p1StunnedAtTurnStart = !turn.isRoundStart && Boolean(prevTurn?.bot1IsStunned);
+        const p2StunnedAtTurnStart = !turn.isRoundStart && Boolean(prevTurn?.bot2IsStunned);
 
-        // Check if either player is stunned (from move being "stunned")
-        const p1IsStunned = turn.bot1Move === "stunned";
-        const p2IsStunned = turn.bot2Move === "stunned";
+        const p1Move = p1StunnedAtTurnStart && turn.bot1Move !== "stunned" ? "stunned" : turn.bot1Move;
+        const p2Move = p2StunnedAtTurnStart && turn.bot2Move !== "stunned" ? "stunned" : turn.bot2Move;
+
+        const fallbackP1Damage = Math.max(
+            0,
+            (prevTurn?.bot1Hp ?? this.player1MaxHp) - turn.bot1Hp + Math.max(0, turn.bot1HpRegen) + Math.max(0, turn.bot1Lifesteal)
+        );
+        const fallbackP2Damage = Math.max(
+            0,
+            (prevTurn?.bot2Hp ?? this.player2MaxHp) - turn.bot2Hp + Math.max(0, turn.bot2HpRegen) + Math.max(0, turn.bot2Lifesteal)
+        );
+        const p1Damage = Math.max(0, Math.floor(turn.bot1DamageTakenProvided ? turn.bot1DamageTaken : fallbackP1Damage));
+        const p2Damage = Math.max(0, Math.floor(turn.bot2DamageTakenProvided ? turn.bot2DamageTaken : fallbackP2Damage));
+
+        // Check stun state for this turn's animation flow
+        const p1IsStunned = p1Move === "stunned" || turn.bot1Outcome === "stunned";
+        const p2IsStunned = p2Move === "stunned" || turn.bot2Outcome === "stunned";
+
+        const getAnimDurationMs = (animKey: string, fallbackMs: number): number => {
+            try {
+                if (!this.anims.exists(animKey)) return fallbackMs;
+                const anim = this.anims.get(animKey) as unknown as { duration?: number; frames?: unknown[]; frameRate?: number };
+                const duration = Number(anim?.duration);
+                if (Number.isFinite(duration) && duration > 0) return Math.ceil(duration);
+
+                const frames = Array.isArray(anim?.frames) ? anim.frames.length : Number((anim as Record<string, unknown>)?.frames ?? 0);
+                const frameRate = Number(anim?.frameRate ?? 24);
+                if (Number.isFinite(frames) && frames > 0 && Number.isFinite(frameRate) && frameRate > 0) {
+                    return Math.ceil((frames / frameRate) * 1000);
+                }
+            } catch {
+                // fall back
+            }
+            return fallbackMs;
+        };
+
+        const splitDamageIntoHits = (total: number, hits: number): number[] => {
+            const safeHits = Math.max(1, Math.floor(hits));
+            const safeTotal = Math.max(0, Math.floor(total));
+            const base = Math.floor(safeTotal / safeHits);
+            const remainder = safeTotal % safeHits;
+            return Array.from({ length: safeHits }, (_, i) => base + (i < remainder ? 1 : 0));
+        };
+
+        const surgeForPlayback = calculateSurgeEffects(this.activeRoundP1Surge, this.activeRoundP2Surge);
+        const p1HitCount = (!p1IsStunned
+            && surgeForPlayback.player1Modifiers.doubleHit
+            && surgeForPlayback.player1Modifiers.doubleHitMoves.includes(p1Move))
+            ? 2
+            : 1;
+        const p2HitCount = (!p2IsStunned
+            && surgeForPlayback.player2Modifiers.doubleHit
+            && surgeForPlayback.player2Modifiers.doubleHitMoves.includes(p2Move))
+            ? 2
+            : 1;
 
         // Determine target positions based on stun state (match FightScene exactly)
         let p1TargetX = meetingPointX - 50;
@@ -1009,15 +1101,20 @@ export class BotBattleScene extends Phaser.Scene {
             duration: p2IsStunned ? 0 : 600,
             ease: "Power2",
             onComplete: () => {
-                const p1Move = turn.bot1Move;
-                const p2Move = turn.bot2Move;
-
                 // Helper: P1 Attack animation with damage display
                 const runP1Attack = (): Promise<void> => {
                     return new Promise((resolve) => {
                         if (p1IsStunned) { resolve(); return; }
 
                         const animKey = `${p1Char}_${p1Move}`;
+                        const animDurationMs = getAnimDurationMs(animKey, 1200);
+                        const baseSpacingMs = (p1Move === "punch" || p1Move === "kick") ? 1200 : animDurationMs;
+                        const hitSpacingMs = Math.max(baseSpacingMs, animDurationMs);
+                        const impactMs = Math.min(300, Math.max(120, Math.floor(animDurationMs * 0.25)));
+                        const shouldRepeat = (p1Move === "punch" || p1Move === "kick") && p1HitCount > 1;
+                        const hitCount = shouldRepeat ? p1HitCount : 1;
+                        const damageParts = splitDamageIntoHits(p2Damage, hitCount);
+
                         if (this.anims.exists(animKey) || p1Move === "block") {
                             const scale = getAnimationScale(p1Char, p1Move);
                             this.player1Sprite.setScale(scale);
@@ -1033,31 +1130,35 @@ export class BotBattleScene extends Phaser.Scene {
                             }
                         }
 
-                        if (p2Damage > 0) {
-                            this.time.delayedCall(300, () => {
-                                this.showFloatingText(`-${p2Damage}`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#ff4444");
-                                this.tweens.add({ targets: this.player2Sprite, alpha: 0.5, yoyo: true, duration: 50, repeat: 3 });
-                            });
-                        } else if ((t.bot2Outcome as string) === "missed") {
-                            this.time.delayedCall(300, () => {
-                                this.showFloatingText("DODGE!", p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#8800ff");
-                            });
-                        }
-
-                        if (t.bot2EnergyDrained && (t.bot2EnergyDrained as number) > 0) {
-                            this.time.delayedCall(500, () => {
-                                this.showFloatingText(`-${Math.round(t.bot2EnergyDrained as number)} EN`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 100, "#3b82f6");
+                        for (let i = 0; i < hitCount; i++) {
+                            const startOffset = i * hitSpacingMs;
+                            this.time.delayedCall(startOffset + impactMs, () => {
+                                const part = damageParts[i] ?? 0;
+                                if (part > 0) {
+                                    this.showFloatingText(`-${part}`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#ff4444");
+                                    this.tweens.add({ targets: this.player2Sprite, alpha: 0.5, yoyo: true, duration: 50, repeat: 3 });
+                                } else if (i === 0 && turn.bot2Outcome === "missed") {
+                                    this.showFloatingText("DODGE!", p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 130, "#8800ff");
+                                }
                             });
                         }
 
-                        const bot1TotalHeal = ((t.bot1HpRegen as number) || 0) + ((t.bot1Lifesteal as number) || 0);
+                        const afterLastHitOffset = (hitCount - 1) * hitSpacingMs;
+
+                        if (turn.bot2EnergyDrained && turn.bot2EnergyDrained > 0) {
+                            this.time.delayedCall(afterLastHitOffset + 500, () => {
+                                this.showFloatingText(`-${Math.round(turn.bot2EnergyDrained)} EN`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 100, "#3b82f6");
+                            });
+                        }
+
+                        const bot1TotalHeal = (turn.bot1HpRegen || 0) + (turn.bot1Lifesteal || 0);
                         if (bot1TotalHeal > 0) {
-                            this.time.delayedCall(700, () => {
+                            this.time.delayedCall(afterLastHitOffset + 700, () => {
                                 this.showFloatingText(`+${Math.round(bot1TotalHeal)} HP`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 100, "#00ff88");
                             });
                         }
 
-                        this.time.delayedCall(1200, () => resolve());
+                        this.time.delayedCall(afterLastHitOffset + animDurationMs, () => resolve());
                     });
                 };
 
@@ -1067,6 +1168,14 @@ export class BotBattleScene extends Phaser.Scene {
                         if (p2IsStunned) { resolve(); return; }
 
                         const animKey = `${p2Char}_${p2Move}`;
+                        const animDurationMs = getAnimDurationMs(animKey, 1200);
+                        const baseSpacingMs = (p2Move === "punch" || p2Move === "kick") ? 1200 : animDurationMs;
+                        const hitSpacingMs = Math.max(baseSpacingMs, animDurationMs);
+                        const impactMs = Math.min(300, Math.max(120, Math.floor(animDurationMs * 0.25)));
+                        const shouldRepeat = (p2Move === "punch" || p2Move === "kick") && p2HitCount > 1;
+                        const hitCount = shouldRepeat ? p2HitCount : 1;
+                        const damageParts = splitDamageIntoHits(p1Damage, hitCount);
+
                         if (this.anims.exists(animKey) || p2Move === "block") {
                             const scale = getAnimationScale(p2Char, p2Move);
                             this.player2Sprite.setScale(scale);
@@ -1082,31 +1191,35 @@ export class BotBattleScene extends Phaser.Scene {
                             }
                         }
 
-                        if (p1Damage > 0) {
-                            this.time.delayedCall(300, () => {
-                                this.showFloatingText(`-${p1Damage}`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#ff4444");
-                                this.tweens.add({ targets: this.player1Sprite, alpha: 0.5, yoyo: true, duration: 50, repeat: 3 });
-                            });
-                        } else if ((t.bot1Outcome as string) === "missed") {
-                            this.time.delayedCall(300, () => {
-                                this.showFloatingText("DODGE!", p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#8800ff");
-                            });
-                        }
-
-                        if (t.bot1EnergyDrained && (t.bot1EnergyDrained as number) > 0) {
-                            this.time.delayedCall(500, () => {
-                                this.showFloatingText(`-${Math.round(t.bot1EnergyDrained as number)} EN`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 100, "#3b82f6");
+                        for (let i = 0; i < hitCount; i++) {
+                            const startOffset = i * hitSpacingMs;
+                            this.time.delayedCall(startOffset + impactMs, () => {
+                                const part = damageParts[i] ?? 0;
+                                if (part > 0) {
+                                    this.showFloatingText(`-${part}`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#ff4444");
+                                    this.tweens.add({ targets: this.player1Sprite, alpha: 0.5, yoyo: true, duration: 50, repeat: 3 });
+                                } else if (i === 0 && turn.bot1Outcome === "missed") {
+                                    this.showFloatingText("DODGE!", p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 130, "#8800ff");
+                                }
                             });
                         }
 
-                        const bot2TotalHeal = ((t.bot2HpRegen as number) || 0) + ((t.bot2Lifesteal as number) || 0);
+                        const afterLastHitOffset = (hitCount - 1) * hitSpacingMs;
+
+                        if (turn.bot1EnergyDrained && turn.bot1EnergyDrained > 0) {
+                            this.time.delayedCall(afterLastHitOffset + 500, () => {
+                                this.showFloatingText(`-${Math.round(turn.bot1EnergyDrained)} EN`, p1TargetX, CHARACTER_POSITIONS.PLAYER1.Y - 100, "#3b82f6");
+                            });
+                        }
+
+                        const bot2TotalHeal = (turn.bot2HpRegen || 0) + (turn.bot2Lifesteal || 0);
                         if (bot2TotalHeal > 0) {
-                            this.time.delayedCall(700, () => {
+                            this.time.delayedCall(afterLastHitOffset + 700, () => {
                                 this.showFloatingText(`+${Math.round(bot2TotalHeal)} HP`, p2TargetX, CHARACTER_POSITIONS.PLAYER2.Y - 100, "#00ff88");
                             });
                         }
 
-                        this.time.delayedCall(1200, () => resolve());
+                        this.time.delayedCall(afterLastHitOffset + animDurationMs, () => resolve());
                     });
                 };
 
@@ -1122,7 +1235,7 @@ export class BotBattleScene extends Phaser.Scene {
                         await runP2Attack();
                     }
 
-                    const narrative = (t.narrative as string) || "Both attacks clash!";
+                    const narrative = this.buildDisplayNarrative(turn, p1Move, p2Move, p1Damage, p2Damage);
                     this.narrativeText.setText(narrative);
                     this.narrativeText.setAlpha(1);
 
@@ -1158,17 +1271,17 @@ export class BotBattleScene extends Phaser.Scene {
 
                     this.tweens.add({ targets: this.narrativeText, alpha: 0, duration: 300 });
 
-                    if (t.isRoundEnd) {
-                        if (t.roundWinner) {
-                            const loserChar = t.roundWinner === "player1" ? p2Char : p1Char;
-                            const loserSprite = t.roundWinner === "player1" ? this.player2Sprite : this.player1Sprite;
+                    if (turn.isRoundEnd) {
+                        if (turn.roundWinner) {
+                            const loserChar = turn.roundWinner === "player1" ? p2Char : p1Char;
+                            const loserSprite = turn.roundWinner === "player1" ? this.player2Sprite : this.player1Sprite;
 
                             if (this.anims.exists(`${loserChar}_dead`)) {
                                 loserSprite.setScale(getAnimationScale(loserChar, "dead"));
                                 loserSprite.play(`${loserChar}_dead`);
                             }
 
-                            if (t.roundWinner === "player1") this.bot1RoundsWon++;
+                            if (turn.roundWinner === "player1") this.bot1RoundsWon++;
                             else this.bot2RoundsWon++;
 
                             this.roundScoreText.setText(
@@ -1177,11 +1290,16 @@ export class BotBattleScene extends Phaser.Scene {
 
                             await new Promise<void>((resolve) => this.time.delayedCall(1500, resolve));
 
-                            const winnerName = t.roundWinner === "player1" ? this.config.bot1Name : this.config.bot2Name;
-                            this.narrativeText.setText(`${(winnerName as string).toUpperCase()} WINS THE ROUND!`);
+                            const winnerName = turn.roundWinner === "player1" ? this.config.bot1Name : this.config.bot2Name;
+                            const wonOnTime = turn.bot1Hp > 0 && turn.bot2Hp > 0;
+                            this.narrativeText.setText(
+                                wonOnTime
+                                    ? `${(winnerName as string).toUpperCase()} WINS ON TIME (HP%)!`
+                                    : `${(winnerName as string).toUpperCase()} WINS THE ROUND!`
+                            );
                             this.narrativeText.setAlpha(1);
 
-                            if (!t.isMatchEnd) {
+                            if (!turn.isMatchEnd) {
                                 await new Promise<void>((resolve) => this.time.delayedCall(3000, resolve));
                                 this.currentRound++;
                                 this.roundScoreText.setText(
@@ -1208,7 +1326,7 @@ export class BotBattleScene extends Phaser.Scene {
                             this.narrativeText.setText("⚡ DOUBLE KO - DRAW! ⚡");
                             this.narrativeText.setAlpha(1);
 
-                            if (!t.isMatchEnd) {
+                            if (!turn.isMatchEnd) {
                                 await new Promise<void>((resolve) => this.time.delayedCall(3000, resolve));
                                 this.currentRound++;
                                 this.roundScoreText.setText(
@@ -1273,32 +1391,270 @@ export class BotBattleScene extends Phaser.Scene {
     private showMatchEnd(): void {
         this.isPlaying = false;
 
-        const winner = this.config.matchWinner;
-        const winnerName = winner === "player1" ? this.config.bot1Name : this.config.bot2Name;
+        const finalWinner = this.resolveFinalWinner();
 
-        this.narrativeText.setText(`🏆 ${winnerName} WINS! 🏆`);
+        if (finalWinner === null) {
+            this.narrativeText.setText("⚖️ MATCH DRAW! ⚖️");
+        } else {
+            const winnerName = finalWinner === "player1" ? this.config.bot1Name : this.config.bot2Name;
+            this.narrativeText.setText(`🏆 ${winnerName} WINS! 🏆`);
+        }
         this.narrativeText.setFontSize(48);
         this.narrativeText.setAlpha(1);
 
-        const winnerSprite = winner === "player1" ? this.player1Sprite : this.player2Sprite;
-        this.tweens.add({
-            targets: winnerSprite,
-            y: winnerSprite.y - 30,
-            duration: 500,
-            yoyo: true,
-            repeat: 2,
-            ease: "Sine.easeOut",
-        });
+        if (finalWinner !== null) {
+            const winnerSprite = finalWinner === "player1" ? this.player1Sprite : this.player2Sprite;
+            this.tweens.add({
+                targets: winnerSprite,
+                y: winnerSprite.y - 30,
+                duration: 500,
+                yoyo: true,
+                repeat: 2,
+                ease: "Sine.easeOut",
+            });
+        }
 
         EventBus.emit("bot_battle_match_end", {
             matchId: this.config.matchId,
-            winner,
+            winner: finalWinner,
         });
 
         this.time.delayedCall(5000, () => {
             EventBus.emit("bot_battle_request_new_match");
         });
     }
+
+    private toNumber(value: unknown, fallback: number): number {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    private toMove(value: unknown): "punch" | "kick" | "block" | "special" | "stunned" {
+        if (value === "punch" || value === "kick" || value === "block" || value === "special" || value === "stunned") {
+            return value;
+        }
+        return "block";
+    }
+
+    private hashSeed(seed: string): number {
+        let hash = 2166136261;
+        for (let i = 0; i < seed.length; i++) {
+            hash ^= seed.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return Math.abs(hash);
+    }
+
+    private ensureSurgeData(turn: NormalizedBotTurn): NormalizedBotTurn {
+        if (turn.surgeCardIds.length > 0 && turn.bot1SurgeSelection && turn.bot2SurgeSelection) {
+            return turn;
+        }
+
+        const deck = getDeterministicPowerSurgeCards(this.config.matchId, turn.roundNumber, 3).map(card => card.id);
+        const safeDeck = deck.length > 0 ? deck : ["dag-overclock", "block-fortress", "sompi-shield"] as PowerSurgeCardId[];
+
+        const p1Seed = this.hashSeed(`${this.config.matchId}:${turn.roundNumber}:p1`);
+        const p2Seed = this.hashSeed(`${this.config.matchId}:${turn.roundNumber}:p2`);
+        const p1Selection = safeDeck[p1Seed % safeDeck.length];
+        const p2Selection = safeDeck[p2Seed % safeDeck.length];
+
+        return {
+            ...turn,
+            surgeCardIds: safeDeck,
+            bot1SurgeSelection: turn.bot1SurgeSelection ?? p1Selection,
+            bot2SurgeSelection: turn.bot2SurgeSelection ?? p2Selection,
+        };
+    }
+
+    private findRoundStartTurn(roundNumber: number, upToIndex: number): NormalizedBotTurn | null {
+        for (let i = 0; i <= upToIndex && i < this.config.turns.length; i++) {
+            const turn = this.normalizeTurn(this.config.turns[i], i);
+            if (turn.roundNumber === roundNumber && turn.isRoundStart) {
+                return turn;
+            }
+        }
+        return null;
+    }
+
+    private resolveFinalWinner(): "player1" | "player2" | null {
+        if (this.config.matchWinner === "player1" || this.config.matchWinner === "player2") {
+            return this.config.matchWinner;
+        }
+
+        if (this.bot1RoundsWon > this.bot2RoundsWon) return "player1";
+        if (this.bot2RoundsWon > this.bot1RoundsWon) return "player2";
+
+        const lastTurn = this.config.turns.length > 0
+            ? this.normalizeTurn(this.config.turns[this.config.turns.length - 1], this.config.turns.length - 1)
+            : null;
+        if (!lastTurn) return null;
+        if (lastTurn.bot1Hp > lastTurn.bot2Hp) return "player1";
+        if (lastTurn.bot2Hp > lastTurn.bot1Hp) return "player2";
+        return null;
+    }
+
+    private buildDisplayNarrative(
+        turn: NormalizedBotTurn,
+        p1Move: "punch" | "kick" | "block" | "special" | "stunned",
+        p2Move: "punch" | "kick" | "block" | "special" | "stunned",
+        p1Damage: number,
+        p2Damage: number
+    ): string {
+        const givenNarrative = (turn.narrative || "").trim();
+        const tooGeneric =
+            !givenNarrative
+            || /^punch\s+vs\s+kick$/i.test(givenNarrative)
+            || /^kick\s+vs\s+punch$/i.test(givenNarrative)
+            || /^block\s+vs\s+block$/i.test(givenNarrative)
+            || /^\w+\s+vs\s+\w+$/i.test(givenNarrative);
+
+        if (!tooGeneric) return givenNarrative;
+
+        const moveNames: Record<typeof p1Move, string> = {
+            punch: "throws a punch",
+            kick: "fires a kick",
+            block: "raises guard",
+            special: "unleashes a special",
+            stunned: "is stunned",
+        };
+
+        const p1Action = moveNames[p1Move];
+        const p2Action = moveNames[p2Move];
+
+        if (turn.isRoundEnd && !turn.roundWinner) {
+            return "⚡ DOUBLE KO — BOTH BOTS DROP! ⚡";
+        }
+
+        if (p2Damage > 0 && p1Damage > 0) {
+            if (p2Damage > p1Damage) return `Heavy trade! Bot 1 ${p1Action} for ${p2Damage}, but takes ${p1Damage}.`;
+            if (p1Damage > p2Damage) return `Explosive clash! Bot 2 ${p2Action} for ${p1Damage}, but eats ${p2Damage}.`;
+            return `Even exchange! Both bots land ${p1Damage} damage.`;
+        }
+
+        if (p2Damage > 0) return `Bot 1 ${p1Action} and lands ${p2Damage} damage!`;
+        if (p1Damage > 0) return `Bot 2 ${p2Action} and lands ${p1Damage} damage!`;
+        return `Bot 1 ${p1Action}, Bot 2 ${p2Action}. No clean hit this turn.`;
+    }
+
+    private normalizeTurn(rawTurn: BotTurnData, index: number): NormalizedBotTurn {
+        const raw = rawTurn as BotTurnData & Record<string, unknown>;
+        const p1 = (raw.player1 as Record<string, unknown> | undefined) ?? {};
+        const p2 = (raw.player2 as Record<string, unknown> | undefined) ?? {};
+
+        const prev = index > 0 ? this.normalizeTurn(this.config.turns[index - 1], index - 1) : null;
+        const turnNumber = this.toNumber(raw.turnNumber, index + 1);
+        const roundNumber = this.toNumber(raw.roundNumber, prev?.roundNumber ?? 1);
+
+        const bot1HpSource = raw.bot1Hp ?? raw.player1HealthAfter ?? p1.hpAfter ?? p1.healthAfter;
+        const bot2HpSource = raw.bot2Hp ?? raw.player2HealthAfter ?? p2.hpAfter ?? p2.healthAfter;
+        const bot1Hp = this.toNumber(bot1HpSource, prev?.bot1Hp ?? this.player1MaxHp);
+        const bot2Hp = this.toNumber(bot2HpSource, prev?.bot2Hp ?? this.player2MaxHp);
+
+        const bot1EnergySource = raw.bot1Energy ?? raw.player1EnergyAfter ?? p1.energyAfter;
+        const bot2EnergySource = raw.bot2Energy ?? raw.player2EnergyAfter ?? p2.energyAfter;
+        const bot1Energy = this.toNumber(bot1EnergySource, prev?.bot1Energy ?? this.player1MaxEnergy);
+        const bot2Energy = this.toNumber(bot2EnergySource, prev?.bot2Energy ?? this.player2MaxEnergy);
+
+        if (!this.warnedAboutTurnFallbackData && (bot1HpSource == null || bot2HpSource == null || bot1EnergySource == null || bot2EnergySource == null)) {
+            this.warnedAboutTurnFallbackData = true;
+            console.warn("[BotBattleScene] Missing authoritative turn fields; using fallback values", {
+                matchId: this.config.matchId,
+                index,
+                hasBot1Hp: bot1HpSource != null,
+                hasBot2Hp: bot2HpSource != null,
+                hasBot1Energy: bot1EnergySource != null,
+                hasBot2Energy: bot2EnergySource != null,
+            });
+        }
+
+        const bot1GuardMeter = this.toNumber(raw.bot1GuardMeter ?? raw.bot1Guard ?? raw.player1GuardMeter ?? raw.player1GuardAfter ?? p1.guardMeterAfter ?? p1.guardMeter, prev?.bot1GuardMeter ?? 0);
+        const bot2GuardMeter = this.toNumber(raw.bot2GuardMeter ?? raw.bot2Guard ?? raw.player2GuardMeter ?? raw.player2GuardAfter ?? p2.guardMeterAfter ?? p2.guardMeter, prev?.bot2GuardMeter ?? 0);
+
+        const explicitRoundStart = Boolean(raw.isRoundStart);
+        const inferredRoundStart = turnNumber === 1 || (index === 0) || Boolean(prev?.isRoundEnd);
+        const isRoundStart = explicitRoundStart || inferredRoundStart;
+
+        const isRoundEnd = Boolean(raw.isRoundEnd) || Boolean(raw.isRoundOver);
+        const isMatchEnd = Boolean(raw.isMatchEnd) || Boolean(raw.isMatchOver);
+        const roundWinner = (raw.roundWinner === "player1" || raw.roundWinner === "player2")
+            ? raw.roundWinner
+            : (raw.roundWinner === "bot1" ? "player1" : raw.roundWinner === "bot2" ? "player2" : null);
+
+        const surgeCardIdsRaw = (raw.surgeCardIds ?? raw.offeredCards ?? raw.powerSurgeCards) as unknown;
+        const surgeCardIds = Array.isArray(surgeCardIdsRaw)
+            ? surgeCardIdsRaw.filter((card): card is PowerSurgeCardId => typeof card === "string")
+            : [];
+
+        return {
+            turnNumber,
+            roundNumber,
+            bot1Move: this.toMove(raw.bot1Move ?? raw.player1Move ?? p1.move),
+            bot2Move: this.toMove(raw.bot2Move ?? raw.player2Move ?? p2.move),
+            bot1Hp,
+            bot2Hp,
+            bot1Energy,
+            bot2Energy,
+            bot1GuardMeter,
+            bot2GuardMeter,
+            bot1DamageTaken: this.toNumber(raw.bot1DamageTaken ?? raw.player1DamageTaken ?? p1.damageTaken, Math.max(0, (prev?.bot1Hp ?? this.player1MaxHp) - bot1Hp)),
+            bot2DamageTaken: this.toNumber(raw.bot2DamageTaken ?? raw.player2DamageTaken ?? p2.damageTaken, Math.max(0, (prev?.bot2Hp ?? this.player2MaxHp) - bot2Hp)),
+            bot1DamageTakenProvided: raw.bot1DamageTaken != null || raw.player1DamageTaken != null || p1.damageTaken != null,
+            bot2DamageTakenProvided: raw.bot2DamageTaken != null || raw.player2DamageTaken != null || p2.damageTaken != null,
+            bot1HpRegen: this.toNumber(raw.bot1HpRegen ?? raw.player1HpRegen ?? p1.hpRegen, 0),
+            bot2HpRegen: this.toNumber(raw.bot2HpRegen ?? raw.player2HpRegen ?? p2.hpRegen, 0),
+            bot1Lifesteal: this.toNumber(raw.bot1Lifesteal ?? raw.player1Lifesteal ?? p1.lifesteal, 0),
+            bot2Lifesteal: this.toNumber(raw.bot2Lifesteal ?? raw.player2Lifesteal ?? p2.lifesteal, 0),
+            bot1EnergyDrained: this.toNumber(raw.bot1EnergyDrained ?? raw.player1EnergyDrained ?? p1.energyDrained, 0),
+            bot2EnergyDrained: this.toNumber(raw.bot2EnergyDrained ?? raw.player2EnergyDrained ?? p2.energyDrained, 0),
+            bot1IsStunned: Boolean(raw.bot1IsStunned ?? raw.player1IsStunned ?? p1.isStunned),
+            bot2IsStunned: Boolean(raw.bot2IsStunned ?? raw.player2IsStunned ?? p2.isStunned),
+            bot1Outcome: typeof (raw.bot1Outcome ?? raw.player1Outcome ?? p1.outcome) === "string" ? (raw.bot1Outcome ?? raw.player1Outcome ?? p1.outcome) as string : null,
+            bot2Outcome: typeof (raw.bot2Outcome ?? raw.player2Outcome ?? p2.outcome) === "string" ? (raw.bot2Outcome ?? raw.player2Outcome ?? p2.outcome) as string : null,
+            narrative: typeof (raw.narrative ?? raw.description) === "string" ? String(raw.narrative ?? raw.description) : "",
+            isRoundStart,
+            isRoundEnd,
+            isMatchEnd,
+            roundWinner,
+            surgeCardIds,
+            bot1SurgeSelection: typeof (raw.bot1SurgeSelection ?? raw.player1SurgeSelection) === "string" ? (raw.bot1SurgeSelection ?? raw.player1SurgeSelection) as PowerSurgeCardId : null,
+            bot2SurgeSelection: typeof (raw.bot2SurgeSelection ?? raw.player2SurgeSelection) === "string" ? (raw.bot2SurgeSelection ?? raw.player2SurgeSelection) as PowerSurgeCardId : null,
+        };
+    }
+}
+
+interface NormalizedBotTurn {
+    turnNumber: number;
+    roundNumber: number;
+    bot1Move: "punch" | "kick" | "block" | "special" | "stunned";
+    bot2Move: "punch" | "kick" | "block" | "special" | "stunned";
+    bot1Hp: number;
+    bot2Hp: number;
+    bot1Energy: number;
+    bot2Energy: number;
+    bot1GuardMeter: number;
+    bot2GuardMeter: number;
+    bot1DamageTaken: number;
+    bot2DamageTaken: number;
+    bot1DamageTakenProvided: boolean;
+    bot2DamageTakenProvided: boolean;
+    bot1HpRegen: number;
+    bot2HpRegen: number;
+    bot1Lifesteal: number;
+    bot2Lifesteal: number;
+    bot1EnergyDrained: number;
+    bot2EnergyDrained: number;
+    bot1IsStunned: boolean;
+    bot2IsStunned: boolean;
+    bot1Outcome: string | null;
+    bot2Outcome: string | null;
+    narrative: string;
+    isRoundStart: boolean;
+    isRoundEnd: boolean;
+    isMatchEnd: boolean;
+    roundWinner: "player1" | "player2" | null;
+    surgeCardIds: PowerSurgeCardId[];
+    bot1SurgeSelection: PowerSurgeCardId | null;
+    bot2SurgeSelection: PowerSurgeCardId | null;
 }
 
 export default BotBattleScene;

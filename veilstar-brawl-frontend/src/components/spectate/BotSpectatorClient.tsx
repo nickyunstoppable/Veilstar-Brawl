@@ -16,6 +16,7 @@ import type { BotTurnData } from "../../lib/chat/fake-chat-service";
 import type { BotBattleSceneConfig } from "../../game/scenes/BotBattleScene";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const BOT_MATCH_SIDE_CACHE_KEY = "bot_betting_match_side_cache_v1";
 const BETTING_DURATION_MS = 30000;
 const BOT_MAX_HP = 100;
 const BOT_MAX_ENERGY = 100;
@@ -48,6 +49,21 @@ function navigate(path: string) {
     window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+function readCachedMatchBet(matchId: string): { side: "player1" | "player2"; amount?: number | string | null } | null {
+    try {
+        const raw = localStorage.getItem(BOT_MATCH_SIDE_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        const cached = parsed?.[matchId];
+        if (!cached) return null;
+        const side = cached.side;
+        if (side !== "player1" && side !== "player2") return null;
+        return { side, amount: cached.amount };
+    } catch {
+        return null;
+    }
+}
+
 // =============================================================================
 // COMPONENT
 // =============================================================================
@@ -58,6 +74,9 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
     const isLoadingNewMatch = useRef(false);
     const isSyncingRef = useRef(false);
     const tabHiddenAtRef = useRef<number | null>(null);
+    const nextMatchRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const nextMatchRetryAttemptsRef = useRef(0);
+    const winNotificationShownForMatchRef = useRef<string | null>(null);
 
     const [currentMatch, setCurrentMatch] = useState<BotMatch | null>(null);
     const [loading, setLoading] = useState(true);
@@ -71,7 +90,88 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
 
     // Winning notification
     const [showWinNotification, setShowWinNotification] = useState(false);
-    const [winAmount, setWinAmount] = useState<bigint>(0n);
+    const [winAmount, setWinAmount] = useState<number>(0);
+    const [winPrediction, setWinPrediction] = useState<"player1" | "player2" | "bot1" | "bot2">("player1");
+    const [winWinnerName, setWinWinnerName] = useState<string>("");
+
+    const normalizeSide = useCallback((value: unknown): "player1" | "player2" | null => {
+        const normalized = String(value || "").toLowerCase();
+        if (normalized === "player1" || normalized === "bot1") return "player1";
+        if (normalized === "player2" || normalized === "bot2") return "player2";
+        return null;
+    }, []);
+
+    const showWinningNotificationFromBet = useCallback((
+        match: BotMatch,
+        userBet: any,
+        options?: {
+            requireWonStatus?: boolean;
+            forcedPrediction?: "player1" | "player2";
+        }
+    ) => {
+        if (!userBet) return false;
+
+        const normalizedStatus = String(userBet.status || "").toLowerCase();
+        const requireWonStatus = options?.requireWonStatus ?? true;
+        if (requireWonStatus && normalizedStatus !== "won") return false;
+
+        const betPrediction = normalizeSide(userBet.bet_on ?? userBet.betOn);
+        const prediction = options?.forcedPrediction ?? betPrediction;
+        if (!prediction) return false;
+
+        const payoutCandidate =
+            userBet.payout_amount
+            ?? userBet.payoutAmount
+            ?? userBet.onchain_payout_amount
+            ?? userBet.onchainPayoutAmount
+            ?? userBet.amount
+            ?? null;
+
+        let payoutXlm = 0;
+        if (payoutCandidate !== null && payoutCandidate !== undefined && payoutCandidate !== "") {
+            try {
+                const payoutStroops = BigInt(String(payoutCandidate));
+                const optimisticPayoutStroops =
+                    userBet.payout_amount || userBet.payoutAmount || userBet.onchain_payout_amount || userBet.onchainPayoutAmount
+                        ? payoutStroops
+                        : payoutStroops * 2n;
+                payoutXlm = Number(optimisticPayoutStroops) / 10000000;
+            } catch {
+                const numeric = Number(payoutCandidate);
+                payoutXlm = Number.isFinite(numeric) ? (numeric * 2) / 10000000 : 0;
+            }
+        }
+
+        const winnerName = prediction === "player1" ? match.bot1Name : match.bot2Name;
+
+        setWinAmount(Number.isFinite(payoutXlm) && payoutXlm > 0 ? payoutXlm : 0);
+        setWinPrediction(prediction);
+        setWinWinnerName(winnerName);
+        setShowWinNotification(true);
+
+        winNotificationShownForMatchRef.current = match.id;
+        return true;
+    }, []);
+
+    const checkForWinningBet = useCallback(async (
+        match: BotMatch,
+        options?: {
+            requireWonStatus?: boolean;
+            forcedPrediction?: "player1" | "player2";
+        }
+    ) => {
+        const userAddress = localStorage.getItem("stellar_address");
+        if (!userAddress) return false;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/bot-betting/pool/${match.id}?address=${encodeURIComponent(userAddress)}`);
+            if (!res.ok) return false;
+            const data = await res.json();
+            return showWinningNotificationFromBet(match, data.userBet, options);
+        } catch {
+            return false;
+        }
+    }, [showWinningNotificationFromBet]);
 
     // Fetch match data
     const fetchMatch = useCallback(async (id: string) => {
@@ -115,6 +215,11 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
         fetchMatch(matchId);
     }, [matchId, fetchMatch]);
 
+    useEffect(() => {
+        winNotificationShownForMatchRef.current = null;
+        setShowWinNotification(false);
+    }, [matchId]);
+
     // Betting countdown timer (for the betting panel props)
     useEffect(() => {
         if (!isBettingOpen || bettingSecondsRemaining <= 0) return;
@@ -131,6 +236,30 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
 
         return () => clearInterval(timer);
     }, [isBettingOpen, bettingSecondsRemaining]);
+
+    // Fallback auto-switch polling after a match has fully elapsed.
+    useEffect(() => {
+        if (!currentMatch) return;
+
+        const matchDurationMs = BETTING_DURATION_MS + (currentMatch.totalTurns * (currentMatch.turnDurationMs || 2500));
+        const hasFullyElapsed = Date.now() - currentMatch.createdAt >= matchDurationMs + 5000;
+        if (!hasFullyElapsed) return;
+
+        const interval = setInterval(async () => {
+            try {
+                const response = await fetch(`${API_BASE}/api/bot-games`);
+                if (!response.ok) return;
+                const data = await response.json();
+                if (data.match && data.match.id !== currentMatch.id) {
+                    navigate(`/spectate/bot/${data.match.id}`);
+                }
+            } catch {
+                // Ignore transient errors
+            }
+        }, 2500);
+
+        return () => clearInterval(interval);
+    }, [currentMatch]);
 
     // Initialize Phaser once match data is loaded
     useEffect(() => {
@@ -208,23 +337,37 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
 
         // Match end: check if user won a bet
         const handleMatchEnd = async (rawData: unknown) => {
-            const eventData = rawData as { matchId: string; winner: "player1" | "player2" };
+            const eventData = rawData as { matchId: string; winner: "player1" | "player2" | null };
             if (eventData.matchId !== currentMatch.id) return;
 
-            const userAddress = localStorage.getItem("stellar_address");
-            if (!userAddress) return;
+            if (winNotificationShownForMatchRef.current === currentMatch.id) return;
 
-            try {
-                const res = await fetch(`${API_BASE}/api/bot-betting/pool/${currentMatch.id}?address=${encodeURIComponent(userAddress)}`);
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.userBet && data.userBet.status === "won" && data.userBet.payout_amount) {
-                        setWinAmount(BigInt(data.userBet.payout_amount));
-                        setShowWinNotification(true);
-                    }
+            const winnerSide = normalizeSide(eventData.winner);
+            if (winnerSide) {
+                const cachedBet = readCachedMatchBet(currentMatch.id);
+                if (cachedBet && cachedBet.side === winnerSide) {
+                    showWinningNotificationFromBet(currentMatch, {
+                        bet_on: cachedBet.side,
+                        amount: cachedBet.amount,
+                    }, {
+                        requireWonStatus: false,
+                        forcedPrediction: winnerSide,
+                    });
+                    return;
                 }
-            } catch {
-                // Ignore
+
+                const optimisticShown = await checkForWinningBet(currentMatch, {
+                    requireWonStatus: false,
+                    forcedPrediction: winnerSide,
+                });
+                if (optimisticShown) return;
+            }
+
+            const maxAttempts = 12;
+            for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+                const shown = await checkForWinningBet(currentMatch);
+                if (shown) break;
+                await new Promise((resolve) => setTimeout(resolve, 1500));
             }
         };
         EventBus.on("bot_battle_match_end", handleMatchEnd);
@@ -239,8 +382,21 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
                 if (response.ok) {
                     const data = await response.json();
                     if (data.match && data.match.id !== currentMatch.id) {
+                        if (nextMatchRetryTimerRef.current) {
+                            clearTimeout(nextMatchRetryTimerRef.current);
+                            nextMatchRetryTimerRef.current = null;
+                        }
+                        nextMatchRetryAttemptsRef.current = 0;
                         navigate(`/spectate/bot/${data.match.id}`);
+                        return;
                     }
+                }
+
+                if (nextMatchRetryAttemptsRef.current < 15) {
+                    nextMatchRetryAttemptsRef.current += 1;
+                    nextMatchRetryTimerRef.current = setTimeout(() => {
+                        void handleNewMatchRequest();
+                    }, 1500);
                 }
             } catch {
                 // Ignore
@@ -254,12 +410,16 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
             isMounted = false;
             EventBus.off("bot_battle_match_end", handleMatchEnd);
             EventBus.off("bot_battle_request_new_match", handleNewMatchRequest);
+            if (nextMatchRetryTimerRef.current) {
+                clearTimeout(nextMatchRetryTimerRef.current);
+                nextMatchRetryTimerRef.current = null;
+            }
             if (gameRef.current) {
                 gameRef.current.destroy(true);
                 gameRef.current = null;
             }
         };
-    }, [currentMatch]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [currentMatch, checkForWinningBet, normalizeSide]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Tab visibility sync — emit to Phaser scene via EventBus
     const handleVisibilityChange = useCallback(() => {
@@ -372,6 +532,7 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
                     <span className="mx-2 text-gray-500">vs</span>
                     <span className="text-orange-400">{currentMatch.bot2Name}</span>
                 </div>
+
             </motion.div>
 
             {/* Main Content — Phaser canvas + Betting/Chat panel */}
@@ -471,8 +632,10 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
 
             {/* Win Notification */}
             <WinningNotification
-                isOpen={showWinNotification}
-                winAmount={winAmount}
+                show={showWinNotification}
+                amount={winAmount}
+                prediction={winPrediction}
+                winnerName={winWinnerName}
                 onClose={() => setShowWinNotification(false)}
             />
         </div>
