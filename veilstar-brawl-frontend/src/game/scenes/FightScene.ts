@@ -100,6 +100,8 @@ export class FightScene extends Phaser.Scene {
   private selectedMove: MoveType | null = null;
   private privateRoundPlannedMoves: Array<"punch" | "kick" | "block" | "special"> = [];
   private privateRoundPlanEnergyPreview: number = PRIVATE_ROUND_SERVER_MAX_ENERGY;
+  private privateRoundPlanBaseEnergy: number = PRIVATE_ROUND_SERVER_MAX_ENERGY;
+  private privateRoundPlanMaxEnergy: number = PRIVATE_ROUND_SERVER_MAX_ENERGY;
 
   // Timer - ALL timers use real-time deadlines (Date.now()) instead of Phaser timers
   // This ensures timers continue counting down even when the browser tab is backgrounded
@@ -760,40 +762,12 @@ export class FightScene extends Phaser.Scene {
   }
 
   /**
-   * Fetch sticker inventory from database and initialize sticker picker.
-   * Called asynchronously after scene creation.
+   * Initialize sticker picker with full sticker access for all players.
    */
   private async fetchAndInitializeStickerPicker(playerSprite: Phaser.GameObjects.Sprite): Promise<void> {
     if (this.hasCleanedUp) return;
 
-    const ownedStickerIds: StickerId[] = [];
-    const playerAddress = this.config.playerRole === "player1" ? this.config.player1Address : this.config.player2Address;
-
-    try {
-      const response = await fetch(apiUrl(`/api/shop/inventory?playerId=${encodeURIComponent(playerAddress)}&pageSize=100&category=sticker`));
-      if (response.ok) {
-        const data = await response.json();
-        const items = data.items as any[];
-        const ownedIds = new Set(data.ownedIds as string[]);
-
-        // Map owned cosmetics to sticker IDs by matching thumbnail URLs
-        for (const item of items) {
-          if (item.category === 'sticker' && ownedIds.has(item.id)) {
-            const matchingSticker = STICKER_LIST.find(s =>
-              item.thumbnailUrl?.includes(s.filename)
-            );
-            if (matchingSticker) {
-              ownedStickerIds.push(matchingSticker.id);
-            }
-          }
-        }
-        console.log("[FightScene] Owned stickers fetched from DB:", ownedStickerIds);
-      } else {
-        console.warn("[FightScene] Failed to fetch sticker inventory:", response.status);
-      }
-    } catch (err) {
-      console.error("[FightScene] Error fetching sticker inventory:", err);
-    }
+    const ownedStickerIds: StickerId[] = STICKER_LIST.map((sticker) => sticker.id);
 
     if (this.hasCleanedUp) return;
 
@@ -2273,18 +2247,14 @@ export class FightScene extends Phaser.Scene {
         return;
       }
 
-      const moveCost = this.getPlannedMoveEnergyCost(move);
-      if (this.privateRoundPlanEnergyPreview < moveCost) {
+      this.syncPrivateRoundPlanEnergyPreview();
+      if (!this.canAppendPrivateRoundMove(move)) {
         this.showFloatingText("Not enough energy for this step", GAME_DIMENSIONS.CENTER_X, GAME_DIMENSIONS.HEIGHT - 150, "#ff4444");
         return;
       }
 
       this.privateRoundPlannedMoves.push(move as "punch" | "kick" | "block" | "special");
-      const afterCost = Math.max(0, this.privateRoundPlanEnergyPreview - moveCost);
-      this.privateRoundPlanEnergyPreview = Math.min(
-        PRIVATE_ROUND_SERVER_MAX_ENERGY,
-        afterCost + PRIVATE_ROUND_SERVER_ENERGY_REGEN,
-      );
+      this.syncPrivateRoundPlanEnergyPreview();
 
       this.selectedMove = move;
       this.updateButtonState(move, true);
@@ -2350,6 +2320,7 @@ export class FightScene extends Phaser.Scene {
 
   private getSelectionEnergy(role: "player1" | "player2"): number {
     if (PRIVATE_ROUNDS_ENABLED && this.phase === "selecting") {
+      this.syncPrivateRoundPlanEnergyPreview(role);
       return this.privateRoundPlanEnergyPreview;
     }
 
@@ -2386,9 +2357,132 @@ export class FightScene extends Phaser.Scene {
     return baseCost + extra;
   }
 
+  private getPrivateRoundPlanningBaseEnergy(role: "player1" | "player2"): number {
+    if (PRIVATE_ROUNDS_ENABLED) {
+      const serverEnergy = role === "player1"
+        ? this.serverState?.player1Energy
+        : this.serverState?.player2Energy;
+      if (typeof serverEnergy === "number" && Number.isFinite(serverEnergy)) {
+        return Math.max(0, Math.min(PRIVATE_ROUND_SERVER_MAX_ENERGY, Math.floor(serverEnergy)));
+      }
+      return PRIVATE_ROUND_SERVER_MAX_ENERGY;
+    }
+
+    const serverEnergy = role === "player1"
+      ? this.serverState?.player1Energy
+      : this.serverState?.player2Energy;
+    if (typeof serverEnergy === "number" && Number.isFinite(serverEnergy)) {
+      return Math.max(0, Math.floor(serverEnergy));
+    }
+
+    const localState = this.combatEngine.getState();
+    const localEnergy = role === "player1" ? localState.player1.energy : localState.player2.energy;
+    if (typeof localEnergy === "number" && Number.isFinite(localEnergy)) {
+      return Math.max(0, Math.floor(localEnergy));
+    }
+
+    return PRIVATE_ROUND_SERVER_MAX_ENERGY;
+  }
+
+  private getPrivateRoundPlanningMaxEnergy(role: "player1" | "player2"): number {
+    if (PRIVATE_ROUNDS_ENABLED) {
+      return PRIVATE_ROUND_SERVER_MAX_ENERGY;
+    }
+
+    const serverMaxEnergy = role === "player1"
+      ? this.serverState?.player1MaxEnergy
+      : this.serverState?.player2MaxEnergy;
+    if (typeof serverMaxEnergy === "number" && Number.isFinite(serverMaxEnergy) && serverMaxEnergy > 0) {
+      return Math.floor(serverMaxEnergy);
+    }
+
+    const localState = this.combatEngine.getState();
+    const localMaxEnergy = role === "player1" ? localState.player1.maxEnergy : localState.player2.maxEnergy;
+    if (typeof localMaxEnergy === "number" && Number.isFinite(localMaxEnergy) && localMaxEnergy > 0) {
+      return Math.floor(localMaxEnergy);
+    }
+
+    return PRIVATE_ROUND_SERVER_MAX_ENERGY;
+  }
+
+  private simulatePrivateRoundPlanEnergy(
+    plannedMoves: Array<"punch" | "kick" | "block" | "special">,
+    role: "player1" | "player2",
+  ): number {
+    const maxEnergy = this.privateRoundPlanMaxEnergy > 0
+      ? this.privateRoundPlanMaxEnergy
+      : this.getPrivateRoundPlanningMaxEnergy(role);
+    let energy = Math.min(maxEnergy, this.privateRoundPlanBaseEnergy);
+
+    for (const plannedMove of plannedMoves) {
+      const moveCost = this.getPlannedMoveEnergyCost(plannedMove);
+      if (energy < moveCost) {
+        break;
+      }
+
+      const afterCost = Math.max(0, energy - moveCost);
+      energy = Math.min(maxEnergy, afterCost + PRIVATE_ROUND_SERVER_ENERGY_REGEN);
+    }
+
+    return Math.max(0, Math.floor(energy));
+  }
+
+  private getPrivateRoundPlanAffordablePrefixLength(
+    plannedMoves: Array<"punch" | "kick" | "block" | "special">,
+    role: "player1" | "player2",
+  ): number {
+    const maxEnergy = this.privateRoundPlanMaxEnergy > 0
+      ? this.privateRoundPlanMaxEnergy
+      : this.getPrivateRoundPlanningMaxEnergy(role);
+    let energy = Math.min(maxEnergy, this.privateRoundPlanBaseEnergy);
+    let affordableCount = 0;
+
+    for (const plannedMove of plannedMoves) {
+      const moveCost = this.getPlannedMoveEnergyCost(plannedMove);
+      if (energy < moveCost) {
+        break;
+      }
+
+      const afterCost = Math.max(0, energy - moveCost);
+      energy = Math.min(maxEnergy, afterCost + PRIVATE_ROUND_SERVER_ENERGY_REGEN);
+      affordableCount += 1;
+    }
+
+    return affordableCount;
+  }
+
+  private canAppendPrivateRoundMove(move: MoveType): boolean {
+    if (move === "stunned") return false;
+
+    const role = this.config.playerRole;
+    if (!role) return false;
+
+    const candidatePlan = [
+      ...this.privateRoundPlannedMoves,
+      move as "punch" | "kick" | "block" | "special",
+    ];
+
+    return this.getPrivateRoundPlanAffordablePrefixLength(candidatePlan, role) === candidatePlan.length;
+  }
+
+  private syncPrivateRoundPlanEnergyPreview(role?: "player1" | "player2"): void {
+    if (!PRIVATE_ROUNDS_ENABLED || this.phase !== "selecting") {
+      return;
+    }
+
+    const myRole = role ?? this.config.playerRole;
+    if (!myRole) return;
+
+    this.privateRoundPlanEnergyPreview = this.simulatePrivateRoundPlanEnergy(
+      this.privateRoundPlannedMoves,
+      myRole,
+    );
+  }
+
   private canAffordMoveForSelection(move: MoveType): boolean {
     const role = this.config.playerRole;
     if (!role) return false;
+    this.syncPrivateRoundPlanEnergyPreview(role);
     const currentEnergy = this.getSelectionEnergy(role);
     return currentEnergy >= this.getPlannedMoveEnergyCost(move);
   }
@@ -2517,8 +2611,9 @@ export class FightScene extends Phaser.Scene {
         return;
       }
 
-      const moveCost = this.getPlannedMoveEnergyCost(move);
-      const isAffordable = currentEnergy >= moveCost;
+      const isAffordable = PRIVATE_ROUNDS_ENABLED && this.phase === "selecting"
+        ? this.canAppendPrivateRoundMove(move)
+        : currentEnergy >= this.getPlannedMoveEnergyCost(move);
 
       // Check if this specific move should be disabled
       const shouldDisable = !isAffordable || (move === "block" && blockDisabled);
@@ -4334,6 +4429,8 @@ export class FightScene extends Phaser.Scene {
     this.moveInFlight = false;
     this.privateRoundPlannedMoves = [];
     this.privateRoundPlanEnergyPreview = PRIVATE_ROUND_SERVER_MAX_ENERGY;
+    this.privateRoundPlanBaseEnergy = PRIVATE_ROUND_SERVER_MAX_ENERGY;
+    this.privateRoundPlanMaxEnergy = PRIVATE_ROUND_SERVER_MAX_ENERGY;
 
     // Store the deadline for synchronized timing
     this.moveDeadlineAt = payload.moveDeadlineAt;
@@ -4347,16 +4444,36 @@ export class FightScene extends Phaser.Scene {
     // Determine max values (prefer server, fallback to local)
     const p1MaxHealth = payload.player1MaxHealth ?? localState.player1.maxHp;
     const p2MaxHealth = payload.player2MaxHealth ?? localState.player2.maxHp;
-    const p1MaxEnergy = payload.player1MaxEnergy ?? localState.player1.maxEnergy;
-    const p2MaxEnergy = payload.player2MaxEnergy ?? localState.player2.maxEnergy;
+    const p1MaxEnergy = PRIVATE_ROUNDS_ENABLED
+      ? PRIVATE_ROUND_SERVER_MAX_ENERGY
+      : (payload.player1MaxEnergy ?? localState.player1.maxEnergy);
+    const p2MaxEnergy = PRIVATE_ROUNDS_ENABLED
+      ? PRIVATE_ROUND_SERVER_MAX_ENERGY
+      : (payload.player2MaxEnergy ?? localState.player2.maxEnergy);
 
     // At turn 1 (start of round), health and energy should always be at max
     // The server might send incorrect default values (e.g., 100 instead of character-specific max)
     const isRoundStart = payload.turnNumber === 1;
     const p1Health = isRoundStart ? p1MaxHealth : payload.player1Health;
     const p2Health = isRoundStart ? p2MaxHealth : payload.player2Health;
-    const p1Energy = isRoundStart ? p1MaxEnergy : payload.player1Energy;
-    const p2Energy = isRoundStart ? p2MaxEnergy : payload.player2Energy;
+    const p1Energy = PRIVATE_ROUNDS_ENABLED
+      ? Math.max(
+        0,
+        Math.min(
+          p1MaxEnergy,
+          Number.isFinite(Number(payload.player1Energy)) ? Number(payload.player1Energy) : p1MaxEnergy,
+        ),
+      )
+      : (isRoundStart ? p1MaxEnergy : payload.player1Energy);
+    const p2Energy = PRIVATE_ROUNDS_ENABLED
+      ? Math.max(
+        0,
+        Math.min(
+          p2MaxEnergy,
+          Number.isFinite(Number(payload.player2Energy)) ? Number(payload.player2Energy) : p2MaxEnergy,
+        ),
+      )
+      : (isRoundStart ? p2MaxEnergy : payload.player2Energy);
 
     // Store server state (authoritative)
     this.serverState = {
@@ -4553,9 +4670,17 @@ export class FightScene extends Phaser.Scene {
     this.localMoveSubmitted = false; // Reset for new round
     this.moveInFlight = false;
     this.privateRoundPlannedMoves = [];
-    this.privateRoundPlanEnergyPreview = this.config.playerRole === "player1"
-      ? (this.serverState?.player1Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY)
-      : (this.serverState?.player2Energy ?? PRIVATE_ROUND_SERVER_MAX_ENERGY);
+    this.privateRoundPlanBaseEnergy = PRIVATE_ROUNDS_ENABLED
+      ? this.getPrivateRoundPlanningBaseEnergy(this.config.playerRole)
+      : (this.config.playerRole
+        ? this.getPrivateRoundPlanningBaseEnergy(this.config.playerRole)
+        : PRIVATE_ROUND_SERVER_MAX_ENERGY);
+    this.privateRoundPlanMaxEnergy = PRIVATE_ROUNDS_ENABLED
+      ? PRIVATE_ROUND_SERVER_MAX_ENERGY
+      : (this.config.playerRole
+        ? this.getPrivateRoundPlanningMaxEnergy(this.config.playerRole)
+        : PRIVATE_ROUND_SERVER_MAX_ENERGY);
+    this.syncPrivateRoundPlanEnergyPreview();
 
     try {
       this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Phase 2/3: Plan moves (0/10)" : "Select your move!");

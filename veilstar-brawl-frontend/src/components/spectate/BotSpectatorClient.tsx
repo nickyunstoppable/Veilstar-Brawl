@@ -73,7 +73,18 @@ function readCachedMatchBet(matchId: string): { side: "player1" | "player2"; amo
         if (!cached) return null;
         const side = cached.side;
         if (side !== "player1" && side !== "player2") return null;
-        return { side, amount: cached.amount };
+
+        const amountRaw = cached.amount;
+        const amount = (
+            amountRaw === null
+            || amountRaw === undefined
+            || typeof amountRaw === "number"
+            || typeof amountRaw === "string"
+        )
+            ? amountRaw
+            : undefined;
+
+        return { side, amount };
     } catch {
         return null;
     }

@@ -329,15 +329,9 @@ export class CharacterSelectScene extends Phaser.Scene {
   }
 
   private updateCardsForPickPhase(): void {
-    const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
-
     this.characterCards.forEach((card) => {
       const charId = card.getCharacter()?.id;
-      const isStarter = STARTERS.includes(charId || "");
-      const isOwned = this.config.ownedCharacterIds?.includes(charId || "");
-      const isUnlocked = isStarter || isOwned;
-
-      if (charId && (this.bannedCharacters.has(charId) || !isUnlocked)) {
+      if (charId && this.bannedCharacters.has(charId)) {
         card.disable();
         card.setAlpha(0.3);
       } else {
@@ -410,18 +404,12 @@ export class CharacterSelectScene extends Phaser.Scene {
       this.CARD_SPACING * (this.GRID_COLS - 1);
     const startX = (GAME_DIMENSIONS.WIDTH - totalWidth) / 2;
 
-    const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
-
     CHARACTER_ROSTER.forEach((character, index) => {
       const col = index % this.GRID_COLS;
       const row = Math.floor(index / this.GRID_COLS);
 
       const x = startX + col * (this.CARD_WIDTH + this.CARD_SPACING);
       const y = this.GRID_START_Y + row * (this.CARD_HEIGHT + 20);
-
-      const isStarter = STARTERS.includes(character.id);
-      const isOwned = this.config.ownedCharacterIds?.includes(character.id);
-      const isUnlocked = isStarter || isOwned;
 
       const card = new CharacterCard(this, {
         x,
@@ -430,7 +418,7 @@ export class CharacterSelectScene extends Phaser.Scene {
         width: this.CARD_WIDTH,
         height: this.CARD_HEIGHT,
         onSelect: (char) => {
-          if (isUnlocked || this.phase === "BANNING") {
+          if (this.phase === "BANNING" || this.phase === "PICKING") {
             this.onCharacterSelect(char);
           } else {
             this.sound.play("sfx_click", { volume: 0.2, detune: -500 });
@@ -889,12 +877,7 @@ export class CharacterSelectScene extends Phaser.Scene {
     if (this.isConfirmed) return;
 
     if (!this.selectedCharacter) {
-      const STARTERS = ["cyber-ninja", "block-bruiser", "dag-warrior", "hash-hunter"];
-      const unlockedCharacters = CHARACTER_ROSTER.filter(
-        (c) =>
-          STARTERS.includes(c.id) ||
-          this.config.ownedCharacterIds?.includes(c.id)
-      );
+      const unlockedCharacters = CHARACTER_ROSTER;
 
       if (unlockedCharacters.length > 0) {
         const randomIndex = Math.floor(Math.random() * unlockedCharacters.length);
