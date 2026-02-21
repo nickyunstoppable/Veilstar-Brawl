@@ -53,6 +53,10 @@ function truncateTxId(txId: string): string {
     return `${txId.slice(0, 8)}...${txId.slice(-8)}`;
 }
 
+function getStellarExpertTestnetTxUrl(txId: string): string {
+    return `https://stellar.expert/explorer/testnet/tx/${encodeURIComponent(txId)}`;
+}
+
 function navigate(path: string) {
     window.history.pushState({}, "", path);
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -325,13 +329,27 @@ export default function BetHistoryPage() {
                                                 {bet.txId && (
                                                     <div className="flex items-center justify-between">
                                                         <span className="text-cyber-gray text-sm">TX:</span>
-                                                        <span className="text-cyber-gold text-xs font-mono">{truncateTxId(bet.txId)}</span>
+                                                        <a
+                                                            href={getStellarExpertTestnetTxUrl(bet.txId)}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-cyber-gold text-xs font-mono hover:underline"
+                                                        >
+                                                            {truncateTxId(bet.txId)}
+                                                        </a>
                                                     </div>
                                                 )}
                                                 {bet.payoutTxId && (
                                                     <div className="flex items-center justify-between">
                                                         <span className="text-cyber-gray text-sm">Claim TX:</span>
-                                                        <span className="text-green-400 text-xs font-mono">{truncateTxId(bet.payoutTxId)}</span>
+                                                        <a
+                                                            href={getStellarExpertTestnetTxUrl(bet.payoutTxId)}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-green-400 text-xs font-mono hover:underline"
+                                                        >
+                                                            {truncateTxId(bet.payoutTxId)}
+                                                        </a>
                                                     </div>
                                                 )}
                                             </div>
