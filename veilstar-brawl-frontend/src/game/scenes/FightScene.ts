@@ -87,7 +87,12 @@ export class FightScene extends Phaser.Scene {
   private narrativeText!: Phaser.GameObjects.Text;
   private turnIndicatorText!: Phaser.GameObjects.Text;
   private privatePlanEnergyText?: Phaser.GameObjects.Text;
-  private zkOnChainBadgeText?: Phaser.GameObjects.Text;
+  private zkIndicatorContainer?: Phaser.GameObjects.Container;
+  private zkIndicatorPanel?: Phaser.GameObjects.Graphics;
+  private zkIndicatorLinks: Phaser.GameObjects.Rectangle[] = [];
+  private zkIndicatorDots: Phaser.GameObjects.Arc[] = [];
+  private zkIndicatorLabels: Phaser.GameObjects.Text[] = [];
+  private zkIndicatorPulseTween?: Phaser.Tweens.Tween;
   private zkOnChainBadgeRound: number = 0;
 
   // Character sprites
@@ -2678,36 +2683,190 @@ export class FightScene extends Phaser.Scene {
       "",
     ).setOrigin(0.5).setVisible(false);
 
-    this.zkOnChainBadgeText = TextFactory.createSubtitle(
-      this,
-      GAME_DIMENSIONS.CENTER_X,
-      186,
-      "",
-    ).setOrigin(0.5).setVisible(false);
+    this.createZkIndicatorVisual();
+  }
+
+  private createZkIndicatorVisual(): void {
+    const centerX = GAME_DIMENSIONS.CENTER_X;
+    const centerY = 186;
+
+    this.zkIndicatorContainer = this.add.container(centerX, centerY);
+    this.zkIndicatorContainer.setVisible(false);
+
+    this.zkIndicatorPanel = this.add.graphics();
+    this.zkIndicatorPanel.fillStyle(0x0f172a, 0.82);
+    this.zkIndicatorPanel.fillRoundedRect(-130, -21, 260, 42, 10);
+    this.zkIndicatorPanel.lineStyle(1, 0x334155, 0.9);
+    this.zkIndicatorPanel.strokeRoundedRect(-130, -21, 260, 42, 10);
+
+    const stepXs = [-74, 0, 74];
+    const labels = ["COMMIT", "VERIFY", "LOCK"];
+
+    this.zkIndicatorLinks = [
+      this.add.rectangle(-37, 0, 36, 2, 0x334155, 0.8),
+      this.add.rectangle(37, 0, 36, 2, 0x334155, 0.8),
+    ];
+
+    this.zkIndicatorDots = stepXs.map((x) =>
+      this.add.circle(x, 0, 6, 0x334155, 0.95).setStrokeStyle(2, 0x475569, 0.9),
+    );
+
+    this.zkIndicatorLabels = stepXs.map((x, idx) =>
+      this.add.text(x, 13, labels[idx], {
+        fontFamily: "monospace",
+        fontSize: "9px",
+        color: "#64748b",
+        fontStyle: "bold",
+      }).setOrigin(0.5, 0),
+    );
+
+    this.zkIndicatorContainer.add([
+      this.zkIndicatorPanel,
+      ...this.zkIndicatorLinks,
+      ...this.zkIndicatorDots,
+      ...this.zkIndicatorLabels,
+    ]);
+  }
+
+  private stopZkIndicatorTweens(): void {
+    if (this.zkIndicatorPulseTween) {
+      this.zkIndicatorPulseTween.stop();
+      this.zkIndicatorPulseTween = undefined;
+    }
+
+    if (this.zkIndicatorContainer) {
+      this.zkIndicatorContainer.setScale(1);
+    }
+  }
+
+  private setZkPipelineStep(index: number, state: "idle" | "active" | "done" | "error"): void {
+    const dot = this.zkIndicatorDots[index];
+    const label = this.zkIndicatorLabels[index];
+    if (!dot || !label) return;
+
+    if (state === "idle") {
+      dot.setFillStyle(0x334155, 0.95);
+      dot.setStrokeStyle(2, 0x475569, 0.9);
+      label.setColor("#64748b");
+      return;
+    }
+
+    if (state === "active") {
+      dot.setFillStyle(0x3b82f6, 0.95);
+      dot.setStrokeStyle(2, 0x40e0d0, 0.95);
+      label.setColor("#93c5fd");
+      return;
+    }
+
+    if (state === "done") {
+      dot.setFillStyle(0x22c55e, 0.95);
+      dot.setStrokeStyle(2, 0x22c55e, 0.95);
+      label.setColor("#86efac");
+      return;
+    }
+
+    dot.setFillStyle(0xef4444, 0.95);
+    dot.setStrokeStyle(2, 0xef4444, 0.95);
+    label.setColor("#fca5a5");
+  }
+
+  private setZkPipelineLinks(firstDone: boolean, secondDone: boolean): void {
+    const [l1, l2] = this.zkIndicatorLinks;
+    if (!l1 || !l2) return;
+
+    l1.setFillStyle(firstDone ? 0x22c55e : 0x334155, firstDone ? 0.95 : 0.8);
+    l2.setFillStyle(secondDone ? 0x22c55e : 0x334155, secondDone ? 0.95 : 0.8);
+  }
+
+  private applyZkIndicatorState(state: "pending" | "verified" | "failed"): void {
+    if (!PRIVATE_ROUNDS_ENABLED || !this.zkIndicatorContainer) return;
+
+    this.zkIndicatorContainer.setVisible(true);
+    this.stopZkIndicatorTweens();
+
+    if (state === "pending") {
+      this.setZkPipelineStep(0, "done");
+      this.setZkPipelineStep(1, "active");
+      this.setZkPipelineStep(2, "idle");
+      this.setZkPipelineLinks(true, false);
+
+      this.zkIndicatorPulseTween = this.tweens.add({
+        targets: this.zkIndicatorDots[1],
+        scaleX: { from: 1, to: 1.25 },
+        scaleY: { from: 1, to: 1.25 },
+        duration: 650,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+      return;
+    }
+
+    if (state === "verified") {
+      this.setZkPipelineStep(0, "done");
+      this.setZkPipelineStep(1, "done");
+      this.setZkPipelineStep(2, "done");
+      this.setZkPipelineLinks(true, true);
+
+      this.tweens.add({
+        targets: this.zkIndicatorContainer,
+        scaleX: { from: 0.96, to: 1.06 },
+        scaleY: { from: 0.96, to: 1.06 },
+        duration: 260,
+        yoyo: true,
+        ease: "Back.easeOut",
+      });
+      return;
+    }
+
+    this.setZkPipelineStep(0, "done");
+    this.setZkPipelineStep(1, "error");
+    this.setZkPipelineStep(2, "idle");
+    this.setZkPipelineLinks(true, false);
+
+    this.tweens.add({
+      targets: this.zkIndicatorDots[1],
+      scaleX: { from: 1, to: 1.25 },
+      scaleY: { from: 1, to: 1.25 },
+      duration: 120,
+      yoyo: true,
+      repeat: 2,
+    });
+
+    this.tweens.add({
+      targets: this.zkIndicatorContainer,
+      x: { from: GAME_DIMENSIONS.CENTER_X - 3, to: GAME_DIMENSIONS.CENTER_X + 3 },
+      duration: 60,
+      repeat: 3,
+      yoyo: true,
+      onComplete: () => {
+        if (this.zkIndicatorContainer) {
+          this.zkIndicatorContainer.x = GAME_DIMENSIONS.CENTER_X;
+        }
+      },
+    });
   }
 
   private resetZkOnChainBadge(roundNumber: number): void {
     this.zkOnChainBadgeRound = roundNumber;
-    if (!this.zkOnChainBadgeText || !this.zkOnChainBadgeText.active) return;
+    if (!this.zkIndicatorContainer) return;
+    this.stopZkIndicatorTweens();
     try {
-      this.zkOnChainBadgeText.setVisible(false);
-      this.zkOnChainBadgeText.setText("");
+      this.zkIndicatorContainer.setVisible(false);
     } catch {
       // ignore renderer/text teardown races
     }
   }
 
-  private setZkOnChainBadge(params: { roundNumber: number; message: string; color: string }): void {
+  private setZkOnChainBadge(params: { roundNumber: number; variant: "pending" | "verified" | "failed" }): void {
     if (!PRIVATE_ROUNDS_ENABLED) return;
-    if (!this.zkOnChainBadgeText || !this.zkOnChainBadgeText.active) return;
+    if (!this.zkIndicatorContainer?.active) return;
 
     // Ignore late/out-of-round updates.
     if (params.roundNumber !== this.zkOnChainBadgeRound) return;
 
     try {
-      this.zkOnChainBadgeText.setVisible(true);
-      this.zkOnChainBadgeText.setText(params.message);
-      this.zkOnChainBadgeText.setColor(params.color);
+      this.applyZkIndicatorState(params.variant);
     } catch {
       // ignore renderer/text teardown races
     }
@@ -3562,6 +3721,11 @@ export class FightScene extends Phaser.Scene {
 
       if (payload.bothCommitted) {
         if (PRIVATE_ROUNDS_ENABLED) {
+          const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
+          this.setZkOnChainBadge({
+            roundNumber: currentRound,
+            variant: "pending",
+          });
           this.showZkWaitingStatus("Both commitments locked. Finalizing zk checks...", "#22c55e", 2000);
           this.stopZkWaitingTicker();
           this.phase = "resolving";
@@ -3607,24 +3771,21 @@ export class FightScene extends Phaser.Scene {
       if (payload.stage === "onchain_verify_submitting") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "⏳ On-chain verify pending...",
-          color: "#f97316",
+          variant: "pending",
         });
       }
 
       if (payload.stage === "onchain_verify_ok") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "✓ On-chain verified",
-          color: "#22c55e",
+          variant: "verified",
         });
       }
 
       if (payload.stage === "onchain_verify_failed" || payload.stage === "onchain_verify_exception") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
-          message: "✗ On-chain verify failed",
-          color: "#ef4444",
+          variant: "failed",
         });
       }
 
@@ -3708,7 +3869,15 @@ export class FightScene extends Phaser.Scene {
         narrative: raw.narrative ?? "",
         player1RoundsWon: Number(raw.player1RoundsWon ?? fallbackP1RoundsWon),
         player2RoundsWon: Number(raw.player2RoundsWon ?? fallbackP2RoundsWon),
+        zkOutcome: raw.zkOutcome as { verified?: boolean; backend?: string | null; proofScope?: "round_plan" | "legacy" } | undefined,
       };
+
+      if (PRIVATE_ROUNDS_ENABLED && payload.zkOutcome?.verified) {
+        this.setZkOnChainBadge({
+          roundNumber: payload.roundNumber,
+          variant: "verified",
+        });
+      }
 
       this.debugMatchEndLog(`roundResolved normalized r${payload.roundNumber} t${payload.turnNumber}`, {
         rawIsMatchOver: raw.isMatchOver,

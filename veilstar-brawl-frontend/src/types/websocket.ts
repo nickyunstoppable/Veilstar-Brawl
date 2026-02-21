@@ -83,6 +83,11 @@ export interface RoundResolvedPayload {
     // Power surge
     hasPowerSurge?: boolean;
     powerSurgeCards?: any[];
+    zkOutcome?: {
+        verified: boolean;
+        backend?: string | null;
+        proofScope?: "round_plan" | "legacy";
+    };
 }
 
 export interface MatchEndedPayload {

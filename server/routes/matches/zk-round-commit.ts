@@ -1746,6 +1746,11 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
 
                 const resolution = await resolveTurn(matchId, round.id, {
                     suppressNextTurnBroadcastOnly: true,
+                    zkOutcome: {
+                        verified: true,
+                        backend: verificationBackend,
+                        proofScope: "round_plan",
+                    },
                 });
 
                 const resolutionSuccess = (resolution as any)?.success !== false;

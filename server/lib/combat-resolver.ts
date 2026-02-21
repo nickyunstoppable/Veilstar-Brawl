@@ -63,7 +63,22 @@ export interface CombatResolutionResult {
     isMatchOver: boolean;
     matchWinner: "player1" | "player2" | null;
     narrative: string;
+    zkOutcome?: {
+        verified: boolean;
+        backend?: string | null;
+        proofScope?: "round_plan" | "legacy";
+    };
     error?: string;
+}
+
+interface ResolveTurnOptions {
+    suppressPostTurnBroadcasts?: boolean;
+    suppressNextTurnBroadcastOnly?: boolean;
+    zkOutcome?: {
+        verified: boolean;
+        backend?: string | null;
+        proofScope?: "round_plan" | "legacy";
+    };
 }
 
 interface PrivateRoundPlanPayload {
@@ -206,10 +221,7 @@ async function getOrCreateRoundTurn(params: {
 export async function resolveTurn(
     matchId: string,
     roundId: string,
-    options?: {
-        suppressPostTurnBroadcasts?: boolean;
-        suppressNextTurnBroadcastOnly?: boolean;
-    },
+    options?: ResolveTurnOptions,
 ): Promise<CombatResolutionResult> {
     const supabase = getSupabase();
 
@@ -466,6 +478,7 @@ export async function resolveTurn(
             isMatchOver: matchOver,
             matchWinner: matchWinner,
             narrative: resolution.narrative,
+            zkOutcome: options?.zkOutcome,
         };
 
         // Broadcast round resolved
@@ -499,6 +512,7 @@ export async function resolveTurn(
                 lifesteal: resolution.player2.lifesteal ?? 0,
                 energyDrained: resolution.player2.energyDrained ?? 0,
             },
+            zkOutcome: options?.zkOutcome,
         });
 
         // If match is over, report result on-chain and broadcast match ended
@@ -582,7 +596,7 @@ export async function resolveTurn(
                 winner: matchWinner,
                 winnerAddress: winnerAddr,
                 finalScore: {
-                    move: p1ResolvedMove,
+                    player1RoundsWon: p1RoundsWon,
                     player2RoundsWon: p2RoundsWon,
                 },
                 player1RoundsWon: p1RoundsWon,
@@ -595,7 +609,6 @@ export async function resolveTurn(
                 onChainOutcomeTxHash,
                 onChainResultPending,
                 onChainResultError,
-                    move: p2ResolvedMove,
                 zkFinalizeFailedReason,
                 contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || '',
             });
