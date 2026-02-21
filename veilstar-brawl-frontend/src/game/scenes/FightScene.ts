@@ -3038,41 +3038,9 @@ export class FightScene extends Phaser.Scene {
     // Mark as handled to prevent duplicate calls from update() loop
     this.timerExpiredHandled = true;
 
-    if (PRIVATE_ROUNDS_ENABLED) {
-      if (!this.localMoveSubmitted && !this.moveInFlight) {
-        while (this.privateRoundPlannedMoves.length < PRIVATE_ROUND_PLAN_TURNS) {
-          this.privateRoundPlannedMoves.push("block");
-        }
-
-        this.localMoveSubmitted = true;
-        this.moveInFlight = true;
-        this.turnIndicatorText.setText("Time's up. Submitting fallback plan...");
-        this.turnIndicatorText.setColor("#f97316");
-        this.isWaitingForOpponent = true;
-
-        EventBus.emit("game:submitRoundPlan", {
-          matchId: this.config.matchId,
-          roundNumber: this.serverState?.currentRound ?? 1,
-          movePlan: this.privateRoundPlannedMoves,
-          playerRole: this.config.playerRole,
-          surgeCardId: this.activeSurges[this.config.playerRole as "player1" | "player2"] ?? null,
-        });
-      } else if (this.localMoveSubmitted && !this.moveInFlight && this.privateRoundPlannedMoves.length === PRIVATE_ROUND_PLAN_TURNS) {
-        this.turnIndicatorText.setText("Opponent timed out. Finalizing round...");
-        this.turnIndicatorText.setColor("#f97316");
-        EventBus.emit("game:submitRoundPlan", {
-          matchId: this.config.matchId,
-          roundNumber: this.serverState?.currentRound ?? 1,
-          movePlan: this.privateRoundPlannedMoves,
-          playerRole: this.config.playerRole,
-        });
-      }
-      return;
-    }
-
     // Update UI to show timeout state
     if (this.localMoveSubmitted) {
-      this.turnIndicatorText.setText("Enforcing deadline...");
+      this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Time's up. Resolving private round timeout..." : "Enforcing deadline...");
       this.turnIndicatorText.setColor("#22c55e");
     } else if (this.moveInFlight) {
       // Move was clicked but transaction is still being processed.
@@ -3081,7 +3049,7 @@ export class FightScene extends Phaser.Scene {
       this.turnIndicatorText.setText("Confirming transaction...");
       this.turnIndicatorText.setColor("#f59e0b");
     } else {
-      this.turnIndicatorText.setText("Time's up! Checking server...");
+      this.turnIndicatorText.setText(PRIVATE_ROUNDS_ENABLED ? "Time's up. No fallback submission. Resolving timeout..." : "Time's up! Checking server...");
       this.turnIndicatorText.setColor("#ff8800");
     }
 

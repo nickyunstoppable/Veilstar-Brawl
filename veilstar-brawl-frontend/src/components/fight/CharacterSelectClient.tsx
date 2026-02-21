@@ -1962,10 +1962,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         };
 
         const handleTimerExpired = async () => {
-            if (PRIVATE_ROUNDS_ENABLED) {
-                return;
-            }
-
             if (!publicKey) return;
 
             try {
@@ -2002,6 +1998,66 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             const id = payload?.matchId || matchId;
             if (!publicKey) return;
 
+            const myRole: "player1" | "player2" = sceneConfig.isHost ? "player1" : "player2";
+            const opponentRole: "player1" | "player2" = myRole === "player1" ? "player2" : "player1";
+
+            const reconcileTerminalState = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/api/matches/${id}?lite=1`);
+                    if (!res.ok) return false;
+
+                    const json = await res.json().catch(() => null) as {
+                        match?: {
+                            status?: string;
+                            winner_address?: string | null;
+                            player1_address?: string;
+                            player2_address?: string;
+                            player1_rounds_won?: number;
+                            player2_rounds_won?: number;
+                            onchain_result_tx_hash?: string | null;
+                        };
+                    } | null;
+
+                    const match = json?.match;
+                    if (!match) return false;
+
+                    const status = String(match.status || "").toLowerCase();
+                    if (status === "cancelled") {
+                        EventBus.emit("game:matchCancelled", {
+                            matchId: id,
+                            reason: "both_disconnected",
+                            message: "Both players disconnected.",
+                            redirectTo: "/play",
+                        });
+                        return true;
+                    }
+
+                    if (status !== "completed") return false;
+
+                    const winnerAddress = String(match.winner_address || "").trim();
+                    const winner = winnerAddress === String(match.player1_address || "").trim()
+                        ? "player1"
+                        : winnerAddress === String(match.player2_address || "").trim()
+                            ? "player2"
+                            : (Number(match.player1_rounds_won || 0) >= Number(match.player2_rounds_won || 0) ? "player1" : "player2");
+
+                    EventBus.emit("game:matchEnded", {
+                        matchId: id,
+                        winner,
+                        winnerAddress,
+                        reason: "timeout",
+                        finalScore: {
+                            player1RoundsWon: Number(match.player1_rounds_won || 0),
+                            player2RoundsWon: Number(match.player2_rounds_won || 0),
+                        },
+                        onChainTxHash: match.onchain_result_tx_hash || undefined,
+                    });
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+
             try {
                 const response = await fetch(`${API_BASE}/api/matches/${id}/timeout`, {
                     method: "POST",
@@ -2011,12 +2067,15 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                 if (!response.ok) {
                     console.error("[CharacterSelectClient] timeout claim failed:", await response.text());
+                    await reconcileTerminalState();
                     return;
                 }
 
                 const result = await response.json().catch(() => null) as {
                     data?: {
                         result?: string;
+                        reason?: string;
+                        remainingSeconds?: number;
                         message?: string;
                         redirectTo?: string;
                         matchEndedPayload?: unknown;
@@ -2034,9 +2093,34 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         message: result.data.message || "Both players disconnected.",
                         redirectTo: result.data.redirectTo || "/play",
                     });
+                } else if (result.data.result === "no_action") {
+                    const reason = String(result.data.reason || "");
+                    const remainingSeconds = Number(result.data.remainingSeconds ?? 0);
+
+                    if (reason === "opponent_connected") {
+                        EventBus.emit("game:playerReconnected", {
+                            player: opponentRole,
+                            address: "",
+                            reconnectedAt: Date.now(),
+                        });
+                        return;
+                    }
+
+                    if (reason === "timeout_not_reached" && Number.isFinite(remainingSeconds) && remainingSeconds > 0) {
+                        EventBus.emit("game:playerDisconnected", {
+                            player: opponentRole,
+                            address: "",
+                            disconnectedAt: Date.now(),
+                            timeoutSeconds: remainingSeconds,
+                        });
+                        return;
+                    }
+
+                    await reconcileTerminalState();
                 }
             } catch (error) {
                 console.error("[CharacterSelectClient] timeout claim error:", error);
+                await reconcileTerminalState();
             }
         };
 

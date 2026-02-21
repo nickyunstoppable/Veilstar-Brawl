@@ -5,6 +5,11 @@
 
 import { getSupabase } from "../../lib/supabase";
 import { handleMoveTimeout } from "../../lib/combat-resolver";
+import { broadcastGameEvent } from "../../lib/matchmaker";
+import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
+import { triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
+
+const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 
 interface MoveTimeoutBody {
     address: string;
@@ -23,7 +28,7 @@ export async function handleMoveTimeoutRoute(matchId: string, req: Request): Pro
 
         const { data: match, error: matchError } = await supabase
             .from("matches")
-            .select("id, status, player1_address, player2_address")
+            .select("id, status, format, room_code, player1_address, player2_address, player1_rounds_won, player2_rounds_won, onchain_session_id, onchain_contract_id")
             .eq("id", matchId)
             .single();
 
@@ -40,6 +45,155 @@ export async function handleMoveTimeoutRoute(matchId: string, req: Request): Pro
             return Response.json({
                 success: true,
                 data: { result: "no_action", reason: `match_not_in_progress:${match.status}` },
+            });
+        }
+
+        if (PRIVATE_ROUNDS_ENABLED) {
+            const { data: latestRound } = await supabase
+                .from("rounds")
+                .select("round_number")
+                .eq("match_id", matchId)
+                .order("round_number", { ascending: false })
+                .order("turn_number", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            const { data: snapshot } = await supabase
+                .from("fight_state_snapshots")
+                .select("current_round")
+                .eq("match_id", matchId)
+                .maybeSingle();
+
+            const currentRound = Number(snapshot?.current_round ?? latestRound?.round_number ?? 1);
+
+            const { data: commits } = await supabase
+                .from("round_private_commits")
+                .select("player_address")
+                .eq("match_id", matchId)
+                .eq("round_number", currentRound);
+
+            const committed = new Set((commits || []).map((row) => String(row.player_address || "").trim().toLowerCase()));
+            const p1Address = String(match.player1_address || "").trim();
+            const p2Address = String(match.player2_address || "").trim();
+            const p1Committed = committed.has(p1Address.toLowerCase());
+            const p2Committed = committed.has(p2Address.toLowerCase());
+
+            if (!p1Committed && !p2Committed) {
+                await supabase
+                    .from("matches")
+                    .update({
+                        status: "cancelled",
+                        fight_phase: "match_end",
+                        completed_at: new Date().toISOString(),
+                    })
+                    .eq("id", matchId)
+                    .in("status", ["in_progress", "character_select"]);
+
+                const cancelPayload = {
+                    matchId,
+                    reason: "both_timeout",
+                    message: "Both players failed to submit a private round plan in time.",
+                    redirectTo: "/play",
+                };
+
+                await broadcastGameEvent(matchId, "match_cancelled", cancelPayload);
+
+                return Response.json({
+                    success: true,
+                    data: {
+                        result: "match_cancelled",
+                        ...cancelPayload,
+                    },
+                });
+            }
+
+            if (p1Committed !== p2Committed) {
+                const winner = p1Committed ? "player1" : "player2";
+                const winnerAddress = winner === "player1" ? p1Address : p2Address;
+                const roundsToWin = match.format === "best_of_5" ? 3 : 2;
+                const player1RoundsWon = winner === "player1" ? roundsToWin : Number(match.player1_rounds_won || 0);
+                const player2RoundsWon = winner === "player2" ? roundsToWin : Number(match.player2_rounds_won || 0);
+
+                await supabase
+                    .from("matches")
+                    .update({
+                        status: "completed",
+                        winner_address: winnerAddress,
+                        player1_rounds_won: player1RoundsWon,
+                        player2_rounds_won: player2RoundsWon,
+                        completed_at: new Date().toISOString(),
+                        fight_phase: "match_end",
+                    })
+                    .eq("id", matchId)
+                    .in("status", ["in_progress", "character_select"]);
+
+                let onChainTxHash: string | undefined;
+                let onChainSkippedReason: string | undefined;
+                const autoFinalize = getAutoProveFinalizeStatus();
+                const stellarReady = isStellarConfigured();
+
+                if (!autoFinalize.enabled && stellarReady) {
+                    try {
+                        const onChainResult = await reportMatchResultOnChain(
+                            matchId,
+                            p1Address,
+                            p2Address,
+                            winnerAddress,
+                            {
+                                sessionId: match.onchain_session_id ?? undefined,
+                                contractId: match.onchain_contract_id || undefined,
+                            },
+                        );
+                        onChainTxHash = onChainResult.txHash;
+                        if (onChainTxHash) {
+                            await supabase
+                                .from("matches")
+                                .update({ onchain_result_tx_hash: onChainTxHash })
+                                .eq("id", matchId);
+                        }
+                    } catch (err) {
+                        console.error("[MoveTimeout POST] On-chain report error:", err);
+                    }
+                } else if (autoFinalize.enabled) {
+                    triggerAutoProveFinalize(matchId, winnerAddress, "private-round-timeout");
+                } else {
+                    onChainSkippedReason = `${autoFinalize.reason}; Stellar not configured`;
+                }
+
+                const endedPayload = {
+                    matchId,
+                    winner,
+                    winnerAddress,
+                    reason: "timeout",
+                    finalScore: {
+                        player1RoundsWon,
+                        player2RoundsWon,
+                    },
+                    player1RoundsWon,
+                    player2RoundsWon,
+                    isPrivateRoom: !!match.room_code,
+                    onChainSessionId: match.onchain_session_id ?? matchIdToSessionId(matchId),
+                    onChainTxHash,
+                    onChainSkippedReason,
+                    contractId: match.onchain_contract_id || process.env.VITE_VEILSTAR_BRAWL_CONTRACT_ID || "",
+                };
+
+                await broadcastGameEvent(matchId, "match_ended", endedPayload);
+
+                return Response.json({
+                    success: true,
+                    data: {
+                        result: "match_resolved",
+                        isMatchOver: true,
+                        matchWinner: winner,
+                        matchEndedPayload: endedPayload,
+                    },
+                });
+            }
+
+            return Response.json({
+                success: true,
+                data: { result: "no_action", reason: "both_committed_private_round" },
             });
         }
 

@@ -5,7 +5,15 @@ interface ProveFinalizeBody {
     winnerAddress?: string;
 }
 
+const inFlightProveFinalize = new Map<string, Promise<Response>>();
+
 export async function handleProveAndFinalize(matchId: string, req: Request): Promise<Response> {
+    if (inFlightProveFinalize.has(matchId)) {
+        console.log(`[ZK Prove+Finalize] Joining in-flight request for match ${matchId}`);
+        return inFlightProveFinalize.get(matchId)!;
+    }
+
+    const operation = (async (): Promise<Response> => {
     try {
         console.log(`[ZK Prove+Finalize] Request received for match ${matchId}`);
         const body = await req.json() as ProveFinalizeBody;
@@ -52,5 +60,11 @@ export async function handleProveAndFinalize(matchId: string, req: Request): Pro
             { error: err instanceof Error ? err.message : "Failed to prove and finalize" },
             { status: 500 },
         );
+    } finally {
+        inFlightProveFinalize.delete(matchId);
     }
+    })();
+
+    inFlightProveFinalize.set(matchId, operation);
+    return operation;
 }

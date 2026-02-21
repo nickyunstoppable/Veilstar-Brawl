@@ -18,9 +18,14 @@ interface TimeoutBody {
 
 export async function handleTimeoutVictory(matchId: string, req: Request): Promise<Response> {
     try {
-        if (PRIVATE_ROUNDS_ENABLED && ZK_STRICT_FINALIZE) {
+        const autoFinalize = getAutoProveFinalizeStatus();
+
+        if (PRIVATE_ROUNDS_ENABLED && ZK_STRICT_FINALIZE && !autoFinalize.enabled) {
             return Response.json(
-                { error: "Timeout victory is disabled in strict ZK mode. Match completion must be proof-backed." },
+                {
+                    error: "Timeout victory requires ZK auto-finalization in strict mode.",
+                    reason: autoFinalize.reason,
+                },
                 { status: 409 },
             );
         }
@@ -142,7 +147,6 @@ export async function handleTimeoutVictory(matchId: string, req: Request): Promi
 
         let onChainTxHash: string | undefined;
         let onChainSkippedReason: string | undefined;
-        const autoFinalize = getAutoProveFinalizeStatus();
         const stellarReady = isStellarConfigured();
 
         if (!autoFinalize.enabled && stellarReady) {

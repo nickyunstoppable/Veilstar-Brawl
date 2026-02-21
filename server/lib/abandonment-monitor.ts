@@ -11,6 +11,7 @@ import {
 import { getAutoProveFinalizeStatus, triggerAutoProveFinalize } from "./zk-finalizer-client";
 
 const MONITOR_INTERVAL_MS = 60_000;
+const STALE_IN_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000;
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
 let sweepInProgress = false;
 
@@ -19,6 +20,12 @@ function isPastTimeout(disconnectedAt: string | null, timeoutSeconds: number, no
     const ts = new Date(disconnectedAt).getTime();
     if (!Number.isFinite(ts)) return false;
     return nowMs >= ts + timeoutSeconds * 1000;
+}
+
+function toTimestampMs(value: string | null | undefined): number | null {
+    if (!value) return null;
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : null;
 }
 
 async function applyEloForTimeoutWin(
@@ -262,9 +269,8 @@ export async function runAbandonmentSweep(): Promise<void> {
         const supabase = getSupabase();
         const { data: matches, error } = await supabase
             .from("matches")
-            .select("id,status,format,room_code,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,player1_stake_confirmed_at,player2_stake_confirmed_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id")
+            .select("id,status,format,room_code,player1_address,player2_address,player1_disconnected_at,player2_disconnected_at,player1_stake_confirmed_at,player2_stake_confirmed_at,disconnect_timeout_seconds,onchain_session_id,onchain_contract_id,started_at,created_at")
             .in("status", ["character_select", "in_progress"])
-            .or("player1_disconnected_at.not.is.null,player2_disconnected_at.not.is.null")
             .limit(200);
 
         if (error || !matches || matches.length === 0) return;
@@ -274,8 +280,35 @@ export async function runAbandonmentSweep(): Promise<void> {
         const nowMs = Date.now();
         let cancelledCount = 0;
         let timeoutWinCount = 0;
+        let staleInProgressCancelledCount = 0;
 
         for (const match of matches) {
+            if (match.status === "in_progress") {
+                const startedMs = toTimestampMs((match as any).started_at) ?? toTimestampMs((match as any).created_at);
+                if (startedMs !== null && nowMs - startedMs >= STALE_IN_PROGRESS_TIMEOUT_MS) {
+                    await supabase
+                        .from("matches")
+                        .update({
+                            status: "cancelled",
+                            completed_at: new Date().toISOString(),
+                            fight_phase: "match_end",
+                        })
+                        .eq("id", match.id)
+                        .eq("status", "in_progress");
+
+                    await broadcastGameEvent(match.id, "match_cancelled", {
+                        matchId: match.id,
+                        reason: "stale_in_progress_timeout",
+                        message: "Match was in progress for over 30 minutes and has been cancelled.",
+                        redirectTo: "/play",
+                    });
+
+                    staleInProgressCancelledCount += 1;
+                    console.log(`[AbandonmentMonitor] Cancelled stale in_progress match=${match.id} ageMs=${nowMs - startedMs}`);
+                    continue;
+                }
+            }
+
             const timeoutSeconds = Number(match.disconnect_timeout_seconds || 30);
             const p1Expired = isPastTimeout(match.player1_disconnected_at, timeoutSeconds, nowMs);
             const p2Expired = isPastTimeout(match.player2_disconnected_at, timeoutSeconds, nowMs);
@@ -301,9 +334,9 @@ export async function runAbandonmentSweep(): Promise<void> {
             }
         }
 
-        if (cancelledCount > 0 || timeoutWinCount > 0) {
+        if (cancelledCount > 0 || timeoutWinCount > 0 || staleInProgressCancelledCount > 0) {
             console.log(
-                `[AbandonmentMonitor] Sweep results cancelled=${cancelledCount} timeoutWins=${timeoutWinCount}`,
+                `[AbandonmentMonitor] Sweep results cancelled=${cancelledCount} timeoutWins=${timeoutWinCount} staleCancelled=${staleInProgressCancelledCount}`,
             );
         }
     } catch (err) {

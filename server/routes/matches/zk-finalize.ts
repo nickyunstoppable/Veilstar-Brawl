@@ -56,6 +56,18 @@ interface FinalizeBody {
     broadcast?: boolean;
 }
 
+function isIdempotentOutcomeSubmissionError(errorText: string): boolean {
+    const normalized = (errorText || "").toLowerCase();
+    return (
+        normalized.includes("error(contract, #20)")
+        || normalized.includes("zkverificationalreadysubmitted")
+        || normalized.includes("error(contract, #3)")
+        || normalized.includes("matchalreadyended")
+        || normalized.includes("already submitted")
+        || normalized.includes("already finalized")
+    );
+}
+
 const DEFAULT_GROTH16_ROUND_CIRCUIT_DIR = resolve(process.cwd(), "zk_circuits", "veilstar_round_plan_groth16");
 const DEFAULT_GROTH16_ROUND_VKEY_PATH = resolve(DEFAULT_GROTH16_ROUND_CIRCUIT_DIR, "artifacts", "verification_key.json");
 
@@ -541,13 +553,20 @@ export async function handleFinalizeWithZkProof(matchId: string, req: Request): 
             );
 
             if (!outcomeProofResult.success) {
-                return Response.json(
-                    {
-                        error: "On-chain match outcome proof transaction failed",
-                        details: outcomeProofResult.error || null,
-                    },
-                    { status: 502 },
-                );
+                const outcomeError = String(outcomeProofResult.error || "");
+                if (isIdempotentOutcomeSubmissionError(outcomeError)) {
+                    console.warn(
+                        `[ZK Finalize] submit_zk_match_outcome returned idempotent error for ${matchId}; continuing as already-submitted (${outcomeError.slice(0, 220)})`,
+                    );
+                } else {
+                    return Response.json(
+                        {
+                            error: "On-chain match outcome proof transaction failed",
+                            details: outcomeProofResult.error || null,
+                        },
+                        { status: 502 },
+                    );
+                }
             }
             onChainOutcomeTxHash = outcomeProofResult.txHash || null;
 
