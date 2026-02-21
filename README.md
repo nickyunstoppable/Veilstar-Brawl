@@ -260,9 +260,11 @@ A standalone verifier contract that stores verification keys and runs Groth16 pa
 
 The Groth16 verification equation is:
 
-$$e(\pi_A, \pi_B) = e(\alpha_1, \beta_2) \cdot e(L_{pub}, \gamma_2) \cdot e(\pi_C, \delta_2)$$
+$$e(\pi_A, \pi_B) = e(\alpha_1, \beta_2) \cdot e(L_{\text{pub}}, \gamma_2) \cdot e(\pi_C, \delta_2)$$
 
-where $L_{pub} = \text{ic}[0] + \sum_{i} \text{public\_inputs}[i] \cdot \text{ic}[i+1]$ is the linear combination of the IC vector with the public inputs.
+$$L_{\text{pub}} = \text{IC}_0 + \sum_{i=0}^{n} \text{inputs}_i \cdot \text{IC}_{i+1}$$
+
+where $L_{\text{pub}}$ is the linear combination of the IC vector with the public inputs.
 
 All elliptic-curve operations (point deserialization, scalar multiplication, multi-pairing) run as Soroban host functions using the BN254 primitives introduced in Protocol 25. No ZK library is linked into the contract WASM; the heavy lifting is done by the protocol's native cryptographic opcodes.
 
