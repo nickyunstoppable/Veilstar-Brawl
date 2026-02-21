@@ -448,6 +448,10 @@ function buildNarrative(
     const p1Action = moveNames[bot1Move] ?? bot1Move;
     const p2Action = moveNames[bot2Move] ?? bot2Move;
 
+    if (bot1Move === "block" && bot2Move === "block") {
+        return "Both bots hold their guard and wait for an opening.";
+    }
+
     if (bot2DamageTaken > 0 && bot1DamageTaken > 0) {
         if (bot2DamageTaken > bot1DamageTaken) {
             return `Heavy trade! Bot 1 ${p1Action} for ${bot2DamageTaken}, but eats ${bot1DamageTaken} back.`;

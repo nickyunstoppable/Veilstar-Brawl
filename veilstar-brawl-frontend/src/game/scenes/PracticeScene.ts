@@ -2159,29 +2159,41 @@ export class PracticeScene extends Phaser.Scene {
             await runP2Attack();
           }
 
-          // Show overall narrative
+          // Show overall narrative (action-only, no damage numbers)
+          const moveToAction = (move: MoveType): string => {
+            switch (move) {
+              case "punch":
+                return "throw a punch";
+              case "kick":
+                return "fire a kick";
+              case "block":
+                return "raise guard";
+              case "special":
+                return "unleash a special";
+              case "stunned":
+                return "are stunned";
+              default:
+                return "take position";
+            }
+          };
+
           let narrative = "";
           if (p1WasStunned && p2WasStunned) {
-            narrative = "Both players are stunned!";
+            narrative = "Both fighters are stunned and lose the moment.";
           } else if (p1WasStunned) {
-            narrative = `You are STUNNED! AI uses ${aiMove}!`;
+            narrative = `You are stunned while AI ${moveToAction(aiMove)}.`;
           } else if (p2WasStunned) {
-            narrative = `AI is STUNNED! You use ${playerMove}!`;
-          } else if (p1ActualDamage > 0 && p2ActualDamage > 0) {
-            // Both players took damage - show who did more
-            if (p2ActualDamage > p1ActualDamage) {
-              narrative = `Brutal exchange! You ${playerMove} for ${p2ActualDamage} dmg, but take ${p1ActualDamage}!`;
-            } else if (p1ActualDamage > p2ActualDamage) {
-              narrative = `Fierce clash! AI ${aiMove} for ${p1ActualDamage} dmg, but takes ${p2ActualDamage}!`;
-            } else {
-              narrative = `Devastating trade! Both deal ${p1ActualDamage} damage!`;
-            }
-          } else if (p2ActualDamage > 0) {
-            narrative = `You hit for ${p2ActualDamage} damage!`;
-          } else if (p1ActualDamage > 0) {
-            narrative = `AI hits for ${p1ActualDamage} damage!`;
+            narrative = `AI is stunned while you ${moveToAction(playerMove)}.`;
+          } else if (playerMove === "block" && aiMove === "block") {
+            narrative = "You and the AI both hold guard and wait for an opening.";
+          } else if (turnResult.player1?.outcome === "missed" && turnResult.player2?.outcome === "missed") {
+            narrative = `You ${moveToAction(playerMove)} and AI ${moveToAction(aiMove)}—both actions miss or are denied.`;
+          } else if (turnResult.player1?.outcome === "missed") {
+            narrative = `You ${moveToAction(playerMove)}, but AI evades.`;
+          } else if (turnResult.player2?.outcome === "missed") {
+            narrative = `AI ${moveToAction(aiMove)}, but you evade.`;
           } else {
-            narrative = "Both attacks were blocked or missed!";
+            narrative = `You ${moveToAction(playerMove)} while AI ${moveToAction(aiMove)}.`;
           }
           this.narrativeText.setText(narrative);
           this.narrativeText.setAlpha(1);

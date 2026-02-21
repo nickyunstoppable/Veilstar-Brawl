@@ -3500,6 +3500,61 @@ export class FightScene extends Phaser.Scene {
     });
   }
 
+  private buildActionNarrative(
+    p1Move: MoveType,
+    p2Move: MoveType,
+    p1Outcome?: string,
+    p2Outcome?: string
+  ): string {
+    const toAction = (move: MoveType): string => {
+      switch (move) {
+        case "punch":
+          return "throws a punch";
+        case "kick":
+          return "fires a kick";
+        case "block":
+          return "raises guard";
+        case "special":
+          return "unleashes a special";
+        case "stunned":
+          return "is stunned";
+        default:
+          return "takes position";
+      }
+    };
+
+    const p1Action = toAction(p1Move);
+    const p2Action = toAction(p2Move);
+    const p1Missed = p1Outcome === "missed";
+    const p2Missed = p2Outcome === "missed";
+
+    if (p1Move === "stunned" && p2Move === "stunned") {
+      return "Both fighters are stunned and lose the moment.";
+    }
+
+    if (p1Move === "stunned") {
+      return `Player 1 is stunned while Player 2 ${p2Action}.`;
+    }
+
+    if (p2Move === "stunned") {
+      return `Player 1 ${p1Action} while Player 2 is stunned.`;
+    }
+
+    if (p1Missed && p2Missed) {
+      return `Player 1 ${p1Action}, Player 2 ${p2Action}—both attacks miss.`;
+    }
+
+    if (p1Missed) {
+      return `Player 1 ${p1Action}, but Player 2 evades.`;
+    }
+
+    if (p2Missed) {
+      return `Player 2 ${p2Action}, but Player 1 evades.`;
+    }
+
+    return `Player 1 ${p1Action}, Player 2 ${p2Action}.`;
+  }
+
   private onBus(event: string, callback: (data: unknown) => void): void {
     EventBus.on(event as any, callback as any, this);
     this.busDisposers.push(() => {
@@ -5421,8 +5476,12 @@ export class FightScene extends Phaser.Scene {
             await runP2Attack();
           }
 
-          // Use server-provided narrative (authoritative)
-          const narrative = payload.narrative || "Both attacks were blocked or missed!";
+          const narrative = this.buildActionNarrative(
+            p1Move,
+            p2Move,
+            payload.player1?.outcome,
+            payload.player2?.outcome
+          );
           this.narrativeText.setText(narrative);
           this.narrativeText.setAlpha(1);
 

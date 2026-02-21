@@ -1235,7 +1235,7 @@ export class BotBattleScene extends Phaser.Scene {
                         await runP2Attack();
                     }
 
-                    const narrative = this.buildDisplayNarrative(turn, p1Move, p2Move, p1Damage, p2Damage);
+                    const narrative = this.buildDisplayNarrative(turn, p1Move, p2Move);
                     this.narrativeText.setText(narrative);
                     this.narrativeText.setAlpha(1);
 
@@ -1496,20 +1496,8 @@ export class BotBattleScene extends Phaser.Scene {
     private buildDisplayNarrative(
         turn: NormalizedBotTurn,
         p1Move: "punch" | "kick" | "block" | "special" | "stunned",
-        p2Move: "punch" | "kick" | "block" | "special" | "stunned",
-        p1Damage: number,
-        p2Damage: number
+        p2Move: "punch" | "kick" | "block" | "special" | "stunned"
     ): string {
-        const givenNarrative = (turn.narrative || "").trim();
-        const tooGeneric =
-            !givenNarrative
-            || /^punch\s+vs\s+kick$/i.test(givenNarrative)
-            || /^kick\s+vs\s+punch$/i.test(givenNarrative)
-            || /^block\s+vs\s+block$/i.test(givenNarrative)
-            || /^\w+\s+vs\s+\w+$/i.test(givenNarrative);
-
-        if (!tooGeneric) return givenNarrative;
-
         const moveNames: Record<typeof p1Move, string> = {
             punch: "throws a punch",
             kick: "fires a kick",
@@ -1520,20 +1508,38 @@ export class BotBattleScene extends Phaser.Scene {
 
         const p1Action = moveNames[p1Move];
         const p2Action = moveNames[p2Move];
+        const p1Missed = turn.bot1Outcome === "missed";
+        const p2Missed = turn.bot2Outcome === "missed";
 
         if (turn.isRoundEnd && !turn.roundWinner) {
             return "⚡ DOUBLE KO — BOTH BOTS DROP! ⚡";
         }
 
-        if (p2Damage > 0 && p1Damage > 0) {
-            if (p2Damage > p1Damage) return `Heavy trade! Bot 1 ${p1Action} for ${p2Damage}, but takes ${p1Damage}.`;
-            if (p1Damage > p2Damage) return `Explosive clash! Bot 2 ${p2Action} for ${p1Damage}, but eats ${p2Damage}.`;
-            return `Even exchange! Both bots land ${p1Damage} damage.`;
+        if (p1Move === "stunned" && p2Move === "stunned") {
+            return "Both bots are stunned and lose the moment.";
         }
 
-        if (p2Damage > 0) return `Bot 1 ${p1Action} and lands ${p2Damage} damage!`;
-        if (p1Damage > 0) return `Bot 2 ${p2Action} and lands ${p1Damage} damage!`;
-        return `Bot 1 ${p1Action}, Bot 2 ${p2Action}. No clean hit this turn.`;
+        if (p1Move === "stunned") {
+            return `Bot 1 is stunned while Bot 2 ${p2Action}.`;
+        }
+
+        if (p2Move === "stunned") {
+            return `Bot 1 ${p1Action} while Bot 2 is stunned.`;
+        }
+
+        if (p1Missed && p2Missed) {
+            return `Bot 1 ${p1Action}, Bot 2 ${p2Action}—both attacks miss.`;
+        }
+
+        if (p1Missed) {
+            return `Bot 1 ${p1Action}, but Bot 2 slips away.`;
+        }
+
+        if (p2Missed) {
+            return `Bot 2 ${p2Action}, but Bot 1 slips away.`;
+        }
+
+        return `Bot 1 ${p1Action}, Bot 2 ${p2Action}.`;
     }
 
     private normalizeTurn(rawTurn: BotTurnData, index: number): NormalizedBotTurn {

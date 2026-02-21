@@ -677,12 +677,12 @@ function generateNarrative(
     if (p1Move === "stunned") return "Player 1 is stunned! Player 2 attacks freely.";
     if (p2Move === "stunned") return "Player 2 is stunned! Player 1 attacks freely.";
 
-    if (p1Move === p2Move) {
-        return `Both fighters use ${capitalize(p1Move)}! The attacks clash!`;
-    }
-
     if (p1Move === "block" && p2Move === "block") {
         return "Both fighters hold their ground.";
+    }
+
+    if (p1Move === p2Move) {
+        return `Both fighters use ${capitalize(p1Move)}! The attacks clash!`;
     }
 
     if (advantage === 1) {

@@ -789,7 +789,7 @@ export class ReplayScene extends Phaser.Scene {
                     }
 
                     // Show narrative
-                    const narrative = this.generateNarrative(p1Move, p2Move, round, p1ActualDamage, p2ActualDamage);
+                    const narrative = this.generateNarrative(p1Move, p2Move, round);
                     if (this.narrativeText) this.narrativeText.destroy();
 
                     this.narrativeText = this.add.text(
@@ -985,24 +985,45 @@ export class ReplayScene extends Phaser.Scene {
         });
     }
 
-    private generateNarrative(p1Move: MoveType, p2Move: MoveType, round: ReplayRoundData, p1ActualDamage: number, p2ActualDamage: number): string {
+    private generateNarrative(p1Move: MoveType, p2Move: MoveType, round: ReplayRoundData): string {
         const moveNames: Record<MoveType, string> = {
             punch: "punches", kick: "kicks", block: "blocks", special: "unleashes special attack", stunned: "is stunned",
         };
 
         const p1Action = moveNames[p1Move];
         const p2Action = moveNames[p2Move];
+        const p1Missed = round.player1Outcome === "missed";
+        const p2Missed = round.player2Outcome === "missed";
 
-        if (p2ActualDamage > 0 && p1ActualDamage > 0) {
-            if (p2ActualDamage > p1ActualDamage) return `Brutal exchange! Player 1 ${p1Action} for ${p2ActualDamage} damage, but takes ${p1ActualDamage}!`;
-            if (p1ActualDamage > p2ActualDamage) return `Fierce clash! Player 2 ${p2Action} for ${p1ActualDamage} damage, but takes ${p2ActualDamage}!`;
-            return `Devastating trade! Both fighters deal ${p1ActualDamage} damage!`;
-        } else if (p2ActualDamage > 0) {
-            return `Player 1 ${p1Action} and lands a hit for ${p2ActualDamage} damage!`;
-        } else if (p1ActualDamage > 0) {
-            return `Player 2 ${p2Action} and lands a hit for ${p1ActualDamage} damage!`;
+        if (p1Move === "stunned" && p2Move === "stunned") {
+            return "Both fighters are stunned and lose the moment.";
         }
-        return `Player 1 ${p1Action}, Player 2 ${p2Action}. No damage dealt!`;
+
+        if (p1Move === "stunned") {
+            return `Player 1 is stunned while Player 2 ${p2Action}.`;
+        }
+
+        if (p2Move === "stunned") {
+            return `Player 1 ${p1Action} while Player 2 is stunned.`;
+        }
+
+        if (p1Move === "block" && p2Move === "block") {
+            return "Both fighters hold their guard and wait for an opening.";
+        }
+
+        if (p1Missed && p2Missed) {
+            return `Player 1 ${p1Action}, Player 2 ${p2Action}—both actions miss or are denied.`;
+        }
+
+        if (p1Missed) {
+            return `Player 1 ${p1Action}, but Player 2 evades.`;
+        }
+
+        if (p2Missed) {
+            return `Player 2 ${p2Action}, but Player 1 evades.`;
+        }
+
+        return `Player 1 ${p1Action}, Player 2 ${p2Action}.`;
     }
 
     private showFloatingText(text: string, x: number, y: number, color: string): void {
