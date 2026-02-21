@@ -7,8 +7,8 @@ target/
 # Deployment info
 deployment.json
 
-# Bindings
-bindings/
+# Bindings (top-level generated bindings only)
+/bindings/
 
 # Environment
 .env
@@ -44,6 +44,5 @@ frontend-template/*.tsbuildinfo
 Thumbs.db
 
 # External repositories
-# KaspaClash/
 noir/
 stellar-docs/
