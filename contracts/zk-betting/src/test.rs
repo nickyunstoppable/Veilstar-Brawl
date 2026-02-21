@@ -2,9 +2,40 @@
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::Address as _,
-    Bytes, BytesN, Env,
+    Bytes, BytesN, Env, Vec,
 };
+
+#[contract]
+struct MockVerifierAcceptContract;
+
+#[contractimpl]
+impl MockVerifierAcceptContract {
+    pub fn verify_round_proof(
+        _env: Env,
+        _vk_id: BytesN<32>,
+        _proof: Bytes,
+        _public_inputs: Vec<BytesN<32>>,
+    ) -> bool {
+        true
+    }
+}
+
+#[contract]
+struct MockVerifierRejectContract;
+
+#[contractimpl]
+impl MockVerifierRejectContract {
+    pub fn verify_round_proof(
+        _env: Env,
+        _vk_id: BytesN<32>,
+        _proof: Bytes,
+        _public_inputs: Vec<BytesN<32>>,
+    ) -> bool {
+        false
+    }
+}
 
 fn setup_env() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();
@@ -29,6 +60,16 @@ fn make_commitment(env: &Env, side: u8, salt: &BytesN<32>) -> BytesN<32> {
 
 fn match_id(env: &Env) -> BytesN<32> {
     BytesN::from_array(env, &[1u8; 32])
+}
+
+fn u32_to_bytes32(env: &Env, value: u32) -> BytesN<32> {
+    let mut out = [0u8; 32];
+    let be = value.to_be_bytes();
+    out[28] = be[0];
+    out[29] = be[1];
+    out[30] = be[2];
+    out[31] = be[3];
+    BytesN::from_array(env, &out)
 }
 
 #[test]
@@ -235,4 +276,163 @@ fn test_pool_counter_increments() {
     assert_eq!(id2, 2);
     assert_eq!(id3, 3);
     assert_eq!(client.get_pool_counter(), 3);
+}
+
+#[test]
+fn test_settle_pool_zk_success_with_bound_inputs() {
+    let (env, contract_id, _admin, _treasury, _xlm) = setup_env();
+    let client = ZkBettingContractClient::new(&env, &contract_id);
+
+    let verifier = env.register(MockVerifierAcceptContract, ());
+    let vk_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.set_zk_verifier(&verifier, &vk_id);
+
+    let mid = match_id(&env);
+    let pool_id = client.create_pool(&mid, &0);
+    client.lock_pool(&pool_id);
+
+    let proof = Bytes::from_array(&env, &[5u8; 256]);
+    let winner_side = 0u32;
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, winner_side),
+        ],
+    );
+
+    client.settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &public_inputs);
+
+    let pool = client.get_pool(&pool_id);
+    assert_eq!(pool.status, PoolStatus::Settled);
+    assert_eq!(pool.winner_side, winner_side);
+}
+
+#[test]
+fn test_settle_pool_zk_requires_verifier_config() {
+    let (env, contract_id, _admin, _treasury, _xlm) = setup_env();
+    let client = ZkBettingContractClient::new(&env, &contract_id);
+
+    let mid = match_id(&env);
+    let pool_id = client.create_pool(&mid, &0);
+    client.lock_pool(&pool_id);
+
+    let proof = Bytes::from_array(&env, &[5u8; 256]);
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, 0u32),
+        ],
+    );
+    let vk_id = BytesN::from_array(&env, &[7u8; 32]);
+
+    let result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &public_inputs);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_settle_pool_zk_rejects_vk_id_mismatch() {
+    let (env, contract_id, _admin, _treasury, _xlm) = setup_env();
+    let client = ZkBettingContractClient::new(&env, &contract_id);
+
+    let verifier = env.register(MockVerifierAcceptContract, ());
+    let configured_vk_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.set_zk_verifier(&verifier, &configured_vk_id);
+
+    let mid = match_id(&env);
+    let pool_id = client.create_pool(&mid, &0);
+    client.lock_pool(&pool_id);
+
+    let proof = Bytes::from_array(&env, &[5u8; 256]);
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, 0u32),
+        ],
+    );
+    let wrong_vk_id = BytesN::from_array(&env, &[8u8; 32]);
+
+    let result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &wrong_vk_id, &proof, &public_inputs);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_settle_pool_zk_rejects_public_input_binding_mismatch() {
+    let (env, contract_id, _admin, _treasury, _xlm) = setup_env();
+    let client = ZkBettingContractClient::new(&env, &contract_id);
+
+    let verifier = env.register(MockVerifierAcceptContract, ());
+    let vk_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.set_zk_verifier(&verifier, &vk_id);
+
+    let mid = match_id(&env);
+    let pool_id = client.create_pool(&mid, &0);
+    client.lock_pool(&pool_id);
+
+    let proof = Bytes::from_array(&env, &[5u8; 256]);
+
+    let bad_winner_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, 1u32),
+        ],
+    );
+    let winner_result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &bad_winner_inputs);
+    assert!(winner_result.is_err());
+
+    let bad_pool_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id + 1),
+            u32_to_bytes32(&env, 0u32),
+        ],
+    );
+    let pool_result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &bad_pool_inputs);
+    assert!(pool_result.is_err());
+
+    let bad_match_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[2u8; 32]),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, 0u32),
+        ],
+    );
+    let match_result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &bad_match_inputs);
+    assert!(match_result.is_err());
+}
+
+#[test]
+fn test_settle_pool_zk_rejects_when_verifier_returns_false() {
+    let (env, contract_id, _admin, _treasury, _xlm) = setup_env();
+    let client = ZkBettingContractClient::new(&env, &contract_id);
+
+    let verifier = env.register(MockVerifierRejectContract, ());
+    let vk_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.set_zk_verifier(&verifier, &vk_id);
+
+    let mid = match_id(&env);
+    let pool_id = client.create_pool(&mid, &0);
+    client.lock_pool(&pool_id);
+
+    let proof = Bytes::from_array(&env, &[5u8; 256]);
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            mid.clone(),
+            u32_to_bytes32(&env, pool_id),
+            u32_to_bytes32(&env, 0u32),
+        ],
+    );
+
+    let result = client.try_settle_pool_zk(&pool_id, &BetSide::Player1, &vk_id, &proof, &public_inputs);
+    assert!(result.is_err());
 }

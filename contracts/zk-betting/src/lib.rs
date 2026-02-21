@@ -248,7 +248,7 @@ impl ZkBettingContract {
     /// - side_byte: 0 = Player1, 1 = Player2
     /// - salt_bytes: 32 random bytes chosen by bettor
     ///
-    /// Bettor deposits `amount + 0.1% fee` in XLM.
+    /// Bettor deposits `amount + 1% fee` in XLM.
     pub fn commit_bet(
         env: Env,
         pool_id: u32,
@@ -491,6 +491,15 @@ impl ZkBettingContract {
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
 
+        Self::settle_pool_internal(&env, pool_id, winner)
+    }
+
+    fn settle_pool_internal(
+        env: &Env,
+        pool_id: u32,
+        winner: BetSide,
+    ) -> Result<(), Error> {
+
         let pool_key = DataKey::Pool(pool_id);
         let mut pool: BetPool = env
             .storage()
@@ -548,6 +557,17 @@ impl ZkBettingContract {
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
 
+        let pool: BetPool = env
+            .storage()
+            .temporary()
+            .get(&DataKey::Pool(pool_id))
+            .ok_or(Error::PoolNotFound)?;
+
+        let winner_side = match winner {
+            BetSide::Player1 => SIDE_P1,
+            BetSide::Player2 => SIDE_P2,
+        };
+
         // Verify ZK proof
         let verifier_addr: Address = env
             .storage()
@@ -565,7 +585,21 @@ impl ZkBettingContract {
             return Err(Error::ZkProofInvalid);
         }
 
-        if proof.len() != 256 || public_inputs.len() < 1 {
+        if proof.len() != 256 || public_inputs.len() < 3 {
+            return Err(Error::ZkProofInvalid);
+        }
+
+        let input_match_id = public_inputs.get(0).ok_or(Error::ZkProofInvalid)?;
+        let input_pool_id = public_inputs.get(1).ok_or(Error::ZkProofInvalid)?;
+        let input_winner_side = public_inputs.get(2).ok_or(Error::ZkProofInvalid)?;
+
+        let expected_pool_id = Self::u32_to_bytes32(&env, pool_id);
+        let expected_winner_side = Self::u32_to_bytes32(&env, winner_side);
+
+        if input_match_id != pool.match_id
+            || input_pool_id != expected_pool_id
+            || input_winner_side != expected_winner_side
+        {
             return Err(Error::ZkProofInvalid);
         }
 
@@ -576,7 +610,7 @@ impl ZkBettingContract {
         }
 
         // Proof is valid — proceed with settlement
-        Self::settle_pool(env, pool_id, winner)
+        Self::settle_pool_internal(&env, pool_id, winner)
     }
 
     /// Claim payout after settlement.
@@ -860,6 +894,16 @@ impl ZkBettingContract {
     fn calc_fee(amount: i128) -> i128 {
         // 1% = 100 bps, round up
         ((amount * FEE_BPS as i128) + 9_999) / 10_000
+    }
+
+    fn u32_to_bytes32(env: &Env, value: u32) -> BytesN<32> {
+        let mut raw = [0u8; 32];
+        let be = value.to_be_bytes();
+        raw[28] = be[0];
+        raw[29] = be[1];
+        raw[30] = be[2];
+        raw[31] = be[3];
+        BytesN::from_array(env, &raw)
     }
 }
 

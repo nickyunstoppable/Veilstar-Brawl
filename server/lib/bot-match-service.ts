@@ -5,12 +5,13 @@
  */
 
 import { getSupabase } from "./supabase";
-import { claimOnChainPayoutAsAdmin, createOnChainBotPool, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, revealOnChainBetAsAdmin, settleOnChainPool } from "./zk-betting-contract";
+import { claimOnChainPayoutAsAdmin, createOnChainBotPool, ensureZkBettingVerifierConfigured, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, matchIdToBytes32, revealOnChainBetAsAdmin, settleOnChainPoolZk } from "./zk-betting-contract";
 import { SmartBotOpponent } from "./smart-bot-opponent";
 import { getOrCreateRoundDeck, type PowerSurgeCardId, type StoredSurgeDeck } from "./power-surge";
 import { calculateSurgeEffects, isBlockDisabled } from "./surge-effects";
 import { resolveRound } from "./round-resolver";
 import { getCharacterCombatCaps } from "./character-combat-stats";
+import { proveBotBettingSettlement } from "./zk-betting-settle-prover";
 
 // =============================================================================
 // TYPES
@@ -146,6 +147,35 @@ const BETTING_DURATION_MS = 30000;
 const ONCHAIN_DEADLINE_BUFFER_SECONDS = 20;
 const MAX_TURNS_PER_ROUND = 12;
 const ROUNDS_TO_WIN = 2;
+const PLAYBACK_END_SIGNAL_TIMEOUT_MS = 120000;
+
+function getMatchDurationMs(match: BotMatch): number {
+    return match.totalTurns * TURN_DURATION_MS + BETTING_DURATION_MS;
+}
+
+function isMatchPlaybackComplete(match: BotMatch): boolean {
+    return Date.now() - match.createdAt >= getMatchDurationMs(match);
+}
+
+async function getBotSettlementZkArtifacts(params: {
+    matchId: string;
+    poolId: number;
+    winner: "player1" | "player2";
+}): Promise<{ vkIdHex: string; proof: Buffer; publicInputs: Buffer[]; verificationKeyPath: string }> {
+    const winnerSide = params.winner === "player1" ? 0 : 1;
+    const proved = await proveBotBettingSettlement({
+        matchIdFieldBytes: matchIdToBytes32(params.matchId),
+        poolId: params.poolId,
+        winnerSide,
+    });
+
+    return {
+        vkIdHex: proved.vkIdHex,
+        proof: proved.proof,
+        publicInputs: proved.publicInputs,
+        verificationKeyPath: proved.verificationKeyPath,
+    };
+}
 
 export function simulateBotMatch(matchId: string, bot1Id?: string, bot2Id?: string): BotMatch {
     const seed = matchId;
@@ -666,6 +696,30 @@ let lifecycleSyncInFlight = false;
 let ensureActiveMatchInFlight: Promise<BotMatch> | null = null;
 const finalizedMatchIds = new Set<string>();
 const provisioningPoolForMatch = new Map<string, Promise<boolean>>();
+const playbackEndedSignalTsByMatchId = new Map<string, number>();
+const BOT_MATCH_WORKER_INTERVAL_MS = 1000;
+let botMatchWorkerTimer: ReturnType<typeof setInterval> | null = null;
+
+async function runBotMatchLifecycleTick(): Promise<void> {
+    try {
+        await ensureActiveBotMatch();
+        await syncActiveBotBettingLifecycle();
+    } catch (error) {
+        console.error("[BotMatchService] lifecycle tick failed:", error);
+    }
+}
+
+export function startBotMatchLifecycleWorker(): void {
+    if (botMatchWorkerTimer) return;
+
+    void runBotMatchLifecycleTick();
+
+    botMatchWorkerTimer = setInterval(() => {
+        void runBotMatchLifecycleTick();
+    }, BOT_MATCH_WORKER_INTERVAL_MS);
+
+    console.log(`[BotMatchService] Lifecycle worker started (${BOT_MATCH_WORKER_INTERVAL_MS}ms interval)`);
+}
 
 async function ensureBotPoolProvisioned(match: BotMatch): Promise<boolean> {
     const inFlight = provisioningPoolForMatch.get(match.id);
@@ -914,7 +968,7 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
 
         const { data: pool } = await supabase
             .from("betting_pools")
-            .select("id,onchain_pool_id,onchain_status,status")
+            .select("id,onchain_pool_id,onchain_status,status,onchain_last_tx_id")
             .eq("match_id", match.id)
             .eq("match_type", "bot")
             .single();
@@ -962,7 +1016,24 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
             });
 
             try {
-                const settleTx = await settleOnChainPool(Number(pool.onchain_pool_id), winner as "player1" | "player2");
+                const settlementArtifacts = await getBotSettlementZkArtifacts({
+                    matchId: match.id,
+                    poolId: Number(pool.onchain_pool_id),
+                    winner: winner as "player1" | "player2",
+                });
+
+                await ensureZkBettingVerifierConfigured({
+                    vkIdHex: settlementArtifacts.vkIdHex,
+                    verificationKeyPath: settlementArtifacts.verificationKeyPath,
+                });
+
+                const settleTx = await settleOnChainPoolZk({
+                    poolId: Number(pool.onchain_pool_id),
+                    winner: winner as "player1" | "player2",
+                    vkIdHex: settlementArtifacts.vkIdHex,
+                    proof: settlementArtifacts.proof,
+                    publicInputs: settlementArtifacts.publicInputs,
+                });
                 lastTx = settleTx.txHash || lastTx;
                 console.log("[BotMatchService][Finalize] Settle tx", {
                     matchId: match.id,
@@ -1030,7 +1101,7 @@ export async function syncActiveBotBettingLifecycle(): Promise<void> {
     try {
         await ensureBotPoolProvisioned(match);
 
-        const matchDuration = match.totalTurns * TURN_DURATION_MS + BETTING_DURATION_MS;
+        const matchDuration = getMatchDurationMs(match);
         const elapsed = Date.now() - match.createdAt;
 
         if (elapsed >= BETTING_DURATION_MS && elapsed < matchDuration) {
@@ -1055,11 +1126,27 @@ export async function syncActiveBotBettingLifecycle(): Promise<void> {
 async function ensureActiveBotMatchInternal(): Promise<BotMatch> {
     await syncActiveBotBettingLifecycle();
 
-    // Check if current match is still "playing"
+    // Keep the current match until playback has ended and post-match finalization
+    // has succeeded. This guarantees we do not start a new match prematurely.
     if (activeMatch) {
-        const matchDuration = activeMatch.totalTurns * TURN_DURATION_MS + BETTING_DURATION_MS;
+        if (!isMatchPlaybackComplete(activeMatch)) {
+            return activeMatch;
+        }
+
+        if (!finalizedMatchIds.has(activeMatch.id)) {
+            return activeMatch;
+        }
+
+        const playbackSignalTs = playbackEndedSignalTsByMatchId.get(activeMatch.id) ?? null;
+        if (!playbackSignalTs) {
+            const elapsedSincePlaybackComplete = Date.now() - (activeMatch.createdAt + getMatchDurationMs(activeMatch));
+            if (elapsedSincePlaybackComplete < PLAYBACK_END_SIGNAL_TIMEOUT_MS) {
+                return activeMatch;
+            }
+        }
+
         const elapsed = Date.now() - activeMatch.createdAt;
-        if (elapsed < matchDuration + 5000) {
+        if (elapsed < getMatchDurationMs(activeMatch) + 5000) {
             return activeMatch;
         }
     }
@@ -1086,6 +1173,7 @@ async function ensureActiveBotMatchInternal(): Promise<BotMatch> {
 
     activeMatch = matchToStart;
     finalizedMatchIds.delete(matchToStart.id);
+    playbackEndedSignalTsByMatchId.delete(matchToStart.id);
 
     console.log(`[BotMatchService] Generated new bot match: ${matchToStart.id} (${activeMatch.bot1Name} vs ${activeMatch.bot2Name}, ${activeMatch.totalTurns} turns)`);
 
@@ -1110,6 +1198,22 @@ export async function ensureActiveBotMatch(): Promise<BotMatch> {
 
 export function getActiveMatch(): BotMatch | null {
     return activeMatch;
+}
+
+export function reportActiveMatchPlaybackEnded(matchId: string): {
+    accepted: boolean;
+    activeMatchId: string | null;
+} {
+    if (!activeMatch || activeMatch.id !== matchId) {
+        return { accepted: false, activeMatchId: activeMatch?.id ?? null };
+    }
+
+    if (!playbackEndedSignalTsByMatchId.has(matchId)) {
+        playbackEndedSignalTsByMatchId.set(matchId, Date.now());
+        console.log("[BotMatchService] Playback-ended signal received", { matchId });
+    }
+
+    return { accepted: true, activeMatchId: activeMatch.id };
 }
 
 export function getMatchSyncInfo(matchId: string): {

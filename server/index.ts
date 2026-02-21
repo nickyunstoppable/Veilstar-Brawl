@@ -35,8 +35,9 @@ import { startAbandonmentMonitor } from "./lib/abandonment-monitor";
 import { ensureEnvLoaded } from "./lib/env";
 import { handleGetMatchPublic } from "./routes/matches/public";
 import { handleGetLiveMatches } from "./routes/matches/live";
-import { handleGetBotGames, handleBotGamesSync } from "./routes/bot-games";
+import { handleBotGamesPlaybackEnded, handleGetBotGames, handleBotGamesSync } from "./routes/bot-games";
 import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleGetUnresolvedBotBets, handleGetBotBetHistory } from "./routes/betting";
+import { startBotMatchLifecycleWorker } from "./lib/bot-match-service";
 
 ensureEnvLoaded();
 
@@ -156,6 +157,9 @@ async function handleRequest(req: Request): Promise<Response> {
     }
     if (pathname === "/api/bot-games/sync" && method === "GET") {
         return corsResponse(await handleBotGamesSync(req), req);
+    }
+    if (pathname === "/api/bot-games/playback-ended" && method === "POST") {
+        return corsResponse(await handleBotGamesPlaybackEnded(req), req);
     }
 
     // -----------------------------------------------
@@ -385,3 +389,4 @@ const server = Bun.serve({
 console.log(`Server running on http://localhost:${server.port}`);
 
 startAbandonmentMonitor();
+startBotMatchLifecycleWorker();

@@ -142,8 +142,13 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
         if (requireWonStatus && normalizedStatus !== "won") return false;
 
         const betPrediction = normalizeSide(userBet.bet_on ?? userBet.betOn);
+        if (!betPrediction) return false;
+
+        if (options?.forcedPrediction && betPrediction !== options.forcedPrediction) {
+            return false;
+        }
+
         const prediction = options?.forcedPrediction ?? betPrediction;
-        if (!prediction) return false;
 
         const payoutCandidate =
             userBet.payout_amount
@@ -365,6 +370,12 @@ export function BotSpectatorClient({ matchId }: BotSpectatorClientProps) {
         const handleMatchEnd = async (rawData: unknown) => {
             const eventData = rawData as { matchId: string; winner: "player1" | "player2" | null };
             if (eventData.matchId !== currentMatch.id) return;
+
+            void fetch(`${API_BASE}/api/bot-games/playback-ended`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ matchId: currentMatch.id }),
+            }).catch(() => undefined);
 
             if (winNotificationShownForMatchRef.current === currentMatch.id) return;
 

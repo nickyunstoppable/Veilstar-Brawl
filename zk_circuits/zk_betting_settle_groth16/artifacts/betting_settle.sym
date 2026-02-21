@@ -1,0 +1,6 @@
+1,1,0,main.match_id
+2,2,0,main.pool_id
+3,3,0,main.winner_side
+4,-1,0,main.witness_match_id
+5,-1,0,main.witness_pool_id
+6,-1,0,main.witness_winner_side

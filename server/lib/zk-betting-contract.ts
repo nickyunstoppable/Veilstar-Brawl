@@ -3,6 +3,7 @@ import { Buffer } from "buffer";
 import { Client as ZkBettingClient, BetSide } from "../../bindings/zk_betting/src/index";
 import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
 import { ensureEnvLoaded } from "./env";
+import { setGroth16VerificationKeyOnChain } from "./stellar-contract";
 
 ensureEnvLoaded();
 
@@ -10,7 +11,10 @@ const RPC_URL = process.env.VITE_SOROBAN_RPC_URL || "https://soroban-testnet.ste
 const NETWORK_PASSPHRASE = process.env.VITE_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
 const ZK_BETTING_CONTRACT_ID = process.env.VITE_ZK_BETTING_CONTRACT_ID || "";
 const ADMIN_SECRET = process.env.VITE_DEV_ADMIN_SECRET || "";
+const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRACT_ID || process.env.VITE_ZK_GROTH16_VERIFIER_CONTRACT_ID || "").trim();
+const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
 let adminTxQueue: Promise<void> = Promise.resolve();
+let configuredBettingVkIdHex = "";
 
 type OnChainTxResult = {
   txHash?: string;
@@ -52,7 +56,6 @@ function createSigner(keypair: Keypair) {
       tx.sign(keypair);
       return { signedTxXdr: tx.toXDR(), signerAddress: keypair.publicKey() };
     },
-    signAuthEntry: async (authEntry: string) => ({ signedAuthEntry: authEntry, signerAddress: keypair.publicKey() }),
   };
 }
 
@@ -89,8 +92,10 @@ async function signAndSend(tx: any, options?: { maxRetries?: number; initialDela
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const simulated = typeof tx?.simulate === "function" ? await tx.simulate() : tx;
-      const sent = await simulated.signAndSend();
+      const preparedTx = tx?.simulation
+        ? tx
+        : (typeof tx?.simulate === "function" ? await tx.simulate() : tx);
+      const sent = await preparedTx.signAndSend();
       return { txHash: extractTxHash(sent) };
     } catch (error) {
       lastError = error;
@@ -144,8 +149,14 @@ function normalizeHexToBuffer(hex: string): Buffer {
   return Buffer.from(clean, "hex");
 }
 
-function matchIdToBytes32(matchId: string): Buffer {
-  return createHash("sha256").update(matchId).digest();
+function bytesToFieldBytes32(value: Buffer): Buffer {
+  const asBigint = BigInt(`0x${value.toString("hex")}`) % BN254_FIELD_PRIME;
+  return Buffer.from(asBigint.toString(16).padStart(64, "0"), "hex");
+}
+
+export function matchIdToBytes32(matchId: string): Buffer {
+  const digest = createHash("sha256").update(matchId).digest();
+  return bytesToFieldBytes32(digest);
 }
 
 export function isZkBettingConfigured(): boolean {
@@ -159,13 +170,15 @@ export async function createOnChainBotPool(matchId: string, deadlineTs: number):
       match_id: matchIdToBytes32(matchId),
       deadline_ts: BigInt(Math.max(0, Math.floor(deadlineTs))),
     });
-    const sent = await signAndSend(tx);
+    const primaryResult = (tx as any)?.result;
+    const fallbackResult = (tx as any)?.simulation?.result;
+    const simResult = primaryResult ?? fallbackResult;
+    const poolId = typeof simResult === "number"
+      ? simResult
+      : Number((simResult as any)?.value ?? (simResult as any)?.ok ?? simResult ?? 0);
+    if (!poolId) throw new Error("Failed to read create_pool result");
 
-    const poolCounterTx = await client.get_pool_counter();
-    const sim = await poolCounterTx.simulate();
-    const result = sim.result as any;
-    const poolId = typeof result === "number" ? result : Number(result?.value ?? result?.ok ?? result ?? 0);
-    if (!poolId) throw new Error("Failed to read on-chain pool counter after create_pool");
+    const sent = await signAndSend(tx);
 
     return { poolId, txHash: sent.txHash };
   });
@@ -188,12 +201,55 @@ export async function lockOnChainPool(poolId: number): Promise<OnChainTxResult> 
 }
 
 export async function settleOnChainPool(poolId: number, winner: "player1" | "player2"): Promise<OnChainTxResult> {
+  throw new Error("settleOnChainPool is deprecated. Use settleOnChainPoolZk");
+}
+
+type SettleOnChainPoolZkParams = {
+  poolId: number;
+  winner: "player1" | "player2";
+  vkIdHex: string;
+  proof: Buffer;
+  publicInputs: Buffer[];
+};
+
+function normalizeHex32(value: string): Buffer {
+  const clean = String(value || "").trim().replace(/^0x/i, "");
+  if (!/^[0-9a-fA-F]{64}$/.test(clean)) {
+    throw new Error("vkIdHex must be a 32-byte hex string");
+  }
+  return Buffer.from(clean, "hex");
+}
+
+function normalizePublicInputBytes32(value: Buffer, index: number): Buffer {
+  if (!Buffer.isBuffer(value)) {
+    throw new Error(`publicInputs[${index}] must be a Buffer`);
+  }
+  if (value.length !== 32) {
+    throw new Error(`publicInputs[${index}] must be 32 bytes`);
+  }
+  return value;
+}
+
+export async function settleOnChainPoolZk(params: SettleOnChainPoolZkParams): Promise<OnChainTxResult> {
   return runSerializedAdminTx(async () => {
     const client = getClient();
-    const tx = await client.settle_pool({
-      pool_id: poolId,
-      winner: winner === "player1" ? BetSide.Player1 : BetSide.Player2,
+    if (!Buffer.isBuffer(params.proof) || params.proof.length !== 256) {
+      throw new Error("proof must be a 256-byte Groth16 calldata buffer");
+    }
+    if (!Array.isArray(params.publicInputs) || params.publicInputs.length < 3) {
+      throw new Error("publicInputs must include at least [match_id, pool_id, winner_side]");
+    }
+
+    const normalizedPublicInputs = params.publicInputs.map((value, index) => normalizePublicInputBytes32(value, index));
+
+    const tx = await client.settle_pool_zk({
+      pool_id: params.poolId,
+      winner: params.winner === "player1" ? BetSide.Player1 : BetSide.Player2,
+      vk_id: normalizeHex32(params.vkIdHex),
+      proof: params.proof,
+      public_inputs: normalizedPublicInputs,
     });
+
     try {
       return await signAndSend(tx);
     } catch (error) {
@@ -203,6 +259,41 @@ export async function settleOnChainPool(poolId: number, winner: "player1" | "pla
       }
       throw error;
     }
+  });
+}
+
+export async function ensureZkBettingVerifierConfigured(params: {
+  vkIdHex: string;
+  verificationKeyPath: string;
+}): Promise<void> {
+  return runSerializedAdminTx(async () => {
+    const normalizedVk = `0x${normalizeHex32(params.vkIdHex).toString("hex")}`;
+
+    if (!ZK_GROTH16_VERIFIER_CONTRACT_ID) {
+      throw new Error("Missing ZK_GROTH16_VERIFIER_CONTRACT_ID");
+    }
+
+    if (configuredBettingVkIdHex === normalizedVk) {
+      return;
+    }
+
+    const upload = await setGroth16VerificationKeyOnChain(
+      ZK_GROTH16_VERIFIER_CONTRACT_ID,
+      normalizedVk,
+      params.verificationKeyPath,
+    );
+    if (!upload.success) {
+      throw new Error(upload.error || "Failed to upload Groth16 verification key for zk-betting");
+    }
+
+    const client = getClient();
+    const tx = await client.set_zk_verifier({
+      verifier: ZK_GROTH16_VERIFIER_CONTRACT_ID,
+      vk_id: normalizeHex32(normalizedVk),
+    });
+    await signAndSend(tx);
+
+    configuredBettingVkIdHex = normalizedVk;
   });
 }
 

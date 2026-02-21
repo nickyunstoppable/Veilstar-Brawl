@@ -68,6 +68,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
     const [success, setSuccess] = useState<string | null>(null);
     const [forceClosed, setForceClosed] = useState(false);
     const [forceClosedReason, setForceClosedReason] = useState<string | null>(null);
+    const [hardClosedPoolId, setHardClosedPoolId] = useState<number | null>(null);
     const [onchainPoolId, setOnchainPoolId] = useState<number | null>(null);
     const [userBet, setUserBet] = useState<any | null>(null);
 
@@ -91,6 +92,31 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
                     const data = await response.json();
                     if (data.pool) {
                         setOnchainPoolId(Number(data.pool.onchain_pool_id || 0) || null);
+
+                        const canAcceptBets = data?.canAcceptBets === true;
+                        const onchainReachable = data?.onchainReachable !== false;
+                        const poolStatus = String(data.pool.status || "").toLowerCase();
+                        const onchainStatus = String(data.pool.onchain_status || "").toLowerCase();
+                        const currentPoolId = Number(data.pool.onchain_pool_id || 0) || null;
+                        const hasOnchainPool = Boolean(currentPoolId);
+                        const poolOpen = canAcceptBets
+                            && onchainReachable
+                            && poolStatus === "open"
+                            && (!hasOnchainPool || onchainStatus === "open");
+
+                        if (!poolOpen) {
+                            setForceClosed(true);
+                            setForceClosedReason("Betting closed for this round");
+                        } else {
+                            const isSameHardClosedPool = Boolean(hardClosedPoolId && currentPoolId && hardClosedPoolId === currentPoolId);
+                            if (!isSameHardClosedPool) {
+                                setForceClosed(false);
+                                setForceClosedReason(null);
+                                if (!currentPoolId || hardClosedPoolId !== currentPoolId) {
+                                    setHardClosedPoolId(null);
+                                }
+                            }
+                        }
                     }
                     setUserBet(data.userBet || null);
                     setBetPlaced(Boolean(data.userBet));
@@ -109,7 +135,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
         fetchPool();
         const interval = setInterval(fetchPool, 3000);
         return () => clearInterval(interval);
-    }, [matchId, bettorAddress]);
+    }, [matchId, bettorAddress, hardClosedPoolId]);
 
     // Reset when match changes
     useEffect(() => {
@@ -120,6 +146,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
         setSuccess(null);
         setForceClosed(false);
         setForceClosedReason(null);
+        setHardClosedPoolId(null);
         setUserBet(null);
         setOnchainPoolId(null);
     }, [matchId]);
@@ -153,10 +180,6 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
                 throw new Error("Connect your wallet to place a bet");
             }
 
-            if (!onchainPoolId) {
-                throw new Error("On-chain pool not ready yet. Please try again in a moment.");
-            }
-
             const activeMatchRes = await fetch(`${API_BASE}/api/bot-games?matchId=${encodeURIComponent(matchId)}`);
             if (!activeMatchRes.ok) {
                 throw new Error("Unable to verify active match. Please try again.");
@@ -166,8 +189,38 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
             if (!activeMatch || activeMatch.id !== matchId) {
                 throw new Error("This match has expired. Wait for the next bot match.");
             }
-            const elapsedMs = Date.now() - Number(activeMatch.createdAt || 0);
-            if (!Number.isFinite(elapsedMs) || elapsedMs >= 30000) {
+
+            const latestPoolRes = await fetch(`${API_BASE}/api/bot-betting/pool/${matchId}`);
+            if (!latestPoolRes.ok) {
+                throw new Error("Unable to refresh betting pool. Please try again.");
+            }
+            const latestPoolPayload = await latestPoolRes.json();
+            const latestPool = latestPoolPayload?.pool;
+            const latestCanAcceptBets = latestPoolPayload?.canAcceptBets === true;
+            const latestOnchainReachable = latestPoolPayload?.onchainReachable !== false;
+            const latestOnchainPoolId = Number(latestPool?.onchain_pool_id || 0) || null;
+            const latestPoolStatus = String(latestPool?.status || "").toLowerCase();
+            const latestOnchainStatus = String(latestPool?.onchain_status || "").toLowerCase();
+
+            if (!latestOnchainPoolId) {
+                throw new Error("On-chain pool not ready yet. Please try again in a moment.");
+            }
+            if (!latestCanAcceptBets || !latestOnchainReachable || latestPoolStatus !== "open" || (latestOnchainStatus && latestOnchainStatus !== "open")) {
+                throw new Error("Betting is closed for this pool.");
+            }
+
+            if (latestOnchainPoolId !== onchainPoolId) {
+                setOnchainPoolId(latestOnchainPoolId);
+            }
+
+            const syncRes = await fetch(`${API_BASE}/api/bot-games/sync?matchId=${encodeURIComponent(matchId)}`);
+            if (!syncRes.ok) {
+                throw new Error("Unable to sync betting window. Please try again.");
+            }
+            const syncPayload = await syncRes.json();
+            const isServerBettingOpen = Boolean(syncPayload?.bettingStatus?.isOpen);
+
+            if (!isServerBettingOpen) {
                 throw new Error("Betting window closed. Wait for the next match.");
             }
 
@@ -182,7 +235,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
             }
 
             const onchainCommit = await commitBetOnChain({
-                poolId: onchainPoolId,
+                poolId: latestOnchainPoolId,
                 bettor: address,
                 side: selectedBot,
                 amount: xlmToStroops(amount),
@@ -197,7 +250,7 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
                     betOn: selectedBot,
                     amount: Number(xlmToStroops(amount)),
                     bettorAddress: address,
-                    onchainPoolId,
+                    onchainPoolId: latestOnchainPoolId,
                     txId: onchainCommit.txHash,
                     commitmentHash: onchainCommit.commitmentHex,
                     revealSalt: onchainCommit.saltHex,
@@ -223,9 +276,16 @@ export function BotBettingPanel({ matchId, bot1Name, bot2Name, bettingSecondsRem
         } catch (err) {
             const message = err instanceof Error ? err.message : "Failed to place bet";
             setError(message);
-            if (message.toLowerCase().includes("deadline passed") || message.toLowerCase().includes("betting window closed")) {
+            if (
+                message.toLowerCase().includes("deadline passed")
+                || message.toLowerCase().includes("betting window closed")
+                || message.toLowerCase().includes("betting is closed")
+            ) {
                 setForceClosed(true);
                 setForceClosedReason("Betting closed for this round");
+                if (onchainPoolId) {
+                    setHardClosedPoolId(onchainPoolId);
+                }
             }
         } finally {
             setPlacing(false);

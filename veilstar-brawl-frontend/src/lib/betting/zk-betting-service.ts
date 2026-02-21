@@ -69,6 +69,36 @@ async function signAndSend(tx: any): Promise<any> {
   return signAndSendViaLaunchtube(tx);
 }
 
+function readPoolStatusValue(rawStatus: unknown): number | null {
+  if (typeof rawStatus === "number" && Number.isFinite(rawStatus)) {
+    return rawStatus;
+  }
+
+  if (typeof rawStatus === "string") {
+    const normalized = rawStatus.toLowerCase();
+    if (normalized === "open") return 0;
+    if (normalized === "locked") return 1;
+    if (normalized === "settled") return 2;
+    if (normalized === "refunded") return 3;
+    const asNum = Number(rawStatus);
+    if (Number.isFinite(asNum)) return asNum;
+  }
+
+  if (rawStatus && typeof rawStatus === "object") {
+    const tagged = rawStatus as { tag?: unknown; value?: unknown; kind?: unknown };
+    const tag = String(tagged.tag ?? tagged.kind ?? "").toLowerCase();
+    if (tag === "open") return 0;
+    if (tag === "locked") return 1;
+    if (tag === "settled") return 2;
+    if (tag === "refunded") return 3;
+
+    const value = Number(tagged.value);
+    if (Number.isFinite(value)) return value;
+  }
+
+  return null;
+}
+
 export async function commitBetOnChain(params: {
   poolId: number;
   bettor: string;
@@ -84,6 +114,15 @@ export async function commitBetOnChain(params: {
   const commitment = await sha256(preimage);
 
   const client = getContractClient(params.bettor, params.signer);
+
+  const poolReadTx = await client.get_pool({ pool_id: params.poolId });
+  const poolReadResult = (poolReadTx as any)?.result as any;
+  const poolState = (poolReadResult?.value ?? poolReadResult?.ok ?? poolReadResult) as any;
+  const poolStatus = readPoolStatusValue(poolState?.status);
+  if (poolStatus !== null && poolStatus !== 0) {
+    throw new Error("Pool is not open on-chain. Please refresh and try the current match.");
+  }
+
   const tx = await client.commit_bet({
     pool_id: params.poolId,
     bettor: params.bettor,
@@ -96,6 +135,9 @@ export async function commitBetOnChain(params: {
     sentTx = await signAndSend(tx);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error ?? "");
+    if (msg.includes("Error(Contract, #1)")) {
+      throw new Error("Pool changed. Refresh and place your bet again.");
+    }
     if (msg.includes("Error(Contract, #18)")) {
       throw new Error("Betting deadline passed for this match. Please wait for the next one.");
     }
@@ -103,7 +145,7 @@ export async function commitBetOnChain(params: {
       throw new Error("You already placed a bet for this match.");
     }
     if (msg.includes("Error(Contract, #2)")) {
-      throw new Error("Betting is closed for this pool.");
+      throw new Error("Bet failed on-chain. Refresh and try again.");
     }
     throw error;
   }

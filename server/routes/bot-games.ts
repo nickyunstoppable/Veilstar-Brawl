@@ -4,7 +4,7 @@
  * GET /api/bot-games/sync — sync data for returning spectators
  */
 
-import { ensureActiveBotMatch, getActiveMatch, getMatchSyncInfo, syncActiveBotBettingLifecycle } from "../lib/bot-match-service";
+import { ensureActiveBotMatch, getActiveMatch, getMatchSyncInfo, reportActiveMatchPlaybackEnded, syncActiveBotBettingLifecycle } from "../lib/bot-match-service";
 
 export async function handleGetBotGames(req: Request): Promise<Response> {
     try {
@@ -57,5 +57,33 @@ export async function handleBotGamesSync(req: Request): Promise<Response> {
     } catch (error) {
         console.error("[BotGamesSync] Error:", error);
         return Response.json({ error: "Failed to sync" }, { status: 500 });
+    }
+}
+
+export async function handleBotGamesPlaybackEnded(req: Request): Promise<Response> {
+    try {
+        const body = await req.json();
+        const matchId = String(body?.matchId || "").trim();
+
+        if (!matchId) {
+            return Response.json({ error: "matchId required" }, { status: 400 });
+        }
+
+        const reported = reportActiveMatchPlaybackEnded(matchId);
+        if (!reported.accepted) {
+            return Response.json(
+                {
+                    accepted: false,
+                    error: "stale_match",
+                    activeMatchId: reported.activeMatchId,
+                },
+                { status: 409 }
+            );
+        }
+
+        return Response.json({ accepted: true, matchId });
+    } catch (error) {
+        console.error("[BotGamesPlaybackEnded] Error:", error);
+        return Response.json({ error: "Failed to record playback end" }, { status: 500 });
     }
 }

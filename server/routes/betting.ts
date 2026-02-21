@@ -5,8 +5,46 @@
 
 import { getSupabase } from "../lib/supabase";
 import { getActiveMatch, simulateBotMatch } from "../lib/bot-match-service";
+import { getOnChainPoolStatus } from "../lib/zk-betting-contract";
 
 const lastBotPoolSnapshotLog = new Map<string, string>();
+
+function mapOnChainPoolStatus(status: number): { status: string; onchain_status: string } {
+    if (status === 0) return { status: "open", onchain_status: "open" };
+    if (status === 1) return { status: "locked", onchain_status: "locked" };
+    if (status === 2) return { status: "resolved", onchain_status: "settled" };
+    if (status === 3) return { status: "resolved", onchain_status: "refunded" };
+    return { status: "open", onchain_status: "open" };
+}
+
+async function syncPoolFromOnChain(pool: any): Promise<{ pool: any; onchainReachable: boolean }> {
+    if (!pool?.onchain_pool_id) {
+        return { pool, onchainReachable: true };
+    }
+
+    const supabase = getSupabase();
+    const onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
+    if (!onchain) {
+        return { pool, onchainReachable: false };
+    }
+
+    const mapped = mapOnChainPoolStatus(onchain.status);
+    if (pool.status === mapped.status && pool.onchain_status === mapped.onchain_status) {
+        return { pool, onchainReachable: true };
+    }
+
+    const { data: syncedPool } = await supabase
+        .from("betting_pools")
+        .update({
+            status: mapped.status,
+            onchain_status: mapped.onchain_status,
+        })
+        .eq("id", pool.id)
+        .select("*")
+        .single();
+
+    return { pool: syncedPool ?? pool, onchainReachable: true };
+}
 
 async function reconcileBotBetStatusIfResolved(params: {
     poolId: string;
@@ -182,6 +220,28 @@ export async function handlePlaceBet(req: Request): Promise<Response> {
             pool = newPool;
         }
 
+        if (pool?.onchain_pool_id) {
+            const onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
+            if (onchain) {
+                const mapped = mapOnChainPoolStatus(onchain.status);
+                if (pool.status !== mapped.status || pool.onchain_status !== mapped.onchain_status) {
+                    const { data: syncedPool } = await supabase
+                        .from("betting_pools")
+                        .update({
+                            status: mapped.status,
+                            onchain_status: mapped.onchain_status,
+                        })
+                        .eq("id", pool.id)
+                        .select("*")
+                        .single();
+
+                    if (syncedPool) {
+                        pool = syncedPool;
+                    }
+                }
+            }
+        }
+
         if (!pool || pool.status !== "open") {
             return Response.json({ error: "Betting is closed for this match" }, { status: 400 });
         }
@@ -275,6 +335,13 @@ export async function handleGetBotBettingPool(matchId: string, req: Request): Pr
             pool = newPool;
         }
 
+        let onchainReachable = true;
+        if (pool) {
+            const synced = await syncPoolFromOnChain(pool);
+            pool = synced.pool;
+            onchainReachable = synced.onchainReachable;
+        }
+
         let userBet = null;
         if (bettorAddress && pool) {
             await reconcileBotBetStatusIfResolved({
@@ -311,7 +378,13 @@ export async function handleGetBotBettingPool(matchId: string, req: Request): Pr
             }
         }
 
-        return Response.json({ pool, userBet });
+        const canAcceptBets = Boolean(
+            pool
+            && pool.status === "open"
+            && (!pool.onchain_pool_id || (pool.onchain_status === "open" && onchainReachable))
+        );
+
+        return Response.json({ pool, userBet, canAcceptBets, onchainReachable });
     } catch (error) {
         console.error("[BotBetting] Pool error:", error);
         return Response.json({ error: "Failed to get betting pool" }, { status: 500 });
@@ -390,8 +463,31 @@ export async function handlePlaceBotBet(req: Request): Promise<Response> {
             if (updatedPool) pool = updatedPool;
         }
 
+        if (pool?.onchain_pool_id) {
+            const synced = await syncPoolFromOnChain(pool);
+            pool = synced.pool;
+
+            if (!synced.onchainReachable) {
+                return Response.json({ error: "On-chain pool status is syncing. Try again in a moment." }, { status: 503 });
+            }
+        }
+
         if (!pool || pool.status !== "open") {
             return Response.json({ error: "Betting is closed" }, { status: 400 });
+        }
+
+        if (pool.onchain_pool_id && pool.onchain_status && pool.onchain_status !== "open") {
+            return Response.json({ error: "Betting is closed for this pool" }, { status: 400 });
+        }
+
+        if (pool.onchain_pool_id && Number(onchainPoolId) !== Number(pool.onchain_pool_id)) {
+            return Response.json(
+                {
+                    error: "Pool ID changed. Refresh and retry.",
+                    onchainPoolId: Number(pool.onchain_pool_id),
+                },
+                { status: 409 }
+            );
         }
 
         const { data: existingBet } = await supabase
