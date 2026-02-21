@@ -256,6 +256,7 @@ export class FightScene extends Phaser.Scene {
   } = { player1: null, player2: null };
   private surgeCardsShownThisRound: boolean = false;
   private lastSurgeRound: number = 0;
+  private surgeSelectionDeadlineAt: number = 0;
 
   // Spectator Power Surge state (read-only display for spectators)
   private spectatorSurgeUI: SpectatorPowerSurgeCards | null = null;
@@ -5825,7 +5826,8 @@ export class FightScene extends Phaser.Scene {
 
   /**
    * Check if both players have completed their Power Surge selections for this round.
-   * Returns true only when both player selections are known.
+   * Returns true when both players selected, OR when the surge deadline has passed.
+   * If deadline passed with a missing selection, that player proceeds with no surge.
    */
   private async checkBothSurgesComplete(roundNumber: number): Promise<boolean> {
     if (this.activeSurges.player1 && this.activeSurges.player2) {
@@ -5833,35 +5835,33 @@ export class FightScene extends Phaser.Scene {
     }
 
     if (PRIVATE_ROUNDS_ENABLED) {
+      if (this.surgeSelectionDeadlineAt > 0 && Date.now() >= this.surgeSelectionDeadlineAt) {
+        console.log("[FightScene] Surge completion check (private): deadline passed, proceeding without missing surge pick");
+        return true;
+      }
       return false;
     }
 
     try {
-      const { getSupabaseClient } = await import("@/lib/supabase/client");
-      const supabase = getSupabaseClient();
-
-      const { data: surge, error } = await supabase
-        .from("power_surges")
-        .select("player1_card_id, player2_card_id")
-        .eq("match_id", this.config.matchId)
-        .eq("round_number", roundNumber)
-        .maybeSingle();
-
-      if (error) {
-        console.warn(`[FightScene] Failed to read surge completion for round ${roundNumber}:`, error);
+      const response = await fetch(apiUrl(`/api/matches/${this.config.matchId}/power-surge?round=${roundNumber}`));
+      if (!response.ok) {
+        console.warn(`[FightScene] Failed to fetch surge completion for round ${roundNumber}: status=${response.status}`);
         return false;
       }
 
-      if (!surge) {
-        return false;
-      }
+      const result = await response.json();
+      const player1Ready = !!result?.data?.player1Selection?.ready;
+      const player2Ready = !!result?.data?.player2Selection?.ready;
+      const bothComplete = player1Ready && player2Ready;
+      const deadlineRaw = result?.data?.deadlineAt;
+      const deadlineAt = typeof deadlineRaw === "number"
+        ? deadlineRaw
+        : (deadlineRaw ? new Date(deadlineRaw).getTime() : 0);
+      const deadlinePassed = deadlineAt > 0 && Date.now() >= deadlineAt;
 
-      // Check if both players have selected (both card_id fields are set)
-      const surgeRow = surge as any;
-      const bothComplete = !!(surgeRow?.player1_card_id && surgeRow?.player2_card_id);
-      console.log(`[FightScene] Surge completion check: p1=${!!surgeRow?.player1_card_id}, p2=${!!surgeRow?.player2_card_id}, both=${bothComplete}`);
+      console.log(`[FightScene] Surge completion check: p1Ready=${player1Ready}, p2Ready=${player2Ready}, both=${bothComplete}, deadlinePassed=${deadlinePassed}`);
 
-      return bothComplete;
+      return bothComplete || deadlinePassed;
     } catch (error) {
       console.error("[FightScene] Error checking surge completion:", error);
       return false;
@@ -5994,6 +5994,7 @@ export class FightScene extends Phaser.Scene {
 
     // Calculate deadline (7 seconds from now, but not exceeding move deadline)
     const surgeDeadline = Math.min(Date.now() + 15000, moveDeadlineAt - 1000);
+    this.surgeSelectionDeadlineAt = surgeDeadline;
 
     const playerAddress = this.config.playerRole === "player1"
       ? this.config.player1Address
@@ -6008,7 +6009,7 @@ export class FightScene extends Phaser.Scene {
         cardIds,
         playerAddress,
         deadline: surgeDeadline,
-        waitForOpponent: !PRIVATE_ROUNDS_ENABLED,
+        waitForOpponent: true,
         onCardSelected: async (cardId: PowerSurgeCardId) => {
           await new Promise<void>((resolve, reject) => {
             const timeout = this.time.delayedCall(30000, () => {
@@ -6202,6 +6203,9 @@ export class FightScene extends Phaser.Scene {
 
     // Deduplicate repeated broadcast events (e.g., optimistic client broadcast + server broadcast)
     if (this.activeSurges[payload.player] === payload.cardId) {
+      if (payload.player !== this.config.playerRole && this.powerSurgeUI) {
+        this.powerSurgeUI.showOpponentReady(true);
+      }
       console.log(`[FightScene] Duplicate surge event ignored for ${payload.player}: ${payload.cardId}`);
       return;
     }
@@ -6255,7 +6259,9 @@ export class FightScene extends Phaser.Scene {
         } catch (error) {
           console.error("[FightScene] Failed to fetch server cards:", error);
         }
+      }
 
+      if (this.powerSurgeUI) {
         this.powerSurgeUI.showOpponentReady(true);
       }
       return;
@@ -6505,6 +6511,7 @@ export class FightScene extends Phaser.Scene {
   private clearSurgeEffects(): void {
     this.activeSurges = { player1: null, player2: null };
     this.surgeCardsShownThisRound = false;
+    this.surgeSelectionDeadlineAt = 0;
 
     // Clear any visual tints
     this.player1Sprite.clearTint();

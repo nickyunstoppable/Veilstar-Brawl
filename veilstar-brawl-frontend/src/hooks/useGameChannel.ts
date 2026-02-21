@@ -164,9 +164,10 @@ export function useGameChannel(options: UseGameChannelOptions): UseGameChannelRe
         (payload: MatchStartingPayload) => {
             console.log("[GameChannel] match_starting:", payload);
 
-            const countdown = Math.max(1, Math.ceil((payload.startsAt - Date.now()) / 1000));
+            const countdown = Math.max(0, Math.ceil((payload.startsAt - Date.now()) / 1000));
             EventBus.emit("match_starting", {
                 countdown,
+                startsAt: payload.startsAt,
                 player1CharacterId: payload.player1.characterId,
                 player2CharacterId: payload.player2.characterId,
             });

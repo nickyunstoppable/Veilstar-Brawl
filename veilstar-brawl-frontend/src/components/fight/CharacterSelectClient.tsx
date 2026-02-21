@@ -681,6 +681,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 .on("broadcast", { event: "match_starting" }, (payload) => {
                     const data = payload.payload as {
                         countdownSeconds: number;
+                        startsAt?: number;
                         player1CharacterId?: string;
                         player2CharacterId?: string;
                         requiresOnChainRegistration?: boolean;
@@ -688,6 +689,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                     EventBus.emit("match_starting", {
                         countdown: data.countdownSeconds,
+                        startsAt: data.startsAt,
                         player1CharacterId: data.player1CharacterId,
                         player2CharacterId: data.player2CharacterId,
                         requiresOnChainRegistration: data.requiresOnChainRegistration ?? false,

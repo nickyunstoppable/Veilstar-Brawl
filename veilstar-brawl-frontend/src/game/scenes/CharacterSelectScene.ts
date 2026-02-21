@@ -85,6 +85,7 @@ export class CharacterSelectScene extends Phaser.Scene {
   private banToPickTransitionAt: number = 0;
   private revealBothReadyAt: number = 0;
   private matchStartTransitionAt: number = 0;
+  private lastMatchStartCountdownShown: number = -1;
 
   // Visibility change handler reference for cleanup
   private visibilityHandler?: () => void;
@@ -651,6 +652,7 @@ export class CharacterSelectScene extends Phaser.Scene {
     EventBus.on("match_starting", (data: unknown) => {
       const payload = data as {
         countdown: number;
+        startsAt?: number;
         player1CharacterId?: string;
         player2CharacterId?: string;
       };
@@ -901,10 +903,11 @@ export class CharacterSelectScene extends Phaser.Scene {
 
   private onMatchStarting(payload: {
     countdown: number;
+    startsAt?: number;
     player1CharacterId?: string;
     player2CharacterId?: string;
   }): void {
-    const { countdown, player1CharacterId, player2CharacterId } = payload;
+    const { countdown, startsAt, player1CharacterId, player2CharacterId } = payload;
 
     if (player1CharacterId && player2CharacterId) {
       const opponentCharacterId = this.config.isHost
@@ -928,10 +931,14 @@ export class CharacterSelectScene extends Phaser.Scene {
       }
     }
 
-    this.instructionText.setText(`Match starting in ${countdown}...`);
+    const hasAuthoritativeStart = typeof startsAt === "number" && Number.isFinite(startsAt) && startsAt > 0;
+    this.matchStartTransitionAt = hasAuthoritativeStart
+      ? startsAt
+      : (Date.now() + Math.max(0, countdown) * 1000);
+    this.lastMatchStartCountdownShown = -1;
+    const initialRemaining = Math.max(0, Math.ceil((this.matchStartTransitionAt - Date.now()) / 1000));
+    this.instructionText.setText(`Match starting in ${initialRemaining}...`);
     this.instructionText.setColor("#22c55e");
-
-    this.matchStartTransitionAt = Date.now() + countdown * 1000;
   }
 
   private transitionToFight(): void {
@@ -1032,8 +1039,18 @@ export class CharacterSelectScene extends Phaser.Scene {
     }
 
     // Match starting → fight transition deadline
+    if (this.matchStartTransitionAt > 0) {
+      const remaining = Math.max(0, Math.ceil((this.matchStartTransitionAt - now) / 1000));
+      if (remaining !== this.lastMatchStartCountdownShown) {
+        this.lastMatchStartCountdownShown = remaining;
+        this.instructionText.setText(`Match starting in ${remaining}...`);
+        this.instructionText.setColor("#22c55e");
+      }
+    }
+
     if (this.matchStartTransitionAt > 0 && now >= this.matchStartTransitionAt) {
       this.matchStartTransitionAt = 0;
+      this.lastMatchStartCountdownShown = -1;
       this.transitionToFight();
     }
   }

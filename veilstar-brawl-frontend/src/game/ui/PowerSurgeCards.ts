@@ -39,6 +39,7 @@ const CARD_SPACING = 40;
 const CENTER_CARD_SCALE = 1.1;
 const SELECTION_TIMEOUT_MS = 15000;
 const WARNING_TIME_MS = 2000; // Start warning at 2 seconds remaining
+const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
 
 // =============================================================================
 // TYPES
@@ -84,6 +85,7 @@ export class PowerSurgeCards {
   private selectedCardId: PowerSurgeCardId | null = null;
   private isDestroyed: boolean = false;
   private opponentReadyIndicator: Phaser.GameObjects.Container | null = null;
+  private opponentReady: boolean = false;
 
   constructor(config: PowerSurgeCardsConfig) {
     this.scene = config.scene;
@@ -712,49 +714,46 @@ export class PowerSurgeCards {
 
   /**
    * Wait for both players to complete their selections before closing.
-   * Polls the database every 500ms to check if both cards are selected.
-   * Also handles the case where opponent times out (doesn't pick a card).
+   * Stays on this screen after local selection, but force-closes at deadline
+   * so players who did not pick receive no surge card.
    */
   private async waitForBothPlayersReady(): Promise<void> {
     this.instructionText.setText("Waiting for opponent...");
     this.instructionText.setColor("#fbbf24");
 
-    // Poll database to check if both players selected
+    // Poll readiness source to check if both players selected.
+    // In private rounds, legacy /power-surge endpoints are intentionally disabled (409),
+    // so we rely on realtime opponent-ready signals from FightScene.
     const checkBothReady = async (): Promise<boolean> => {
       try {
-        const { getSupabaseClient } = await import("@/lib/supabase/client");
-        const supabase = getSupabaseClient();
+        if (PRIVATE_ROUNDS_ENABLED) {
+          return this.opponentReady;
+        }
 
-          const { data: surge, error } = await supabase
-          .from("power_surges")
-          .select("player1_card_id, player2_card_id")
-          .eq("match_id", this.config.matchId)
-          .eq("round_number", this.config.roundNumber)
-          .maybeSingle();
+        const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+        const apiUrl = (path: string): string => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
-        if (error) {
-          console.error("[PowerSurgeCards] Error checking both ready:", error);
+        const response = await fetch(apiUrl(`/api/matches/${this.config.matchId}/power-surge?round=${this.config.roundNumber}`));
+        if (!response.ok) {
+          if (response.status === 409) {
+            return this.opponentReady;
+          }
+          console.error("[PowerSurgeCards] Error checking both ready: status", response.status);
           return false;
         }
 
-        if (!surge) {
-          return false;
-        }
-
-        const surgeRow = surge as any;
-        return !!(surgeRow?.player1_card_id && surgeRow?.player2_card_id);
+        const data = await response.json();
+        const p1Ready = !!data?.data?.player1Selection?.ready;
+        const p2Ready = !!data?.data?.player2Selection?.ready;
+        return p1Ready && p2Ready;
       } catch (error) {
         console.error("[PowerSurgeCards] Exception checking both ready:", error);
         return false;
       }
     };
 
-    // Poll every 500ms until both ready
+    // Poll every 500ms until both ready or deadline reached
     const pollInterval = 500;
-    const maxWaitTime = 20000; // 20 seconds max
-    const startTime = Date.now();
-    // Grace period after deadline for opponent selection to propagate
-    const deadlineGracePeriod = 2000; // 2 seconds after deadline
 
     const poll = async () => {
       if (this.isDestroyed) return;
@@ -775,26 +774,17 @@ export class PowerSurgeCards {
         return;
       }
 
-      // Check if deadline has passed with grace period - opponent likely timed out
       const now = Date.now();
-      if (now > this.config.deadline + deadlineGracePeriod) {
-        console.log("[PowerSurgeCards] Deadline passed + grace period, opponent likely timed out. Closing UI.");
-        this.instructionText.setText("Opponent skipped - continuing!");
+      if (now >= this.config.deadline) {
+        console.log("[PowerSurgeCards] Surge deadline reached, closing UI with missing selections as none");
+        this.instructionText.setText("Time up - continuing without missing surge pick");
         this.instructionText.setColor("#f97316");
 
-        // Close after brief delay
-        this.scene.time.delayedCall(800, () => {
+        this.scene.time.delayedCall(500, () => {
           if (!this.isDestroyed) {
             this.animateExit();
           }
         });
-        return;
-      }
-
-      // Check absolute timeout (failsafe)
-      if (now - startTime > maxWaitTime) {
-        console.log("[PowerSurgeCards] Wait timeout, closing anyway");
-        this.animateExit();
         return;
       }
 
@@ -956,6 +946,7 @@ export class PowerSurgeCards {
    */
   public showOpponentReady(ready: boolean): void {
     if (this.isDestroyed) return;
+    this.opponentReady = ready;
 
     if (ready && !this.opponentReadyIndicator) {
       // Create opponent ready indicator
