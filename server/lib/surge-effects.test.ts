@@ -22,18 +22,28 @@ describe("surge-effects", () => {
     expect(finality.specialEnergyCost).toBe(0);
   });
 
-  it("applies converted non-energy card logic correctly", () => {
+  it("applies updated non-energy surge logic correctly", () => {
     const { player1Modifiers: vault, player2Modifiers: mempool } = calculateSurgeEffects(
       "vaultbreaker",
       "mempool-congest",
     );
 
-    expect(vault.doubleHit).toBe(true);
-    expect(vault.doubleHitMoves).toEqual(["kick"]);
+    expect(vault.guardPressureOnHit).toBe(30);
+    expect(vault.energySteal).toBe(0);
 
-    const reflected = applyDefensiveModifiers(20, mempool, true);
-    expect(reflected.actualDamage).toBe(20);
-    expect(reflected.reflectedDamage).toBe(15);
+    expect(mempool.opponentStun).toBe(false);
+    expect(mempool.damageMultiplier).toBe(1.25);
+    expect(mempool.incomingDamageReduction).toBe(-0.2);
+
+    const { player1Modifiers: hash } = calculateSurgeEffects("hash-hurricane", null);
+    expect(hash.thornsPercent).toBe(0.35);
+    const noReflect = applyDefensiveModifiers(20, mempool, true);
+    expect(noReflect.actualDamage).toBe(24);
+    expect(noReflect.reflectedDamage).toBe(0);
+
+    const thornsReflect = applyDefensiveModifiers(20, hash, false);
+    expect(thornsReflect.actualDamage).toBe(20);
+    expect(thornsReflect.reflectedDamage).toBe(7);
 
     const noEnergySideEffect = applyEnergyEffects(vault, 80, true);
     expect(noEnergySideEffect.energyBurned).toBe(0);
@@ -50,10 +60,16 @@ describe("surge-effects", () => {
     expect(boosted).toBe(14);
 
     const reduced = applyDefensiveModifiers(boosted, defender, false);
-    expect(reduced.actualDamage).toBe(7);
+    expect(reduced.actualDamage).toBe(10);
     expect(reduced.reflectedDamage).toBe(0);
 
+    const exactQuarterReduction = applyDefensiveModifiers(20, defender, false);
+    expect(exactQuarterReduction.actualDamage).toBe(15);
+
     const healed = applyHpEffects(calculateSurgeEffects("blue-set-heal", null).player1Modifiers, 70, 100);
-    expect(healed).toBe(80);
+    expect(healed).toBe(75);
+
+    const perTurnRegen = applyHpEffects(calculateSurgeEffects("blue-set-heal", null).player1Modifiers, 80, 100);
+    expect(perTurnRegen).toBe(85);
   });
 });

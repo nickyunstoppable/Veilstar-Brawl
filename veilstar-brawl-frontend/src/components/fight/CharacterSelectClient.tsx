@@ -1769,6 +1769,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 roundNumber?: number;
                 movePlan: Array<"punch" | "kick" | "block" | "special">;
                 playerRole: string;
+                surgeCardId?: string | null;
             };
 
             if (!PRIVATE_ROUNDS_ENABLED) return;
@@ -1791,6 +1792,9 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
                 plan.movePlan = normalizedPlan;
                 plan.moveType = normalizedPlan[0];
+                if (typeof payload.surgeCardId !== "undefined") {
+                    plan.surgeCardId = payload.surgeCardId ?? undefined;
+                }
                 plan.moveSigned = true;
                 privateRoundPlansRef.current[roundNumber] = plan;
 

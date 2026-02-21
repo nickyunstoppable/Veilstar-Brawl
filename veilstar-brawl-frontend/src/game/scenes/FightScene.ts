@@ -2281,6 +2281,7 @@ export class FightScene extends Phaser.Scene {
           roundNumber: this.serverState?.currentRound ?? 1,
           movePlan: this.privateRoundPlannedMoves,
           playerRole: this.config.playerRole,
+          surgeCardId: this.activeSurges[this.config.playerRole as "player1" | "player2"] ?? null,
         });
       }
       return;
@@ -2894,6 +2895,7 @@ export class FightScene extends Phaser.Scene {
           roundNumber: this.serverState?.currentRound ?? 1,
           movePlan: this.privateRoundPlannedMoves,
           playerRole: this.config.playerRole,
+          surgeCardId: this.activeSurges[this.config.playerRole as "player1" | "player2"] ?? null,
         });
       } else if (this.localMoveSubmitted && !this.moveInFlight && this.privateRoundPlannedMoves.length === PRIVATE_ROUND_PLAN_TURNS) {
         this.turnIndicatorText.setText("Opponent timed out. Finalizing round...");
@@ -6374,6 +6376,7 @@ export class FightScene extends Phaser.Scene {
         roundNumber: this.serverState?.currentRound ?? 1,
         movePlan: fallbackPlan,
         playerRole: this.config.playerRole,
+        surgeCardId: this.activeSurges[this.config.playerRole as "player1" | "player2"] ?? null,
       });
       return;
     }
@@ -6428,6 +6431,7 @@ export class FightScene extends Phaser.Scene {
         roundNumber: this.serverState?.currentRound ?? 1,
         movePlan: fallbackPlan,
         playerRole: this.config.playerRole,
+        surgeCardId: this.activeSurges[this.config.playerRole as "player1" | "player2"] ?? null,
       });
       return;
     }

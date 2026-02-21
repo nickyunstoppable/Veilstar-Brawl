@@ -258,6 +258,7 @@ function didGuardBreakThisTurn(
     myMove: MoveType,
     opponentMove: MoveType,
     myOutcome: MoveOutcome,
+    extraGuardFromOpponent: number = 0,
 ): boolean {
     if (myMove !== "block") return false;
 
@@ -272,6 +273,8 @@ function didGuardBreakThisTurn(
     if (opponentMove !== "block" && opponentMove !== "stunned") {
         projectedGuard += COMBAT_CONSTANTS.GUARD_BUILDUP_ON_HIT;
     }
+
+    projectedGuard += Math.max(0, extraGuardFromOpponent);
 
     // Meter reaches threshold and snaps to 0 => guard break
     return projectedGuard >= GAME_CONSTANTS.MAX_GUARD;
@@ -445,7 +448,7 @@ export function resolveRound(
     p2DamageTaken += p1Def.reflectedDamage;
     p1DamageTaken += p2Def.reflectedDamage;
 
-    // Deterministic dodge chance (Hash Hurricane)
+    // Deterministic dodge chance for random-win style surge effects
     if (surges && ctx) {
         const p1Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player1|dodge`, p1Mods!.randomWinChance);
         const p2Dodged = deterministicChance(`${ctx.matchId}|${ctx.roundNumber}|${ctx.turnNumber}|player2|dodge`, p2Mods!.randomWinChance);
@@ -528,8 +531,23 @@ export function resolveRound(
     }
 
     // Guard after moves
-    const p1GuardAfter = calculateGuardAfter(player1Guard, p1EffectiveMove, p2EffectiveMove, p1Outcome);
-    const p2GuardAfter = calculateGuardAfter(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
+    let p1GuardAfter = calculateGuardAfter(player1Guard, p1EffectiveMove, p2EffectiveMove, p1Outcome);
+    let p2GuardAfter = calculateGuardAfter(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
+
+    const p1LandedHit = p1EffectiveMove !== "block" && p1EffectiveMove !== "stunned" && p2IncomingBase > 0;
+    const p2LandedHit = p2EffectiveMove !== "block" && p2EffectiveMove !== "stunned" && p1IncomingBase > 0;
+
+    if (surges) {
+        if (p1LandedHit && p1Mods!.guardPressureOnHit > 0) {
+            p2GuardAfter += p1Mods!.guardPressureOnHit;
+        }
+        if (p2LandedHit && p2Mods!.guardPressureOnHit > 0) {
+            p1GuardAfter += p2Mods!.guardPressureOnHit;
+        }
+
+        if (p1GuardAfter >= GAME_CONSTANTS.MAX_GUARD) p1GuardAfter = 0;
+        if (p2GuardAfter >= GAME_CONSTANTS.MAX_GUARD) p2GuardAfter = 0;
+    }
 
     // Determine advantage
     const advantage = getMoveAdvantage(player1PlannedMove, player2PlannedMove);
@@ -562,8 +580,20 @@ export function resolveRound(
     // Generate narrative
     const narrative = generateNarrative(player1PlannedMove, player2PlannedMove, p1Damage, p2Damage, advantage);
 
-    const p1GuardBroke = didGuardBreakThisTurn(player1Guard, p1EffectiveMove, p2EffectiveMove, p1Outcome);
-    const p2GuardBroke = didGuardBreakThisTurn(player2Guard, p2EffectiveMove, p1EffectiveMove, p2Outcome);
+    const p1GuardBroke = didGuardBreakThisTurn(
+        player1Guard,
+        p1EffectiveMove,
+        p2EffectiveMove,
+        p1Outcome,
+        surges && p2LandedHit ? p2Mods!.guardPressureOnHit : 0,
+    );
+    const p2GuardBroke = didGuardBreakThisTurn(
+        player2Guard,
+        p2EffectiveMove,
+        p1EffectiveMove,
+        p2Outcome,
+        surges && p1LandedHit ? p1Mods!.guardPressureOnHit : 0,
+    );
 
     const player1IsStunnedNext = p1Outcome === "missed" || p1GuardBroke;
     const player2IsStunnedNext = p2Outcome === "missed" || p2GuardBroke;

@@ -60,6 +60,7 @@ export interface GameEvents {
     roundNumber: number;
     movePlan: Array<"punch" | "kick" | "block" | "special">;
     playerRole: string;
+    surgeCardId?: string | null;
   };
   "game:submitPrivateRoundPlan": {
     matchId: string;

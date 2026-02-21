@@ -65,9 +65,11 @@ export interface PowerSurgeCard {
  */
 export type PowerSurgeEffectType =
   | "damage_multiplier"    // Multiply damage dealt
+  | "glass_cannon"         // Deal more damage but take more damage
   | "damage_reduction"     // Reduce incoming damage
   | "hp_regen"            // Restore HP
   | "damage_reflect"      // Reflect damage when blocking
+  | "thorns_aura"         // Reflect a % of incoming damage always
   | "priority_boost"      // Move goes first
   | "energy_burn"         // Burn opponent energy on hit
   | "conditional_heal"    // Heal on condition
@@ -83,6 +85,7 @@ export type PowerSurgeEffectType =
   | "energy_steal"        // Steal opponent energy
   | "opponent_stun"       // Stun opponent next move
   | "lifesteal"           // Heal for % of damage dealt
+  | "guard_pressure"      // Add extra guard buildup to opponent on hit
   | "energy_drain"        // Passive energy drain from opponent
   | "guard_break";        // Break guard on any hit
 
@@ -102,6 +105,8 @@ export interface PowerSurgeEffectParams {
   hpCost?: number;
   /** Damage reflect percentage (0-1) */
   reflectPercent?: number;
+  /** Thorns reflection percentage (0-1), applies even when not blocking */
+  thornsPercent?: number;
   /** Priority boost amount */
   priorityBoost?: number;
   /** Energy to burn on hit */
@@ -124,6 +129,8 @@ export interface PowerSurgeEffectParams {
   opponentBlockDisabled?: boolean;
   /** Percentage of damage converted to HP */
   lifestealPercent?: number;
+  /** Extra guard meter applied to opponent on hit */
+  guardPressureOnHit?: number;
   /** Energy drained from opponent */
   energyDrain?: number;
   /** Extra energy cost for move */
@@ -168,16 +175,16 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "mempool-congest",
     name: "Mempool Mirror",
-    description: "While blocking, reflect 75% incoming damage",
+    description: "+25% damage dealt, take 20% more damage",
     glowColor: 0xff4400,
     iconKey: "surge_mempool-burn",
-    effectType: "damage_reflect",
-    effectParams: { reflectPercent: 0.75 },
+    effectType: "glass_cannon",
+    effectParams: { damageMultiplier: 1.25, incomingDamageReduction: -0.2 },
   },
   {
     id: "blue-set-heal",
     name: "Blue Set Heal",
-    description: "Restore 5 HP over time",
+    description: "Restore 5 HP per turn",
     glowColor: 0x0088ff,
     iconKey: "surge_blue-set-heal",
     effectType: "hp_regen",
@@ -222,11 +229,11 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "hash-hurricane",
     name: "Hash Hurricane",
-    description: "35% chance to dodge attack",
+    description: "Reflect 35% of incoming damage always",
     glowColor: 0x8800ff,
     iconKey: "surge_hash-hurricane",
-    effectType: "random_win",
-    effectParams: { randomWinChance: 0.35 },
+    effectType: "thorns_aura",
+    effectParams: { thornsPercent: 0.35 },
   },
   {
     id: "ghost-dag",
@@ -258,11 +265,11 @@ export const POWER_SURGE_CARDS: readonly PowerSurgeCard[] = [
   {
     id: "vaultbreaker",
     name: "Vaultbreaker Rush",
-    description: "Kick hits twice",
+    description: "Hits add +30 guard pressure",
     glowColor: 0xffaa00,
     iconKey: "surge_vaultbreaker",
-    effectType: "double_hit",
-    effectParams: { affectedMoves: ["kick"] },
+    effectType: "guard_pressure",
+    effectParams: { guardPressureOnHit: 30 },
   },
   {
     id: "chainbreaker",

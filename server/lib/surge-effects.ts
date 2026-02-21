@@ -11,9 +11,11 @@ import type { PowerSurgeCardId } from "./power-surge";
 
 export type PowerSurgeEffectType =
   | "damage_multiplier"
+  | "glass_cannon"
   | "damage_reduction"
   | "hp_regen"
   | "damage_reflect"
+  | "thorns_aura"
   | "priority_boost"
   | "energy_burn"
   | "conditional_heal"
@@ -29,6 +31,7 @@ export type PowerSurgeEffectType =
   | "energy_steal"
   | "opponent_stun"
   | "lifesteal"
+  | "guard_pressure"
   | "energy_drain"
   | "guard_break";
 
@@ -39,6 +42,7 @@ export interface PowerSurgeEffectParams {
   hpRegen?: number;
   hpCost?: number;
   reflectPercent?: number;
+  thornsPercent?: number;
   priorityBoost?: number;
   energyBurn?: number;
   affectedMoves?: string[];
@@ -50,6 +54,7 @@ export interface PowerSurgeEffectParams {
   blockDisabled?: boolean;
   opponentBlockDisabled?: boolean;
   lifestealPercent?: number;
+  guardPressureOnHit?: number;
   energyDrain?: number;
   energyCostBonus?: number;
 }
@@ -78,13 +83,13 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "mempool-congest": {
     id: "mempool-congest",
-    effectType: "damage_reflect",
-    effectParams: { reflectPercent: 0.75 },
+    effectType: "glass_cannon",
+    effectParams: { damageMultiplier: 1.25, incomingDamageReduction: -0.2 },
   },
   "blue-set-heal": {
     id: "blue-set-heal",
     effectType: "hp_regen",
-    effectParams: { hpRegen: 10 },
+    effectParams: { hpRegen: 5 },
   },
   "orphan-smasher": {
     id: "orphan-smasher",
@@ -104,12 +109,12 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   "sompi-shield": {
     id: "sompi-shield",
     effectType: "damage_reduction",
-    effectParams: { incomingDamageReduction: 0.45 },
+    effectParams: { incomingDamageReduction: 0.25 },
   },
   "hash-hurricane": {
     id: "hash-hurricane",
-    effectType: "random_win",
-    effectParams: { randomWinChance: 0.35 },
+    effectType: "thorns_aura",
+    effectParams: { thornsPercent: 0.35 },
   },
   "ghost-dag": {
     id: "ghost-dag",
@@ -128,8 +133,8 @@ const SURGE_CARDS: Record<PowerSurgeCardId, SurgeCardDefinition> = {
   },
   "vaultbreaker": {
     id: "vaultbreaker",
-    effectType: "double_hit",
-    effectParams: { affectedMoves: ["kick"] },
+    effectType: "guard_pressure",
+    effectParams: { guardPressureOnHit: 30 },
   },
   "chainbreaker": {
     id: "chainbreaker",
@@ -154,6 +159,7 @@ export interface SurgeModifiers {
   doubleHit: boolean;
   counterMultiplier: number;
   reflectPercent: number;
+  thornsPercent: number;
   opponentStun: boolean;
   bypassBlockOnHit: boolean;
   criticalHit: boolean;
@@ -162,6 +168,7 @@ export interface SurgeModifiers {
   blockDisabled: boolean;
   opponentBlockDisabled: boolean;
   lifestealPercent: number;
+  guardPressureOnHit: number;
   specialEnergyCost: number;
 }
 
@@ -182,6 +189,7 @@ function createDefaultModifiers(): SurgeModifiers {
     doubleHit: false,
     counterMultiplier: 1.0,
     reflectPercent: 0,
+    thornsPercent: 0,
     opponentStun: false,
     bypassBlockOnHit: false,
     criticalHit: false,
@@ -190,6 +198,7 @@ function createDefaultModifiers(): SurgeModifiers {
     blockDisabled: false,
     opponentBlockDisabled: false,
     lifestealPercent: 0,
+    guardPressureOnHit: 0,
     specialEnergyCost: 0,
   };
 }
@@ -225,6 +234,10 @@ function calculateCardModifiers(card: SurgeCardDefinition | null): SurgeModifier
         mods.incomingDamageReduction = params.incomingDamageReduction;
       }
       break;
+    case "glass_cannon":
+      mods.damageMultiplier = params.damageMultiplier ?? 1.25;
+      mods.incomingDamageReduction = params.incomingDamageReduction ?? -0.2;
+      break;
     case "damage_reduction":
       mods.incomingDamageReduction = params.incomingDamageReduction ?? 0;
       break;
@@ -234,6 +247,9 @@ function calculateCardModifiers(card: SurgeCardDefinition | null): SurgeModifier
     case "damage_reflect":
       mods.hpRegen = params.hpRegen ?? 0;
       mods.reflectPercent = params.reflectPercent ?? 0;
+      break;
+    case "thorns_aura":
+      mods.thornsPercent = params.thornsPercent ?? 0;
       break;
     case "priority_boost":
       mods.priorityBoost = params.priorityBoost ?? 0;
@@ -289,6 +305,9 @@ function calculateCardModifiers(card: SurgeCardDefinition | null): SurgeModifier
     case "lifesteal":
       mods.lifestealPercent = params.lifestealPercent ?? 0.35;
       break;
+    case "guard_pressure":
+      mods.guardPressureOnHit = params.guardPressureOnHit ?? 25;
+      break;
     case "guard_break":
       mods.bypassBlockOnHit = true;
       mods.damageMultiplier = params.damageMultiplier ?? 1.15;
@@ -323,8 +342,12 @@ export function applyDefensiveModifiers(
     actualDamage = Math.floor(actualDamage * multiplier);
   }
 
+  if (surgeMods.thornsPercent > 0) {
+    reflectedDamage += Math.floor(incomingDamage * surgeMods.thornsPercent);
+  }
+
   if (isBlocking && surgeMods.reflectPercent > 0) {
-    reflectedDamage = Math.floor(incomingDamage * surgeMods.reflectPercent);
+    reflectedDamage += Math.floor(incomingDamage * surgeMods.reflectPercent);
   }
 
   return { actualDamage, reflectedDamage };

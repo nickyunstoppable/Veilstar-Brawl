@@ -140,7 +140,7 @@ describe("round-resolver power surge integration", () => {
     expect(result.player1HealthAfter).toBe(85);
   });
 
-  it("applies converted vaultbreaker kick double-hit behavior", () => {
+  it("applies vaultbreaker guard pressure on landed hit", () => {
     const result = resolveRound(
       {
         player1Move: "kick",
@@ -163,8 +163,34 @@ describe("round-resolver power surge integration", () => {
 
     expect(result.player1.outcome).toBe("hit");
     expect(result.player2.outcome).toBe("staggered");
-    expect(result.player1.damageDealt).toBe(30);
-    expect(result.player2HealthAfter).toBe(70);
+    expect(result.player1.damageDealt).toBe(15);
+    expect(result.player2HealthAfter).toBe(85);
+    expect(result.player2GuardAfter).toBe(30);
+  });
+
+  it("applies vaultbreaker guard pressure when attack deals guarded damage", () => {
+    const result = resolveRound(
+      {
+        player1Move: "kick",
+        player2Move: "block",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-vault-guarded",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "vaultbreaker",
+        player2Surge: null,
+      }
+    );
+
+    expect(result.player2.damageTaken).toBeGreaterThan(0);
+    expect(result.player2GuardAfter).toBe(70);
   });
 
   it("applies finality-fist crit without extra special energy cost", () => {
@@ -348,5 +374,75 @@ describe("round-resolver power surge integration", () => {
     expect(result.player2.outcome).toBe("guarding");
     expect(result.player2GuardAfter).toBe(0);
     expect(result.player2IsStunnedNext).toBe(true);
+  });
+
+  it("applies glass_cannon as +damage and +incoming damage", () => {
+    const base = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "punch",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-glass-base",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: null,
+      }
+    );
+
+    const glass = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "punch",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-glass-active",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: "mempool-congest",
+        player2Surge: null,
+      }
+    );
+
+    expect(glass.player1.damageDealt).toBeGreaterThan(base.player1.damageDealt);
+    expect(glass.player1.damageTaken).toBeGreaterThan(base.player1.damageTaken);
+  });
+
+  it("applies thorns_aura reflected damage without blocking", () => {
+    const result = resolveRound(
+      {
+        player1Move: "punch",
+        player2Move: "block",
+        player1Health: 100,
+        player2Health: 100,
+        player1Energy: 100,
+        player2Energy: 100,
+        player1Guard: 0,
+        player2Guard: 0,
+      },
+      {
+        matchId: "m-thorns",
+        roundNumber: 1,
+        turnNumber: 1,
+        player1Surge: null,
+        player2Surge: "hash-hurricane",
+      }
+    );
+
+    expect(result.player2.move).toBe("block");
+    expect(result.player1.damageTaken).toBeGreaterThan(0);
   });
 });

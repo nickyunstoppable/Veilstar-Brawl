@@ -48,6 +48,8 @@ export interface SurgeModifiers {
   counterMultiplier: number;
   /** Damage reflect percent (0-1) */
   reflectPercent: number;
+  /** Passive thorns reflection percent (0-1), works even when not blocking */
+  thornsPercent: number;
   /** Opponent stun next turn */
   opponentStun: boolean;
   /** Bypass opponent's block reduction on any hit */
@@ -64,6 +66,8 @@ export interface SurgeModifiers {
   opponentBlockDisabled: boolean;
   /** Lifesteal percentage */
   lifestealPercent: number;
+  /** Extra guard pressure applied to opponent on successful hit */
+  guardPressureOnHit: number;
   /** Extra energy cost for special move (Finality Fist) */
   specialEnergyCost: number;
 }
@@ -94,6 +98,7 @@ function getDefaultModifiers(): SurgeModifiers {
     doubleHit: false,
     counterMultiplier: 1.0,
     reflectPercent: 0,
+    thornsPercent: 0,
     opponentStun: false,
     bypassBlockOnHit: false,
     criticalHit: false,
@@ -102,6 +107,7 @@ function getDefaultModifiers(): SurgeModifiers {
     blockDisabled: false,
     opponentBlockDisabled: false,
     lifestealPercent: 0,
+    guardPressureOnHit: 0,
     specialEnergyCost: 0,
   };
 }
@@ -148,6 +154,11 @@ function calculateCardModifiers(card: PowerSurgeCard | null): SurgeModifiers {
       }
       break;
 
+    case "glass_cannon":
+      mods.damageMultiplier = params.damageMultiplier ?? 1.25;
+      mods.incomingDamageReduction = params.incomingDamageReduction ?? -0.2;
+      break;
+
     case "damage_reduction":
       mods.incomingDamageReduction = params.incomingDamageReduction ?? 0;
       break;
@@ -159,6 +170,10 @@ function calculateCardModifiers(card: PowerSurgeCard | null): SurgeModifiers {
     case "damage_reflect":
       mods.hpRegen = params.hpRegen ?? 0;
       mods.reflectPercent = params.reflectPercent ?? 0;
+      break;
+
+    case "thorns_aura":
+      mods.thornsPercent = params.thornsPercent ?? 0;
       break;
 
     case "priority_boost":
@@ -231,6 +246,10 @@ function calculateCardModifiers(card: PowerSurgeCard | null): SurgeModifiers {
       mods.lifestealPercent = params.lifestealPercent ?? 0.35;
       break;
 
+    case "guard_pressure":
+      mods.guardPressureOnHit = params.guardPressureOnHit ?? 25;
+      break;
+
     case "guard_break":
       mods.bypassBlockOnHit = true;
       mods.damageMultiplier = params.damageMultiplier ?? 1.15;
@@ -287,8 +306,11 @@ export function applyDefensiveModifiers(
   }
 
   let reflectedDamage = 0;
+  if (defenderModifiers.thornsPercent > 0) {
+    reflectedDamage += Math.floor(incomingDamage * defenderModifiers.thornsPercent);
+  }
   if (isBlocking && defenderModifiers.reflectPercent > 0) {
-    reflectedDamage = Math.floor(incomingDamage * defenderModifiers.reflectPercent);
+    reflectedDamage += Math.floor(incomingDamage * defenderModifiers.reflectPercent);
   }
 
   return { actualDamage, reflectedDamage };

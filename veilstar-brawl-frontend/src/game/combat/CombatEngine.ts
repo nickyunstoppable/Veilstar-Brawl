@@ -216,7 +216,7 @@ export class CombatEngine {
         const p1SurgeMods = surgeResults.player1Modifiers;
         const p2SurgeMods = surgeResults.player2Modifiers;
 
-        // Apply Mempool Congest stun BEFORE first turn (only once per round)
+        // Apply one-time opponent-stun surge effects BEFORE first turn (only once per round)
         // This ensures the opponent is stunned immediately on turn 1, not after turn 1
         // FIX: Check currentTurn === 1 instead of stateful flag to prevent re-application in stateless environments
         if (this.state.currentTurn === 1) {
@@ -265,8 +265,7 @@ export class CombatEngine {
         const p2EnergyEffects = applyEnergyEffects(p2SurgeMods, p1State.energy, p2DidHit);
 
         // Apply Global Modifiers (Random Win / Dodge)
-        // Hash Hurricane: Chance to dodge opponent's attack (reduce damageTaken to 0)
-        // Note: This is applied as damage reduction, not as a hit modifier
+        // Note: random dodge-type surges reduce damageTaken to 0 for this turn
         const p1Dodged = checkRandomWin(p1SurgeMods);
         const p2Dodged = checkRandomWin(p2SurgeMods);
 
@@ -294,7 +293,7 @@ export class CombatEngine {
         if (p1SurgeMods.damageImmunity) p1DamageTaken = 0;
         if (p2SurgeMods.damageImmunity) p2DamageTaken = 0;
 
-        // Apply Hash Hurricane dodge - if dodge triggers, take no damage
+        // Apply dodge-style surge immunity
         if (p1Dodged) p1DamageTaken = 0;
         if (p2Dodged) p2DamageTaken = 0;
 
@@ -369,6 +368,23 @@ export class CombatEngine {
             p2State.guardMeter + p2Result.guardBuildup
         );
 
+        const p1LandedHit = effectiveP1Move !== "block" && effectiveP1Move !== "stunned" && p2Result.damageTaken > 0;
+        const p2LandedHit = effectiveP2Move !== "block" && effectiveP2Move !== "stunned" && p1Result.damageTaken > 0;
+
+        // Apply surge guard pressure (Vaultbreaker): successful hits add extra guard buildup to opponent
+        if (p1LandedHit && p1SurgeMods.guardPressureOnHit > 0) {
+            this.state.player2.guardMeter = Math.min(
+                COMBAT_CONSTANTS.GUARD_BREAK_THRESHOLD,
+                this.state.player2.guardMeter + p1SurgeMods.guardPressureOnHit
+            );
+        }
+        if (p2LandedHit && p2SurgeMods.guardPressureOnHit > 0) {
+            this.state.player1.guardMeter = Math.min(
+                COMBAT_CONSTANTS.GUARD_BREAK_THRESHOLD,
+                this.state.player1.guardMeter + p2SurgeMods.guardPressureOnHit
+            );
+        }
+
         // Track guard meter BEFORE effects
         const p1GuardBeforeTurn = this.state.player1.guardMeter;
         const p2GuardBeforeTurn = this.state.player2.guardMeter;
@@ -409,7 +425,7 @@ export class CombatEngine {
         this.regenerateEnergy();
 
         // Clear old stun (player paid the penalty), then apply new stun if applicable
-        // Mempool Congest stun is a ONE-TIME effect: it stuns the opponent on the FIRST turn only.
+        // One-time opponent-stun surge effects stun the opponent on the FIRST turn only.
         // After they've been stunned (missed their turn), the stun is cleared and NOT re-applied.
         // The pXSurgeStunApplied flags track that we've already applied the stun, preventing re-application.
         this.state.player1.isStunned = p1StunnedByMove || p1GuardBreak;
