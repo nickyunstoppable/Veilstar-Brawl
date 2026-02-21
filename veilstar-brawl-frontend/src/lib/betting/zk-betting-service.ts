@@ -1,5 +1,5 @@
 import { Buffer } from "buffer";
-import { Client as ZkBettingClient, BetSide } from "../../../../bindings/zk_betting/src/index";
+import { Client as ZkBettingClient, BetSide } from "../../bindings/zk_betting";
 import type { ContractSigner } from "../../types/signer";
 import { NETWORK_PASSPHRASE, RPC_URL, getContractId } from "../../utils/constants";
 import { signAndSendViaLaunchtube } from "../../utils/transactionHelper";
