@@ -26,7 +26,7 @@ export default function HomePage() {
         <div className="absolute top-[-90px] bottom-0 right-[70.5px] w-px bg-[#F0B71F]/30 hidden md:block z-0 pointer-events-none" />
 
         {/* Hero Section */}
-        <section className="relative mt-16 pt-32 pb-32 min-h-screen flex flex-col justify-center">
+        <section className="relative mt-32 pt-32 pb-32 min-h-screen flex flex-col justify-center">
           <DecorativeLine
             className="absolute top-[-90px] left-0 right-0 z-20"
             variant="left-red-right-gold"
@@ -94,7 +94,7 @@ export default function HomePage() {
                   AND UPDATES
                 </h3>
                 <p className="text-[#999] text-sm leading-relaxed mb-6">
-                  Spectate real-time battles powered by ZK proofs and Stellar contracts.
+                  Spectate live 1v1 battles with synced round state, turn timers, and match updates.
                 </p>
                 <a href="#zk">
                   <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
@@ -156,7 +156,7 @@ export default function HomePage() {
                   </span>
                 </h3>
                 <p className="text-[#999] text-sm max-w-[200px] mx-auto">
-                  Feast your eyes on stunning battles without paying gas.
+                  Fast testnet flow with wallet-signed actions and low-friction match progression.
                 </p>
               </motion.div>
 
@@ -206,9 +206,10 @@ export default function HomePage() {
                   <span className="text-white">Strategy.</span>
                 </h2>
                 <p className="text-[#999] text-lg leading-8 mb-12">
-                  Veilstar Brawl is a PvP fighting game where your moves are hidden behind ZK proofs.
-                  Choose your fighter, pick power surge cards, and prove your strategy without
-                  revealing it until it's too late for your opponent.
+                  Veilstar Brawl is a turn-based 1v1 fighter on Stellar. Each turn you choose punch,
+                  kick, block, or special while managing health, energy, and guard pressure. Every
+                  round starts with Power Surge picks, and private rooms can run a 3-phase hidden
+                  flow: pick surges, plan moves, then resolve.
                 </p>
 
                 {/* Stats */}
@@ -293,18 +294,30 @@ export default function HomePage() {
                   <div className="relative z-10 w-full h-full flex items-center justify-center p-8">
                     <div className="space-y-4 backdrop-blur-sm bg-black/30 p-6 rounded-lg border border-[#F0B71F]/20">
                       <div className="flex items-center gap-3 text-[#F0B71F]/80 font-mono text-xs sm:text-sm">
-                        <span className="text-[#E03609]">fn</span> verify_move(
+                        <span className="text-[#E03609]">fn</span> main(
                       </div>
                       <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
-                        commitment: Field,
+                        match_id: Field,
                       </div>
                       <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
-                        move_type: u8,
+                        round_number: u32,
                       </div>
                       <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
-                        salt: Field,
+                        turn_number: u32,
                       </div>
-                      <div className="text-[#F0B71F]/80 font-mono text-xs sm:text-sm">{')'}</div>
+                      <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
+                        player_address: Field,
+                      </div>
+                      <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
+                        surge_card: u32,
+                      </div>
+                      <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
+                        selected_move: u32,
+                      </div>
+                      <div className="pl-6 text-[#999] font-mono text-xs sm:text-sm">
+                        nonce: Field,
+                      </div>
+                      <div className="text-[#F0B71F]/80 font-mono text-xs sm:text-sm">{') -> pub Field'}</div>
                       <div className="mt-4 p-3 rounded border border-[#F0B71F]/20 bg-[#F0B71F]/5">
                         <span className="text-[#F0B71F] text-xs font-['Orbitron']">
                           PROOF VERIFIED ✓
@@ -324,10 +337,9 @@ export default function HomePage() {
                   <span className="text-white">Proofs</span>
                 </h2>
                 <p className="text-[#999] text-lg leading-8 mb-12">
-                  With Stellar Protocol 25 (X-Ray) and Noir circuits, Veilstar Brawl brings
-                  provably fair hidden-information mechanics to on-chain gaming. Your power surge
-                  picks and moves are committed as hashes and verified via ZK proofs — no one sees
-                  your strategy until the reveal.
+                  Veilstar Brawl uses Noir-powered proofs and Stellar contracts for private-match
+                  commitment checks and verifiable outcomes. In private rooms, surge picks and move
+                  plans are committed first and revealed for verification before full turn playback.
                 </p>
 
                 {/* Join Card */}
@@ -365,8 +377,8 @@ export default function HomePage() {
                         Enter the Arena
                       </h3>
                       <p className="text-[#999] text-lg leading-8 mb-4">
-                        Connect your Stellar wallet and start battling. Every fight is fair, every
-                        outcome verifiable.
+                        Connect your Stellar wallet to queue, create, or join matches. Practice mode
+                        lets you train first, then jump into live PvP when you're ready.
                       </p>
                       <a
                         href="/play"
@@ -416,8 +428,8 @@ export default function HomePage() {
                       Ready to Brawl?
                     </h2>
                     <p className="text-[#999] text-lg leading-8 mb-8">
-                      The arena is live on Stellar Testnet. Prove your skills, hide your moves, and
-                      let the ZK proofs settle who's the real champion.
+                      The arena is live on Stellar Testnet. Master move timing, energy economy,
+                      and surge decisions across best-of rounds to climb and win.
                     </p>
                     <div className="flex flex-col sm:flex-row gap-4">
                       <a href="/play">
@@ -507,8 +519,8 @@ export default function HomePage() {
                 </span>
               </motion.h2>
               <motion.p variants={fadeInUp} className="text-[#999] text-lg leading-8">
-                Whether you want to prove your skills, fight with ZK-hidden strategies, or spectate
-                battles, Veilstar Brawl has something for every warrior.
+                Queue ranked PvP, challenge friends in private rooms, train in practice mode,
+                or spectate live matches from the arena feed.
               </motion.p>
             </div>
 
@@ -517,7 +529,7 @@ export default function HomePage() {
                 {
                   title: 'Quick Match',
                   description:
-                    'Jump into the action instantly. Auto-matchmaking pairs you with an opponent. Your moves are committed via ZK proofs for fair play.',
+                    'Jump into ranked PvP with auto-matchmaking. Pick a fighter, then trade turn-based moves while managing HP, energy, and guard.',
                   icon: (
                     <svg width="31" height="43" viewBox="0 0 31 43" fill="none">
                       <path
@@ -542,7 +554,7 @@ export default function HomePage() {
                 {
                   title: 'Power Surge',
                   description:
-                    'Pick hidden power surge cards before each round. Your choices are committed on-chain and verified with Noir ZK proofs — no peeking.',
+                    'Each round begins with a Power Surge pick that modifies combat. In private rooms, surge and move commitments run through a hidden commit/reveal flow.',
                   icon: (
                     <svg width="40" height="39" viewBox="0 0 40 39" fill="none">
                       <path
@@ -567,7 +579,7 @@ export default function HomePage() {
                 {
                   title: 'Practice Mode',
                   description:
-                    'Hone your skills against AI opponents. No gas fees, no pressure — just pure combat training to sharpen your strategy.',
+                    'Hone your skills against AI opponents. Learn matchup timing and move interactions before stepping into ranked or private PvP.',
                   icon: (
                     <svg width="35" height="35" viewBox="0 0 35 35" fill="none">
                       <path
@@ -663,8 +675,9 @@ export default function HomePage() {
                   <span className="text-white"> Glory</span>
                 </h2>
                 <p className="text-[#999] text-lg leading-8 mb-12">
-                  Every punch, every block, every ZK-verified power surge is recorded on-chain. The
-                  Stellar ledger is your witness — will you be remembered as a champion?
+                  Your matches run with server-synced combat and Stellar-backed game lifecycle events,
+                  with private-room commitments verified before resolution. Bring your strategy,
+                  then prove it in the arena.
                 </p>
 
                 <div className="flex flex-col sm:flex-row gap-4">
@@ -725,13 +738,13 @@ export default function HomePage() {
                   number: '01.',
                   question: 'What makes Veilstar Brawl special?',
                   answer:
-                    'Veilstar Brawl is among the first fighting games to use Zero-Knowledge proofs as a core mechanic. Your power surge picks and moves are committed as hashes and verified via Noir ZK circuits — making gameplay provably fair without a trusted server.',
+                    'Veilstar Brawl combines a turn-based 1v1 combat system (punch, kick, block, special) with Power Surge modifiers, energy/guard management, and private-room hidden planning backed by Noir proof checks.',
                 },
                 {
                   number: '02.',
                   question: 'How do the ZK proofs work?',
                   answer:
-                    'When you choose power surge cards or submit moves, they\'re hashed and committed on-chain. Later, a ZK proof (built with Noir) verifies that your revealed choices match the commitment — without exposing them beforehand.',
+                    'In private-room flow, players commit hidden selections first, then reveal. Noir-based verification checks the reveal matches the commitment before full turn resolution is finalized.',
                 },
                 {
                   number: '03.',
@@ -743,7 +756,7 @@ export default function HomePage() {
                   number: '04.',
                   question: 'Do I need a wallet to play?',
                   answer:
-                    'For Practice Mode, no wallet is needed. For Quick Matches and ranked play, you need a Stellar-compatible wallet (like Freighter) to sign transactions on Testnet.',
+                    'Practice mode can be played without wallet transactions. For matchmaking, private rooms, and signed match actions, use a Stellar-compatible wallet (like Freighter) on Testnet.',
                 },
               ].map((faq, index) => (
                 <motion.div
