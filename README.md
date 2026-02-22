@@ -373,7 +373,7 @@ Deployed at: `2026-02-21T15:12:06.188Z`
 - Void Reaper — dimensional harvester from the quantum void
 - Aeon Guard — ancient sentinel awakened by the blockchain
 
-Each character has individual combat stats: `maxHp`, `maxEnergy`, per-move `damageModifiers`, `blockEffectiveness`, `specialCostModifier`, and `energyRegen`. For example, Bastion Hulk has `blockEffectiveness: 0.85` (absorbs 85% of incoming damage when blocking), while Glass Cannon builds like Viperblade or Gene Smasher have `damageModifiers.punch: 1.25` and thin health pools.
+Each character has individual combat stats: `maxHp`, `maxEnergy`, per-move `damageModifiers`, `blockEffectiveness`, `specialCostModifier`, and `energyRegen`. For example, Bastion Hulk has `blockEffectiveness: 0.85` (absorbs 85% of incoming damage when blocking) but flat 1.0 damage modifiers, while Gene Smasher inverts that trade-off — `damageModifiers.punch: 1.25` and `damageModifiers.kick: 1.25` at the cost of `blockEffectiveness: 0.25`. Speed characters like Neon Wraith run at only 92 HP but regenerate 25 energy per turn, enabling more frequent kicks and specials across a 10-turn private round plan.
 
 ### Combat System
 
@@ -869,8 +869,15 @@ bun run fly:secrets:sync
 - ZK gate enforced at the contract level: `end_game` reverts without a valid on-chain ZK outcome record when `zk_gate_required` is true
 
 **Deployed on-chain component:**
-- Three Soroban contracts deployed to Stellar Testnet (addresses above)
+- Four Soroban contracts deployed to Stellar Testnet
 - Live testnet deployment as of 2026-02-21
+
+| Contract | Address |
+|---|---|
+| Game Hub (official hackathon) | `CB4VZAT2U3UC6XFK3N23SKRF2NDCMP3QHJYMCHHFMZO7MRQO6DQ2EMYG` |
+| Veilstar Brawl | `CCFLSDEATZG2LAA3P7UVEYBXDW637RN5F56EIMDTEXW7HUP537SAKJ57` |
+| ZK Groth16 Verifier | `CARETBOWG5GFEXMLZUUAOBZG5SLXS6A5CSDRIQIFLUV4VQZEBZC6AMKT` |
+| ZK Betting | `CAXLEDHRDFD3E3NYMBJTIIGFAXUVKKE7352XSMUALPSOEMPF7SA7F5AH` |
 
 **Game Hub integration:**
 - `start_game()` called on every match start
