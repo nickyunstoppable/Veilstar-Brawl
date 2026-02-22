@@ -6,6 +6,7 @@
 !server/**
 !zk_service/**
 !zk_circuits/**
+!bindings/**
 
 # Never include VCS / editor junk
 .git/
