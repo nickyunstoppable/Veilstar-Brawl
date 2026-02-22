@@ -28,8 +28,7 @@ interface CharacterSelectClientProps {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
-const USE_OFFCHAIN_ACTIONS = (import.meta.env.VITE_ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
-const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
 const STROOPS_PER_XLM = 10_000_000;
 const REGISTRATION_SIGN_WINDOW_SECONDS = 60;
 
@@ -1201,7 +1200,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         ): Promise<{ signature?: string; signedMessage?: string }> => {
             const forceWalletSignature = options?.forceWalletSignature === true;
 
-            if (USE_OFFCHAIN_ACTIONS && !forceWalletSignature) {
+            if (!forceWalletSignature) {
                 return {};
             }
 
@@ -1591,33 +1590,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 });
                 const signed = await signActionMessage(signPayload, payload.playerAddress);
 
-                let signedAuthEntryXdr: string | undefined;
-                let transactionXdr: string | undefined;
-
-                if (!USE_OFFCHAIN_ACTIONS) {
-                    const prepareRes = await fetch(`${API_BASE}/api/matches/${payload.matchId}/move/prepare`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            address: payload.playerAddress,
-                            move: payload.move,
-                        }),
-                    });
-
-                    if (!prepareRes.ok) {
-                        const prepareErrorText = await prepareRes.text();
-                        throw new Error(prepareErrorText || "Move prepare failed");
-                    }
-
-                    const prepareJson = await prepareRes.json() as { authEntryXdr?: string; transactionXdr?: string };
-                    if (!prepareJson?.authEntryXdr || !prepareJson?.transactionXdr) {
-                        throw new Error("Move prepare did not return auth entry or transaction");
-                    }
-
-                    signedAuthEntryXdr = await signSorobanAuthEntry(prepareJson.authEntryXdr, payload.playerAddress);
-                    transactionXdr = prepareJson.transactionXdr;
-                }
-
                 const res = await fetch(`${API_BASE}/api/matches/${payload.matchId}/move`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1628,8 +1600,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         turnNumber: payload.turnNumber,
                         signature: signed.signature,
                         signedMessage: signed.signedMessage,
-                        signedAuthEntryXdr,
-                        transactionXdr,
                     }),
                 });
                 if (!res.ok) {
@@ -1698,33 +1668,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 });
                 const signed = await signActionMessage(signPayload, address);
 
-                let signedAuthEntryXdr: string | undefined;
-                let transactionXdr: string | undefined;
-
-                if (!USE_OFFCHAIN_ACTIONS) {
-                    const prepareRes = await fetch(`${API_BASE}/api/matches/${payload.matchId}/move/prepare`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            address,
-                            move: payload.moveType,
-                        }),
-                    });
-
-                    if (!prepareRes.ok) {
-                        const prepareErrorText = await prepareRes.text();
-                        throw new Error(prepareErrorText || "Move prepare failed");
-                    }
-
-                    const prepareJson = await prepareRes.json() as { authEntryXdr?: string; transactionXdr?: string };
-                    if (!prepareJson?.authEntryXdr || !prepareJson?.transactionXdr) {
-                        throw new Error("Move prepare did not return auth entry or transaction");
-                    }
-
-                    signedAuthEntryXdr = await signSorobanAuthEntry(prepareJson.authEntryXdr, address);
-                    transactionXdr = prepareJson.transactionXdr;
-                }
-
                 const res = await fetch(`${API_BASE}/api/matches/${payload.matchId}/move`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1733,8 +1676,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                         move: payload.moveType,
                         signature: signed.signature,
                         signedMessage: signed.signedMessage,
-                        signedAuthEntryXdr,
-                        transactionXdr,
                     }),
                 });
 
@@ -2247,34 +2188,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const signed = await signActionMessage(signPayload, payload.playerAddress);
 
                 const submitPowerSurgeOnce = async () => {
-                    let signedAuthEntryXdr: string | undefined;
-                    let transactionXdr: string | undefined;
-
-                    if (!USE_OFFCHAIN_ACTIONS) {
-                        const prepareRes = await fetch(`${API_BASE}/api/matches/${payload.matchId}/power-surge/prepare`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                                address: payload.playerAddress,
-                                roundNumber: payload.roundNumber,
-                                cardId: payload.cardId,
-                            }),
-                        });
-
-                        if (!prepareRes.ok) {
-                            const prepareErrorText = await prepareRes.text();
-                            throw new Error(prepareErrorText || "Power surge prepare failed");
-                        }
-
-                        const prepareJson = await prepareRes.json() as { authEntryXdr?: string; transactionXdr?: string };
-                        if (!prepareJson?.authEntryXdr || !prepareJson?.transactionXdr) {
-                            throw new Error("Power surge prepare did not return auth entry or transaction");
-                        }
-
-                        signedAuthEntryXdr = await signSorobanAuthEntry(prepareJson.authEntryXdr, payload.playerAddress);
-                        transactionXdr = prepareJson.transactionXdr;
-                    }
-
                     const selectRes = await fetch(`${API_BASE}/api/matches/${payload.matchId}/power-surge/select`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
@@ -2284,8 +2197,6 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                             cardId: payload.cardId,
                             signature: signed.signature,
                             signedMessage: signed.signedMessage,
-                            signedAuthEntryXdr,
-                            transactionXdr,
                         }),
                     });
 

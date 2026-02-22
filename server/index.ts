@@ -8,7 +8,7 @@
 import { handleJoinQueue, handleQueueStatus, handleLeaveQueue } from "./routes/matchmaking/queue";
 import { handleCreateRoom, handleJoinRoom } from "./routes/matchmaking/rooms";
 import { handleGetMatch } from "./routes/matches/match";
-import { handlePrepareMoveOnChain, handleSubmitMove } from "./routes/matches/move";
+import { handleSubmitMove } from "./routes/matches/move";
 import { handleExpireStakeDepositWindow, handlePrepareStakeDeposit, handleSubmitStakeDeposit } from "./routes/matches/stake";
 import { handleCharacterSelect } from "./routes/matches/select";
 import { handleSubmitBan } from "./routes/matches/ban";
@@ -16,7 +16,6 @@ import { handleForfeit } from "./routes/matches/forfeit";
 import { handlePrepareRegistration, handleSubmitAuth, handleCancelRegistration } from "./routes/matches/register";
 import {
     handleGetPowerSurgeCards,
-    handlePreparePowerSurge,
     handleSelectPowerSurge,
 } from "./routes/matches/power-surge";
 import { handleRejectMove } from "./routes/matches/reject";
@@ -245,11 +244,6 @@ async function handleRequest(req: Request): Promise<Response> {
             return corsResponse(await handleExpireStakeDepositWindow(matchId, req), req);
         }
 
-        // POST /api/matches/:matchId/move/prepare
-        if (pathname === `/api/matches/${matchId}/move/prepare` && method === "POST") {
-            return corsResponse(await handlePrepareMoveOnChain(matchId, req), req);
-        }
-
         // POST /api/matches/:matchId/select
         if (pathname === `/api/matches/${matchId}/select` && method === "POST") {
             return corsResponse(await handleCharacterSelect(matchId, req), req);
@@ -313,11 +307,6 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/power-surge/select
         if (pathname === `/api/matches/${matchId}/power-surge/select` && method === "POST") {
             return corsResponse(await handleSelectPowerSurge(matchId, req), req);
-        }
-
-        // POST /api/matches/:matchId/power-surge/prepare
-        if (pathname === `/api/matches/${matchId}/power-surge/prepare` && method === "POST") {
-            return corsResponse(await handlePreparePowerSurge(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/zk/finalize

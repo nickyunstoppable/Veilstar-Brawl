@@ -2,7 +2,7 @@ import type { MoveType } from "../../lib/game-types";
 import { isPowerSurgeCardId } from "../../lib/power-surge";
 import { provePrivateRoundPlan } from "../../lib/zk-round-prover";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
 
 interface ProveRoundBody {
     address?: string;
@@ -22,7 +22,7 @@ export async function handleProvePrivateRoundPlan(matchId: string, req: Request)
     try {
         if (!PRIVATE_ROUNDS_ENABLED) {
             return Response.json(
-                { error: "ZK private round mode is disabled (set ZK_PRIVATE_ROUNDS=true)" },
+                { error: "ZK private round mode is disabled" },
                 { status: 409 },
             );
         }

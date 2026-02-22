@@ -9,8 +9,8 @@ import { broadcastGameEvent } from "../../lib/matchmaker";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 import { shouldAutoProveFinalize, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
-const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
+const ZK_STRICT_FINALIZE = true;
 
 interface TimeoutBody {
     address: string;

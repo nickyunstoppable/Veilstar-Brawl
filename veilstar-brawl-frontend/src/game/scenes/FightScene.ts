@@ -25,7 +25,7 @@ import { preloadFightSceneAssets, createCharacterAnimations } from "../utils/ass
 
 type PlayerRole = "player1" | "player2";
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
-const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
 const PRIVATE_ROUND_PLAN_TURNS = 10;
 const PRIVATE_ROUND_SERVER_MAX_ENERGY = 100;
 const PRIVATE_ROUND_SERVER_ENERGY_REGEN = 8;

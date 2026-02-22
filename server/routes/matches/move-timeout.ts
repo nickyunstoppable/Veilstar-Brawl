@@ -9,7 +9,7 @@ import { broadcastGameEvent } from "../../lib/matchmaker";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "../../lib/stellar-contract";
 import { triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "../../lib/zk-finalizer-client";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
 
 interface MoveTimeoutBody {
     address: string;

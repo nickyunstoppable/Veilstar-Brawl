@@ -39,7 +39,7 @@ const CARD_SPACING = 40;
 const CENTER_CARD_SCALE = 1.1;
 const SELECTION_TIMEOUT_MS = 15000;
 const WARNING_TIME_MS = 2000; // Start warning at 2 seconds remaining
-const PRIVATE_ROUNDS_ENABLED = (import.meta.env.VITE_ZK_PRIVATE_ROUNDS ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
 
 // =============================================================================
 // TYPES

@@ -30,10 +30,7 @@ export interface AutoProveFinalizeStatus {
 }
 
 export function getAutoProveFinalizeStatus(): AutoProveFinalizeStatus {
-    const autoEnabled = (process.env.ZK_AUTO_PROVE_FINALIZE ?? "true") !== "false";
-    if (!autoEnabled) {
-        return { enabled: false, reason: "ZK_AUTO_PROVE_FINALIZE=false" };
-    }
+    const autoEnabled = true;
 
     const proveEnabled = (process.env.ZK_PROVE_ENABLED ?? "true") !== "false";
     if (!proveEnabled) {

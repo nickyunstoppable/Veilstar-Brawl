@@ -25,8 +25,8 @@ import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } fro
 import { proveAndFinalizeMatch, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
 import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type PowerSurgeCardId } from "./power-surge";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
-const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
+const ZK_STRICT_FINALIZE = true;
 const DEBUG_MATCH_END_FLOW = (process.env.DEBUG_MATCH_END_FLOW ?? "false") === "true";
 
 function debugMatchEndLog(message: string, extra?: unknown): void {

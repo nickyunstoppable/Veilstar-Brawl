@@ -25,8 +25,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
-const ZK_STRICT_FINALIZE = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
+const ZK_STRICT_FINALIZE = true;
 const ZK_REQUIRE_TRANSCRIPT_HASH = (process.env.ZK_REQUIRE_TRANSCRIPT_HASH ?? "true") !== "false";
 const ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS = Number.parseInt(
     (process.env.ZK_FINALIZE_WAIT_FOR_VERIFICATIONS_MS ?? "30000").trim(),

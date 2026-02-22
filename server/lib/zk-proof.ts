@@ -121,16 +121,6 @@ export async function verifyNoirProof(payload: ZkProofPayload): Promise<ZkVerifi
         };
     }
 
-    const verifyEnabled = (process.env.ZK_VERIFY_ENABLED ?? "true") !== "false";
-    if (!verifyEnabled) {
-        return {
-            ok: true,
-            backend: "disabled",
-            command: "none",
-            output: "ZK verification disabled by ZK_VERIFY_ENABLED=false",
-        };
-    }
-
     const verificationKeyPath = process.env.ZK_VK_PATH;
     if (!verificationKeyPath) {
         throw new Error("ZK verification is enabled but ZK_VK_PATH is not configured");

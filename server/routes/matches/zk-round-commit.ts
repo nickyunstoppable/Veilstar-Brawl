@@ -13,8 +13,9 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "true") !== "false";
-const ZK_ONCHAIN_COMMIT_GATE = (process.env.ZK_ONCHAIN_COMMIT_GATE ?? "true") !== "false";
+const PRIVATE_ROUNDS_ENABLED = true;
+const ZK_ONCHAIN_COMMIT_GATE = true;
+const ZK_STRICT_FINALIZE = true;
 // Gameplay defaults (hackathon-friendly):
 // - Always verify at commit (fast integrity gate)
 // - Always run on-chain verification asynchronously (never block Phase 3 animation)
@@ -739,7 +740,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                 return Response.json({ error: "Commit proof verification failed" }, { status: 400 });
             }
 
-            if ((process.env.ZK_STRICT_FINALIZE ?? "true") !== "false" && verification.backend === "disabled") {
+            if (ZK_STRICT_FINALIZE && verification.backend === "disabled") {
                 return Response.json({ error: "Strict ZK mode requires proof verification to be enabled" }, { status: 409 });
             }
 
@@ -821,7 +822,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
         // - Do NOT block Phase 3 on chain confirmation.
         // - Enforcement happens at match finalize for rewards/ELO.
         if (ZK_ONCHAIN_COMMIT_GATE && isOnChainRegistrationConfigured()) {
-            const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+            const strictMode = ZK_STRICT_FINALIZE;
             const onChainSessionId = typeof (match as any).onchain_session_id === "number"
                 ? (match as any).onchain_session_id
                 : null;
@@ -1438,7 +1439,7 @@ export async function handleResolvePrivateRound(matchId: string, req: Request): 
             });
         }
 
-        const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+        const strictMode = ZK_STRICT_FINALIZE;
         let verificationBackend = "commit_verified";
         let verificationCommand: string | null = null;
         let shouldRunResolveVerification = ZK_REVERIFY_ON_RESOLVE;
@@ -1950,7 +1951,7 @@ export async function handlePreparePrivateRoundCommit(matchId: string, req: Requ
         const commitment = body.commitment?.trim();
         const roundNumber = Number(body.roundNumber ?? 1);
         const turnNumber = Number(body.turnNumber ?? 1);
-        const strictMode = (process.env.ZK_STRICT_FINALIZE ?? "true") !== "false";
+        const strictMode = ZK_STRICT_FINALIZE;
 
         if (!address || !commitment || !Number.isInteger(roundNumber) || roundNumber < 1 || !Number.isInteger(turnNumber) || turnNumber < 1) {
             return Response.json(

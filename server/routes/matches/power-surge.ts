@@ -7,14 +7,8 @@
 
 import { getSupabase } from "../../lib/supabase";
 import { broadcastGameEvent } from "../../lib/matchmaker";
-import {
-  isClientSignedActionConfigured,
-  preparePowerSurgeOnChain,
-  submitSignedPowerSurgeOnChain,
-} from "../../lib/stellar-contract";
 
-const USE_OFFCHAIN_ACTIONS = (process.env.ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = true;
 import {
   getOrCreateRoundDeck,
   isPowerSurgeCardId,
@@ -121,8 +115,6 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
       address?: string;
       roundNumber?: number;
       cardId?: string;
-      signedAuthEntryXdr?: string;
-      transactionXdr?: string;
     };
     const address = body.address || "";
     const roundNumber = body.roundNumber || 1;
@@ -167,41 +159,6 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
     }
 
     let onChainTxHash: string | null = null;
-
-    if (!USE_OFFCHAIN_ACTIONS) {
-      if (!isClientSignedActionConfigured()) {
-        return Response.json(
-          { error: "On-chain power surge signing is required" },
-          { status: 503 },
-        );
-      }
-
-      if (!body.signedAuthEntryXdr || !body.transactionXdr) {
-        return Response.json(
-          { error: "Missing signedAuthEntryXdr or transactionXdr. Call /power-surge/prepare first." },
-          { status: 428 },
-        );
-      }
-
-      const onChainResult = await submitSignedPowerSurgeOnChain(
-        matchId,
-        address,
-        body.signedAuthEntryXdr,
-        body.transactionXdr,
-      );
-
-      if (!onChainResult.success) {
-        return Response.json(
-          {
-            error: "On-chain power surge transaction failed",
-            details: onChainResult.error || "Unknown on-chain error",
-          },
-          { status: 502 },
-        );
-      }
-
-      onChainTxHash = onChainResult.txHash || null;
-    }
 
     // Enforce deadline (soft)
     if (Date.now() > round.deadlineAt + 1500) {
@@ -272,92 +229,3 @@ export async function handleSelectPowerSurge(matchId: string, req: Request): Pro
   }
 }
 
-export async function handlePreparePowerSurge(matchId: string, req: Request): Promise<Response> {
-  try {
-    if (PRIVATE_ROUNDS_ENABLED) {
-      return Response.json(
-        { error: "Legacy power surge prepare is disabled when ZK_PRIVATE_ROUNDS=true." },
-        { status: 409 },
-      );
-    }
-
-    if (USE_OFFCHAIN_ACTIONS) {
-      return Response.json(
-        { error: "Off-chain action mode enabled; power-surge prepare is disabled" },
-        { status: 409 },
-      );
-    }
-
-    if (!isClientSignedActionConfigured()) {
-      return Response.json(
-        { error: "On-chain power surge signing is not configured" },
-        { status: 503 },
-      );
-    }
-
-    const body = (await req.json()) as { address?: string; roundNumber?: number; cardId?: string };
-    const address = body.address || "";
-    const roundNumber = body.roundNumber || 1;
-    const cardId = body.cardId;
-
-    if (!address || !cardId || typeof roundNumber !== "number") {
-      return Response.json({ error: "Missing address, roundNumber, or cardId" }, { status: 400 });
-    }
-
-    if (!isPowerSurgeCardId(cardId)) {
-      return Response.json({ error: `Invalid cardId: ${cardId}` }, { status: 400 });
-    }
-
-    const supabase = getSupabase();
-
-    const { data: match } = await supabase
-      .from("matches")
-      .select("id, player1_address, player2_address, power_surge_deck")
-      .eq("id", matchId)
-      .single();
-
-    if (!match) return Response.json({ error: "Match not found" }, { status: 404 });
-
-    const isPlayer1 = match.player1_address === address;
-    const isPlayer2 = match.player2_address === address;
-    if (!isPlayer1 && !isPlayer2) {
-      return Response.json({ error: "Not a participant" }, { status: 403 });
-    }
-
-    const { round } = getOrCreateRoundDeck({
-      matchId,
-      player1Address: match.player1_address,
-      player2Address: match.player2_address,
-      roundNumber,
-      existingDeck: match.power_surge_deck,
-    });
-
-    const allowed = round.player1Cards;
-    if (!allowed.includes(cardId as any)) {
-      return Response.json({ error: "Card not in your offered deck" }, { status: 400 });
-    }
-
-    if (Date.now() > round.deadlineAt + 1500) {
-      return Response.json({ error: "Selection window expired" }, { status: 400 });
-    }
-
-    const prepared = await preparePowerSurgeOnChain(
-      matchId,
-      address,
-      roundNumber,
-      cardId,
-    );
-
-    return Response.json({
-      success: true,
-      sessionId: prepared.sessionId,
-      transactionXdr: prepared.transactionXdr,
-      authEntryXdr: prepared.authEntryXdr,
-      roundNumber,
-      cardId,
-    });
-  } catch (err) {
-    console.error("[PowerSurge Prepare] Error:", err);
-    return Response.json({ error: "Failed to prepare power surge" }, { status: 500 });
-  }
-}

@@ -758,6 +758,8 @@ This places a real bet against a live bot match, waits for the full lifecycle (l
 
 ## Environment Variables
 
+Core ZK gameplay gates (`private rounds`, `strict finalize`, and `auto prove/finalize`) are hard-enabled in code and are not exposed as environment toggles.
+
 | Variable | Required | Description |
 |---|---|---|
 | `SUPABASE_URL` | Yes | Supabase project REST URL |
@@ -771,9 +773,6 @@ This places a real bet against a live bot match, waits for the full lifecycle (l
 | `VITE_ZK_BETTING_CONTRACT_ID` | Yes | `zk-betting` contract ID |
 | `ZK_GROTH16_VERIFIER_CONTRACT_ID` | Yes | `zk-groth16-verifier` contract ID |
 | `VITE_ZK_API_BASE_URL` | No | Override ZK proof API base (defaults to same server) |
-| `ZK_PRIVATE_ROUNDS` | No | Set `false` to disable ZK commitment mode (default `true`) |
-| `ZK_STRICT_FINALIZE` | No | Set `false` to allow non-ZK finalization (default `true`) |
-| `ZK_AUTO_PROVE_FINALIZE` | No | Set `false` to disable automatic post-match proving (default `true`) |
 | `ZK_GROTH16_ROUND_CIRCUIT_DIR` | No | Path to round-plan circuit artifacts directory |
 | `ZK_BETTING_SETTLE_CIRCUIT_DIR` | No | Path to bet settlement circuit artifacts directory |
 | `ZK_FINALIZE_API_BASE_URL` | No | Remote ZK service URL for delegated proving |

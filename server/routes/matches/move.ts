@@ -8,27 +8,14 @@ import { resolveTurn } from "../../lib/combat-resolver";
 import { broadcastGameEvent } from "../../lib/matchmaker";
 import { isValidMove } from "../../lib/round-resolver";
 import { GAME_CONSTANTS } from "../../lib/game-types";
-import {
-    isClientSignedActionConfigured,
-    prepareMoveOnChain,
-    submitSignedMoveOnChain,
-} from "../../lib/stellar-contract";
 
-const USE_OFFCHAIN_ACTIONS = (process.env.ZK_OFFCHAIN_ACTIONS ?? "true") !== "false";
-const PRIVATE_ROUNDS_ENABLED = (process.env.ZK_PRIVATE_ROUNDS ?? "false") === "true";
+const PRIVATE_ROUNDS_ENABLED = true;
 
 interface SubmitMoveBody {
     address: string;
     move: string;
     signature?: string;
     signedMessage?: string;
-    signedAuthEntryXdr?: string;
-    transactionXdr?: string;
-}
-
-interface PrepareMoveBody {
-    address: string;
-    move: string;
 }
 
 async function getOrCreateCurrentRound(matchId: string) {
@@ -76,112 +63,6 @@ async function getOrCreateCurrentRound(matchId: string) {
     }
 
     return currentRound;
-}
-
-export async function handlePrepareMoveOnChain(
-    matchId: string,
-    req: Request,
-): Promise<Response> {
-    try {
-        if (PRIVATE_ROUNDS_ENABLED) {
-            return Response.json(
-                { error: "Legacy move prepare is disabled when ZK_PRIVATE_ROUNDS=true. Use /api/matches/:matchId/zk/round/commit." },
-                { status: 409 },
-            );
-        }
-
-        if (USE_OFFCHAIN_ACTIONS) {
-            return Response.json(
-                { error: "Off-chain action mode enabled; move prepare is disabled" },
-                { status: 409 },
-            );
-        }
-
-        if (!isClientSignedActionConfigured()) {
-            return Response.json(
-                { error: "On-chain move signing is not configured" },
-                { status: 503 },
-            );
-        }
-
-        const body = await req.json() as PrepareMoveBody;
-        if (!body.address || !body.move) {
-            return Response.json(
-                { error: "Missing 'address' or 'move' in request body" },
-                { status: 400 }
-            );
-        }
-
-        if (!isValidMove(body.move)) {
-            return Response.json(
-                { error: `Invalid move: ${body.move}. Must be punch, kick, block, or special` },
-                { status: 400 }
-            );
-        }
-
-        console.log(
-            `[Move Prepare] Request match=${matchId} player=${body.address.slice(0, 6)}…${body.address.slice(-4)} move=${body.move}`,
-        );
-
-        const supabase = getSupabase();
-        const { data: match, error: matchError } = await supabase
-            .from("matches")
-            .select("*")
-            .eq("id", matchId)
-            .single();
-
-        if (matchError || !match) {
-            return Response.json({ error: "Match not found" }, { status: 404 });
-        }
-
-        const isPlayer1 = match.player1_address === body.address;
-        const isPlayer2 = match.player2_address === body.address;
-        if (!isPlayer1 && !isPlayer2) {
-            return Response.json(
-                { error: "You are not a participant in this match" },
-                { status: 403 }
-            );
-        }
-
-        if (match.status !== "in_progress") {
-            return Response.json(
-                { error: `Match is not in progress (status: ${match.status})` },
-                { status: 400 }
-            );
-        }
-
-        const currentRound = await getOrCreateCurrentRound(matchId);
-        const moveColumn = isPlayer1 ? "player1_move" : "player2_move";
-        if (currentRound[moveColumn]) {
-            return Response.json(
-                { error: "You already submitted a move for this turn" },
-                { status: 400 }
-            );
-        }
-
-        const turn = (currentRound.round_number - 1) * 10 + (currentRound.turn_number || 1);
-        const prepared = await prepareMoveOnChain(matchId, body.address, body.move, turn);
-
-        console.log(
-            `[Move Prepare] Prepared match=${matchId} round=${currentRound.round_number} turn=${currentRound.turn_number || 1} session=${prepared.sessionId}`,
-        );
-
-        return Response.json({
-            success: true,
-            sessionId: prepared.sessionId,
-            transactionXdr: prepared.transactionXdr,
-            authEntryXdr: prepared.authEntryXdr,
-            roundNumber: currentRound.round_number,
-            turnNumber: currentRound.turn_number || 1,
-            turn,
-        });
-    } catch (err) {
-        console.error("[Move Prepare] Error:", err);
-        return Response.json(
-            { error: err instanceof Error ? err.message : "Failed to prepare move" },
-            { status: 500 }
-        );
-    }
 }
 
 export async function handleSubmitMove(
@@ -266,41 +147,6 @@ export async function handleSubmitMove(
         }
 
         let onChainTxHash: string | null = null;
-
-        if (!USE_OFFCHAIN_ACTIONS) {
-            if (!isClientSignedActionConfigured()) {
-                return Response.json(
-                    { error: "On-chain move signing is required for move submission" },
-                    { status: 503 }
-                );
-            }
-
-            if (!body.signedAuthEntryXdr || !body.transactionXdr) {
-                return Response.json(
-                    { error: "Missing signedAuthEntryXdr or transactionXdr. Call /move/prepare first." },
-                    { status: 428 }
-                );
-            }
-
-            const onChainResult = await submitSignedMoveOnChain(
-                matchId,
-                body.address,
-                body.signedAuthEntryXdr,
-                body.transactionXdr,
-            );
-            if (!onChainResult.success) {
-                return Response.json(
-                    {
-                        error: "On-chain move transaction failed",
-                        details: onChainResult.error || null,
-                    },
-                    { status: 502 }
-                );
-            }
-
-            onChainTxHash = onChainResult.txHash || null;
-            console.log(`[Move POST] On-chain move submitted match=${matchId} tx=${onChainTxHash || "n/a"}`);
-        }
 
         // Submit the move (server-authoritative stun forces "stunned")
         const submitterIsStunned = isPlayer1
