@@ -97,10 +97,6 @@ export default function RoomCreate({ onRoomCreated, onCancel }: RoomCreateProps)
       try {
         const res = await fetch(`${API_BASE}/api/matches/${matchId}?lite=1&t=${Date.now()}`, {
           cache: "no-store",
-          headers: {
-            "Cache-Control": "no-cache, no-store, max-age=0",
-            Pragma: "no-cache",
-          },
         });
         if (!res.ok) return;
         const data = await res.json();
