@@ -224,7 +224,7 @@ impl VeilstarBrawlContract {
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
         env.storage().instance().set(&DataKey::FeeAccrued, &0_i128);
         env.storage().instance().set(&DataKey::LastSweepTs, &0_u64);
-        env.storage().instance().set(&DataKey::ZkGateRequired, &false);
+        env.storage().instance().set(&DataKey::ZkGateRequired, &true);
         env.storage().instance().set(&DataKey::ZkVerifierVkId, &BytesN::from_array(&env, &[0u8; 32]));
     }
 
@@ -480,7 +480,7 @@ impl VeilstarBrawlContract {
             .storage()
             .instance()
             .get(&DataKey::ZkGateRequired)
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         if zk_gate_required && (m.player1_zk_verified == 0 || m.player2_zk_verified == 0) {
             return Err(Error::ZkCommitRequired);
@@ -1224,7 +1224,7 @@ impl VeilstarBrawlContract {
         env.storage()
             .instance()
             .get(&DataKey::ZkGateRequired)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn get_zk_verifier_contract(env: Env) -> Result<Address, Error> {

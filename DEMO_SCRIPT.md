@@ -32,29 +32,33 @@ If staking is enabled, both players deposit XLM here. The winner takes 2x. The d
 
 ## [0:55 – 1:35] LIVE DEMO — PRIVATE ROUND PLANNING & ZK COMMIT
 
-> *Show the move planning UI. Click through selecting 10 moves. Watch the ZK indicator.*
+> *Show the Power Surge card selection, then the move planning UI. Submit the plan and watch the ZK pipeline indicator at the top of the screen step through COMMIT → VERIFY → LOCK.*
 
 **SPOKEN:**
-"Here's where the ZK magic happens. Before the round starts I plan my full 10-move sequence privately — punch, kick, block, special, whatever I think will out-read my opponent.
+"Here's where the ZK magic happens. Before the round starts I pick a Power Surge card — 'DAG Overclock' gives me plus 40% damage this round. That selection goes on-chain immediately.
 
-I also pick a Power Surge card — 'DAG Overclock' gives me plus 40% damage this round. That selection goes on-chain immediately.
+Then I plan my full 10-move sequence privately — punch, kick, block, special, whatever I think will out-read my opponent.
 
-Now I submit my move plan. Watch this panel in the corner — the client is running a Groth16 proof locally using a Circom circuit. It hashes all 10 moves plus a random nonce with the Poseidon hash function, and submits only that 32-byte commitment to the Soroban contract. 
+When I submit, watch the pipeline up here at the top — COMMIT, VERIFY, LOCK. The client is running a Groth16 proof using a Circom circuit. It hashes all 10 moves plus a random nonce with the Poseidon hash function and submits only that 32-byte commitment to the Soroban contract.
 
-My opponent cannot see my moves. The server cannot see my moves. If I open Stellar Explorer right now — there's the commitment transaction, on-chain, sealed before resolution.
+My opponent cannot see my moves. The server cannot see my moves. If I open Stellar Explorer right now — there's the commitment transaction, on-chain, sealed before resolution ever starts.
 
-When the round resolves, the proof is verified on-chain against BN254 elliptic-curve primitives — the cryptographic opcodes Stellar Protocol 25 added natively. The contract will not accept a false winner. `end_game` reverts without a valid ZK proof."
+When the round finishes, the contract verifies the proof against BN254 elliptic-curve primitives — the cryptographic opcodes Stellar Protocol 25 added natively. The indicator hits LOCK. `end_game` reverts without it."
 
 ---
 
-## [1:35 – 2:00] LIVE DEMO — MATCH REPLAY & EXPORT
+## [1:35 – 2:00] LIVE DEMO — MATCH SUMMARY, REPLAY & EXPORT
 
-> *Match ends. Navigate to the replay screen.*
+> *Match ends. Navigate to the match summary page. Scroll through it: ZK-verified badge, stats grid, blockchain transaction timeline, ZK proof artifacts panel. Then click Watch Full Replay. Then click Export MP4.*
 
 **SPOKEN:**
-"Match is over. Every completed match is fully replayable. I can scrub through the fight turn by turn — health bars, energy, the Power Surge card effects, everything reconstructed deterministically from the stored move data.
+"Match is over. The summary page shows the result with a ZK-verified badge, total hits, and how many private round commits were verified on-chain.
 
-And I can export the full match record — that's a JSON file with every move, every commitment hash, every proof, and the on-chain transaction IDs. Anyone can verify independently that the outcome matches the proofs. The replay isn't just a highlight reel — it's a cryptographic audit trail."
+Below that is the full blockchain transaction timeline — every on-chain move with a direct link to Stellar Explorer.
+
+And here's the ZK proof artifacts panel — the commitment hashes, how many were verified, and the on-chain transaction IDs. Everything judges need to audit the outcome independently.
+
+I can watch the full replay — the entire fight plays back from the stored round data. And I can export it as an MP4 directly from the browser. Takes about 30 seconds."
 
 ---
 
@@ -67,7 +71,7 @@ And I can export the full match record — that's a JSON file with every move, e
 
 I place a bet by committing a hash of my chosen side and a random salt. No one can see which side I picked. Once betting closes, bets are revealed, and a second Groth16 proof binds the match ID, pool ID, and winner together before the pool settles.
 
-Watch — the payout lands directly in the bettor's Stellar wallet. Automatically. No claim button. The betting contract called the same ZK verifier contract and it confirmed everything cryptographically."
+Watch — the payout lands directly in the bettor's Stellar wallet. Automatically. No claim button. The betting contract called the same ZK verifier contract and confirmed everything cryptographically."
 
 ---
 
@@ -87,9 +91,9 @@ Veilstar Brawl. Built on Stellar."
 ## DIRECTOR NOTES
 
 - **Pitch segment** should feel direct and energetic — 25 seconds, no padding.
-- **Stellar Explorer tab** — have it ready to alt-tab to immediately after the commitment TX. The on-chain hash appearing live is the single most important visual in the video.
-- **ZK indicator panel** — zoom in or add a callout overlay so judges can clearly see proof generation happening in real time.
-- **Replay scrubbing** — show the turn-by-turn scrubber moving; pause on a specific turn to show the move data.
-- **Export** — actually click Export and show the JSON file opening. 2 seconds is enough.
+- **ZK pipeline indicator** — it appears centered at the top of the fight UI with three steps: COMMIT, VERIFY, LOCK. Zoom or add a callout so it's clearly visible as it steps through.
+- **Stellar Explorer tab** — have it preloaded and alt-tab to it immediately after the commitment TX lands. Seeing the on-chain hash live is the single most important moment in the video.
+- **Match summary page** — scroll slowly through the blockchain transaction timeline and ZK proof artifacts panel; these are judge-facing evidence, not background flavor.
+- **Export MP4** — click the button and let the progress bar fill. You don't need to wait for the full download; cutting away at ~50% progress is fine.
 - **Betting payout notification** — let it animate on screen naturally. Don't cut away early.
 - Keep commentary conversational, not rehearsed. The live demo should feel like you're genuinely showing the product.
