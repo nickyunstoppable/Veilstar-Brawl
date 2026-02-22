@@ -7,8 +7,8 @@ target/
 # Deployment info
 deployment.json
 
-# Bindings (top-level generated bindings only)
-/bindings/
+# Bindings - committed so Heroku/Docker builds have them without needing stellar CLI
+# /bindings/
 
 # Environment
 .env
