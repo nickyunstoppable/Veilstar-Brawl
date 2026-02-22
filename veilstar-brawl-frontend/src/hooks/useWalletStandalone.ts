@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { StellarWalletsKit } from '@creit-tech/stellar-wallets-kit/sdk';
-import { defaultModules } from '@creit-tech/stellar-wallets-kit/modules/utils';
+import { FreighterModule } from '@creit-tech/stellar-wallets-kit/modules/freighter';
 import { KitEventType, Networks, type SwkAppTheme } from '@creit-tech/stellar-wallets-kit/types';
 import { useWalletStore } from '../store/walletSlice';
 import { NETWORK, NETWORK_PASSPHRASE } from '../utils/constants';
@@ -57,7 +57,7 @@ function ensureKitInitialized(passphrase?: string) {
 
   if (!kitInitialized) {
     StellarWalletsKit.init({
-      modules: defaultModules(),
+      modules: [new FreighterModule()],
       network: resolveNetwork(passphrase),
       theme: SWK_THEME,
       authModal: { showInstallLabel: false, hideUnsupportedWallets: true },
