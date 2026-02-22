@@ -4,6 +4,9 @@ test_snapshots/
 target/
 *.wasm
 
+# Allow compiled circuit WASM artifacts (needed at runtime for ZK proving)
+!zk_circuits/**/*.wasm
+
 # Deployment info
 deployment.json
 
