@@ -224,6 +224,7 @@ export class FightScene extends Phaser.Scene {
   private privateRoundCommittedListener?: (data: unknown) => void;
   private zkProgressListener?: (data: unknown) => void;
   private zkWaitStickyUntil: number = 0;
+  private zkVerificationFailureActiveRound: number | null = null;
 
   // Pending server state - holds the new HP/energy values during animations
   // This prevents the UI from showing new values before animations complete
@@ -2850,6 +2851,7 @@ export class FightScene extends Phaser.Scene {
 
   private resetZkOnChainBadge(roundNumber: number): void {
     this.zkOnChainBadgeRound = roundNumber;
+    this.zkVerificationFailureActiveRound = null;
     if (!this.zkIndicatorContainer) return;
     this.stopZkIndicatorTweens();
     try {
@@ -3781,7 +3783,22 @@ export class FightScene extends Phaser.Scene {
       if (!this.isSceneUiReady()) return;
 
       const payload = data as { message?: string; color?: string; stickyMs?: number; stage?: string; roundNumber?: number };
-      if (!payload?.message) return;
+      const stage = String(payload?.stage || "");
+      if (!stage && !payload?.message) return;
+
+      const verificationFailureStages = new Set([
+        "onchain_setup_failed",
+        "onchain_commit_failed",
+        "onchain_verify_failed",
+        "onchain_verify_exception",
+        "onchain_async_exception",
+      ]);
+
+      const verificationSubmittingStages = new Set([
+        "onchain_setup",
+        "onchain_commit_submitting",
+        "onchain_verify_submitting",
+      ]);
 
       // Important: on-chain verification can complete while Phase 3 animations are playing.
       // Those progress events should NOT override the Phase 3 narration/indicator, otherwise
@@ -3791,32 +3808,58 @@ export class FightScene extends Phaser.Scene {
 
       const currentRound = this.serverState?.currentRound ?? this.combatEngine?.getState()?.currentRound ?? 1;
       const payloadRound = Number(payload.roundNumber ?? currentRound);
+      const hasPriorFailure = this.zkVerificationFailureActiveRound === payloadRound;
+      const shouldShowRetrying = verificationSubmittingStages.has(stage) && hasPriorFailure;
+      const isFailureStage = verificationFailureStages.has(stage);
 
-      if (payload.stage === "onchain_verify_submitting") {
+      if (stage === "onchain_verify_submitting") {
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
           variant: "pending",
         });
       }
 
-      if (payload.stage === "onchain_verify_ok") {
+      if (shouldShowRetrying) {
+        this.setZkOnChainBadge({
+          roundNumber: payloadRound,
+          variant: "pending",
+        });
+      }
+
+      if (stage === "onchain_verify_ok") {
+        this.zkVerificationFailureActiveRound = null;
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
           variant: "verified",
         });
       }
 
-      if (payload.stage === "onchain_verify_failed" || payload.stage === "onchain_verify_exception") {
+      if (isFailureStage) {
+        this.zkVerificationFailureActiveRound = payloadRound;
         this.setZkOnChainBadge({
           roundNumber: payloadRound,
           variant: "failed",
         });
       }
 
-      if (isMidResolution) return;
+      if (isMidResolution && !isFailureStage && !shouldShowRetrying) return;
+
+      let message = payload.message || "Syncing on-chain ZK state...";
+      let color = payload.color || "#22c55e";
+      let stickyMs = payload.stickyMs || 1600;
+
+      if (isFailureStage) {
+        message = "ZK verification failed on-chain. Waiting to retry...";
+        color = "#ef4444";
+        stickyMs = 2600;
+      } else if (shouldShowRetrying) {
+        message = "Retrying on-chain ZK verification...";
+        color = "#f59e0b";
+        stickyMs = 2000;
+      }
 
       this.startZkWaitingTicker();
-      this.showZkWaitingStatus(payload.message, payload.color || "#22c55e", payload.stickyMs || 1600);
+      this.showZkWaitingStatus(message, color, stickyMs);
     };
     this.onBus("game:zkProgress", this.zkProgressListener);
 

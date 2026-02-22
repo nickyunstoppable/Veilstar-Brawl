@@ -1007,7 +1007,7 @@ export async function handleCommitPrivateRoundPlan(matchId: string, req: Request
                         matchId,
                         roundNumber,
                         turnNumber,
-                        stage: "onchain_async_exception",
+                        stage: "onchain_verify_exception",
                         message: "On-chain submission threw an exception (async).",
                         playerAddress: address,
                         color: "#ef4444",
