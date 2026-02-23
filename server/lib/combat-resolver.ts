@@ -22,7 +22,7 @@ import {
     isValidMove,
 } from "./round-resolver";
 import { reportMatchResultOnChain, isStellarConfigured, matchIdToSessionId } from "./stellar-contract";
-import { proveAndFinalizeMatch, triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
+import { triggerAutoProveFinalize, getAutoProveFinalizeStatus } from "./zk-finalizer-client";
 import { SURGE_SELECTION_SECONDS, normalizeStoredDeck, isPowerSurgeCardId, type PowerSurgeCardId } from "./power-surge";
 
 const PRIVATE_ROUNDS_ENABLED = true;
@@ -393,13 +393,9 @@ export async function resolveTurn(
             && PRIVATE_ROUNDS_ENABLED
             && ZK_STRICT_FINALIZE;
 
-        if (proofFirstFinalizeRequired && !autoFinalize.enabled) {
-            return createErrorResult(`ZK finalize required but unavailable: ${autoFinalize.reason}`);
-        }
-
         // Update match state
         let eloChanges: EloChanges | null = null;
-        if (matchOver && matchWinner && !proofFirstFinalizeRequired) {
+        if (matchOver && matchWinner) {
             const winnerAddress = matchWinner === "player1"
                 ? match.player1_address
                 : match.player2_address;
@@ -537,25 +533,8 @@ export async function resolveTurn(
             let onChainResultError: string | undefined;
 
             if (proofFirstFinalizeRequired) {
-                try {
-                    const proofFinalize = await proveAndFinalizeMatch({
-                        matchId,
-                        winnerAddress: winnerAddr,
-                        allowRemoteDelegation: true,
-                    });
-
-                    const finalizeResponse = proofFinalize.finalizeResponse as any;
-                    onChainTxHash = finalizeResponse?.onChainTxHash || finalizeResponse?.onChainOutcomeTxHash || onChainTxHash;
-                    onChainOutcomeTxHash = finalizeResponse?.onChainOutcomeTxHash || onChainOutcomeTxHash;
-                    onChainResultPending = Boolean(finalizeResponse?.onChainResultPending ?? onChainResultPending);
-                    onChainResultError = finalizeResponse?.onChainResultError || onChainResultError;
-
-                    eloChanges = await updateElo(match, winnerAddr);
-                } catch (err) {
-                    zkFinalizeFailedReason = err instanceof Error ? err.message : String(err);
-                    console.error("[CombatResolver] Proof-first finalize failed:", zkFinalizeFailedReason);
-                    return createErrorResult(`ZK proof finalize failed: ${zkFinalizeFailedReason}`);
-                }
+                onChainResultPending = true;
+                onChainResultError = "Awaiting browser-submitted ZK finalize proof";
             }
 
             if (!proofFirstFinalizeRequired && !autoFinalize.enabled && stellarReady) {

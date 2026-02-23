@@ -3,6 +3,9 @@ import { Client as ZkBettingClient, BetSide } from "../../bindings/zk_betting";
 import type { ContractSigner } from "../../types/signer";
 import { NETWORK_PASSPHRASE, RPC_URL, getContractId } from "../../utils/constants";
 import { signAndSendViaLaunchtube } from "../../utils/transactionHelper";
+import { proveBettingSettlementInBrowser } from "../zkBettingBrowserProver";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export type BetSideLabel = "player1" | "player2";
 
@@ -198,4 +201,79 @@ export async function claimPayoutOnChain(params: {
     txHash: extractTxHash(sentTx),
     payoutAmount,
   };
+}
+
+export async function settlePoolOnChainWithBrowserProof(params: {
+  matchId: string;
+  poolId: number;
+  winner: BetSideLabel;
+  adminAddress: string;
+  signer: ContractSigner;
+}): Promise<{ txHash?: string; vkIdHex: string }> {
+  const prove = await proveBettingSettlementInBrowser({
+    matchId: params.matchId,
+    poolId: params.poolId,
+    winner: params.winner,
+  });
+
+  if (!Array.isArray(prove.publicInputsHex) || prove.publicInputsHex.length < 3) {
+    throw new Error("Browser betting proof must include 3 public inputs");
+  }
+
+  const client = getContractClient(params.adminAddress, params.signer);
+  const tx = await client.settle_pool_zk({
+    pool_id: params.poolId,
+    winner: sideToEnum(params.winner),
+    vk_id: Buffer.from(prove.vkIdHex.replace(/^0x/i, ""), "hex"),
+    proof: Buffer.from(prove.proofBase64, "base64"),
+    public_inputs: prove.publicInputsHex.slice(0, 3).map((hex) => Buffer.from(String(hex).replace(/^0x/i, ""), "hex")),
+  });
+
+  const sentTx = await signAndSend(tx);
+  return {
+    txHash: extractTxHash(sentTx),
+    vkIdHex: prove.vkIdHex,
+  };
+}
+
+export async function getBotSettlementPlan(matchId: string): Promise<{
+  matchId: string;
+  poolId: string;
+  onchainPoolId: number;
+  winner: BetSideLabel;
+  onchainStatus: string;
+  ready: boolean;
+}> {
+  const response = await fetch(`${API_BASE}/api/bot-betting/settlement-plan/${matchId}`);
+  const json = await response.json().catch(() => ({})) as {
+    success?: boolean;
+    plan?: {
+      matchId: string;
+      poolId: string;
+      onchainPoolId: number;
+      winner: BetSideLabel;
+      onchainStatus: string;
+      ready: boolean;
+    };
+    error?: string;
+  };
+
+  if (!response.ok || !json?.plan) {
+    throw new Error(json?.error || `Failed to fetch bot settlement plan (${response.status})`);
+  }
+
+  return json.plan;
+}
+
+export async function recordBotSettlement(params: { matchId: string; txId: string }): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/bot-betting/settlement/record`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+
+  const json = await response.json().catch(() => ({})) as { error?: string };
+  if (!response.ok) {
+    throw new Error(json?.error || `Failed to record bot settlement (${response.status})`);
+  }
 }

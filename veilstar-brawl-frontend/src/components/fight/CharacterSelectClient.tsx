@@ -10,6 +10,7 @@ import { EventBus } from "@/game/EventBus";
 import { useWallet } from "@/hooks/useWallet";
 import { useOnChainRegistration } from "@/hooks/useOnChainRegistration";
 import { commitPrivateRoundPlan, preparePrivateRoundCommit, provePrivateRoundPlan, resolvePrivateRound } from "@/lib/zkPrivateRoundClient";
+import { proveAndFinalizeMatchInBrowser } from "@/lib/zkBrowserFinalizeClient";
 
 import { getSupabaseClient } from "@/lib/supabase/client";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -184,6 +185,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const currentRoundRef = useRef(1);
     const currentTurnRef = useRef(1);
     const privateRoundPlansRef = useRef<Record<number, PrivateRoundPlanState>>({});
+    const browserFinalizeAttemptedRef = useRef<Set<string>>(new Set());
 
 
 
@@ -218,6 +220,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         setPendingRegistrationNoStake(false);
         setRegistrationDeadlineMs(null);
         setRegistrationSecondsLeft(null);
+        browserFinalizeAttemptedRef.current.clear();
 
         if (stakeErrorTimerRef.current) {
             clearTimeout(stakeErrorTimerRef.current);
@@ -2065,6 +2068,64 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             }
         };
 
+        const handleBrowserProofFinalize = async (data: unknown) => {
+            if (!PRIVATE_ROUNDS_ENABLED || !publicKey) return;
+
+            const payload = (data || {}) as {
+                matchId?: string;
+                winner?: "player1" | "player2" | null;
+                winnerAddress?: string;
+                onChainOutcomeTxHash?: string;
+                zkProofAccepted?: boolean;
+            };
+
+            if (payload.zkProofAccepted || payload.onChainOutcomeTxHash) return;
+
+            const targetMatchId = String(payload.matchId || matchId || "").trim();
+            if (!targetMatchId) return;
+
+            if (browserFinalizeAttemptedRef.current.has(targetMatchId)) return;
+
+            const winnerAddress = String(payload.winnerAddress || "").trim();
+            if (!winnerAddress || winnerAddress !== publicKey) return;
+
+            browserFinalizeAttemptedRef.current.add(targetMatchId);
+
+            try {
+                EventBus.emit("game:zkProgress", {
+                    matchId: targetMatchId,
+                    stage: "browser_proving",
+                    message: "Generating finalization proof in browser…",
+                    color: "#60a5fa",
+                });
+
+                const result = await proveAndFinalizeMatchInBrowser({
+                    matchId: targetMatchId,
+                    winnerAddress,
+                });
+
+                EventBus.emit("game:zkProgress", {
+                    matchId: targetMatchId,
+                    stage: "browser_finalize_submitted",
+                    message: result.onChainResultPending
+                        ? "Browser proof submitted. Waiting for on-chain finalize."
+                        : "Browser proof submitted and accepted.",
+                    color: result.onChainResultPending ? "#f59e0b" : "#22c55e",
+                    onChainTxHash: result.onChainTxHash || result.onChainOutcomeTxHash || null,
+                });
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : "Browser finalize failed";
+                console.error("[CharacterSelectClient] Browser proof finalize failed:", error);
+
+                EventBus.emit("game:zkProgress", {
+                    matchId: targetMatchId,
+                    stage: "browser_finalize_failed",
+                    message: `Browser finalization failed: ${errorMessage}`,
+                    color: "#ef4444",
+                });
+            }
+        };
+
         const handleRequestRoundState = async (data: unknown) => {
             const payload = data as { matchId?: string };
             const id = payload?.matchId || matchId;
@@ -2288,6 +2349,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         EventBus.on("request-cancel", handleCancelRequest);
         EventBus.on("game:timerExpired", handleTimerExpired);
         EventBus.on("game:claimTimeoutVictory", handleClaimTimeoutVictory);
+        EventBus.on("game:matchEnded", handleBrowserProofFinalize);
         EventBus.on("game:roundStarting", handlePrivateRoundStarting);
         EventBus.on("game:privateRoundCommitted", handlePrivateRoundCommitEvent);
         EventBus.on("character_select_ready", handleSceneReady);
@@ -2308,6 +2370,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
             EventBus.off("request-cancel", handleCancelRequest);
             EventBus.off("game:timerExpired", handleTimerExpired);
             EventBus.off("game:claimTimeoutVictory", handleClaimTimeoutVictory);
+            EventBus.off("game:matchEnded", handleBrowserProofFinalize);
             EventBus.off("game:roundStarting", handlePrivateRoundStarting);
             EventBus.off("game:privateRoundCommitted", handlePrivateRoundCommitEvent);
             EventBus.off("character_select_ready", handleSceneReady);

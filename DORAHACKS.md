@@ -3,8 +3,10 @@
 A fully on-chain, zero-knowledge fighting game built on Stellar. Two players lock in their private round strategies simultaneously — neither can see the other's plan — and every match outcome is verified by a Groth16 proof running against BN254 elliptic-curve primitives on-chain. Spectators can bet real XLM in a commit-reveal pool that also settles through a ZK proof. The whole system — game contracts, verifier contract, betting contract, frontend, and backend — is deployed and live on Stellar Testnet.
 
 **Live Demo:** https://veilstar-brawl.vercel.app  
+
 **Demo Video:** https://youtu.be/f3NXDcAKKn8  
-**GitHub:** https://github.com/your-repo/veilstar-brawl
+
+**GitHub:** https://github.com/nicky-unstoppable/Veilstar-Brawl
 
 ---
 
@@ -29,7 +31,7 @@ Each round consists of up to 10 turns. Instead of submitting moves turn-by-turn 
 **Flow:**
 1. Player selects their 10 moves locally in the browser
 2. Browser generates a 32-byte random nonce
-3. Backend runs `snarkjs groth16 fullprove` against `round_plan.circom`, returning proof + commitment
+3. Browser spawns a dedicated Web Worker, fetches `round_plan.wasm` and `round_plan_final.zkey` from the ZK artifact relay, and runs `snarkjs groth16 fullProve` locally — proof and commitment never leave the client until submitted
 4. Player signs and submits `submit_zk_commit` — the Poseidon hash is stored on-chain under `(session_id, match_salt, round, turn, player_index)`
 5. After both players commit, the backend resolves turns 1–10 using the committed move plans
 6. At round-end, `submit_zk_verification` cross-calls the verifier contract to confirm the proof against the stored commitment
@@ -208,7 +210,8 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 **Frontend:** React 18 + Vite + Tailwind CSS + Phaser 3  
 **Backend:** Bun runtime + TypeScript (deployed on Fly.io)  
 **Database:** Supabase (PostgreSQL + Realtime channels)  
-**ZK Proving:** snarkjs Groth16 fullprove via subprocess  
+**ZK Proving (round plan):** snarkjs Groth16 fullProve in browser Web Worker (client-side)  
+**ZK Proving (finalization + betting):** snarkjs Groth16 fullProve in browser worker (operator/client-triggered)  
 **Frontend Hosting:** Vercel  
 **Wallet:** Stellar Wallet Interface Standard + Launchtube fee sponsorship  
 
@@ -218,8 +221,7 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 |---|---|
 | `combat-resolver.ts` | Authoritative round resolver; resolves turns using committed moves, streams via Supabase Realtime |
 | `zk-round-prover.ts` | subprocess manager for `snarkjs groth16 fullprove` (round plan circuit) |
-| `zk-betting-settle-prover.ts` | subprocess manager for `snarkjs groth16 fullprove` (betting circuit) |
-| `bot-match-service.ts` | 24/7 bot lifecycle: provisions pools, locks, reveals, ZK-settles, auto-claims payouts |
+| `bot-match-service.ts` | 24/7 bot lifecycle: provisions pools, locks, reveals, and publishes settlement-ready state for operator/browser finalize |
 | `stellar-contract.ts` | Soroban client wrappers with retry logic and idempotency classification |
 | `matchmaker.ts` | ELO queue: ±100 starting range, expands 5 ELO/sec after 10 seconds waiting |
 
@@ -230,7 +232,7 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 1. **Matchmaking** — ELO-based pairing via `/api/matchmaking/queue`
 2. **Contract Registration** — `start_game` called on Veilstar Brawl + Game Hub; player signs auth entry in wallet
 3. **Character Selection + Stake** — optional 60-second deposit window
-4. **Private Round Planning** — player plans 10 moves locally → backend runs snarkjs → commitment stored on-chain via `submit_zk_commit`
+4. **Private Round Planning** — player plans 10 moves locally → browser Web Worker proves locally (snarkjs) → commitment stored on-chain via `submit_zk_commit`
 5. **Turn Resolution** — backend resolves 10 turns using committed moves, broadcasts each result over Supabase Realtime
 6. **Round Verification** — `submit_zk_verification` cross-calls verifier, stores `ZkVerified` record
 7. **Match Finalization** — `submit_zk_match_outcome` stores proven winner → `end_game` validates record, pays stake, calls Game Hub
@@ -243,8 +245,8 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 2. **30-second betting window** — spectators call `commit_bet` with `SHA256(side || salt)`, funds locked immediately on-chain
 3. Pool locks; match plays out in BotBattleScene
 4. `admin_reveal_bet` called on-chain for each bettor
-5. snarkjs proves `betting_settle.circom` with `{match_id, pool_id, winner_side}` → `settle_pool_zk` verifies Groth16 proof cross-contract
-6. `admin_claim_payout` auto-called for all winners — XLM arrives in wallet with no user action required
+5. Browser/operator proves `betting_settle.circom` with `{match_id, pool_id, winner_side}` → `settle_pool_zk` verifies Groth16 proof cross-contract
+6. Settlement completion is recorded via backend API so pool state and history reflect the on-chain tx
 7. `WinningNotification` component animates payout with claim tx hash
 
 ---
@@ -312,7 +314,7 @@ server/lib/
   combat-resolver.ts                  Authoritative round resolver
   stellar-contract.ts                 Soroban client wrappers
   zk-round-prover.ts                  snarkjs subprocess manager (round plan)
-  zk-betting-settle-prover.ts         snarkjs subprocess manager (bet settlement)
+  zk-betting-contract.ts              on-chain betting admin/client wrappers
   zk-finalizer-client.ts              Auto-prove-and-finalize orchestration
   zk-betting-contract.ts              Admin client for zk-betting
   bot-match-service.ts                24/7 bot lifecycle worker

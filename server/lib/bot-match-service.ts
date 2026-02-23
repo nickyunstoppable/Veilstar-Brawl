@@ -5,13 +5,12 @@
  */
 
 import { getSupabase } from "./supabase";
-import { claimOnChainPayoutAsAdmin, createOnChainBotPool, ensureZkBettingVerifierConfigured, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, matchIdToBytes32, revealOnChainBetAsAdmin, settleOnChainPoolZk } from "./zk-betting-contract";
+import { claimOnChainPayoutAsAdmin, createOnChainBotPool, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, revealOnChainBetAsAdmin } from "./zk-betting-contract";
 import { SmartBotOpponent } from "./smart-bot-opponent";
 import { getOrCreateRoundDeck, type PowerSurgeCardId, type StoredSurgeDeck } from "./power-surge";
 import { calculateSurgeEffects, isBlockDisabled } from "./surge-effects";
 import { resolveRound } from "./round-resolver";
 import { getCharacterCombatCaps } from "./character-combat-stats";
-import { proveBotBettingSettlement } from "./zk-betting-settle-prover";
 
 // =============================================================================
 // TYPES
@@ -155,26 +154,6 @@ function getMatchDurationMs(match: BotMatch): number {
 
 function isMatchPlaybackComplete(match: BotMatch): boolean {
     return Date.now() - match.createdAt >= getMatchDurationMs(match);
-}
-
-async function getBotSettlementZkArtifacts(params: {
-    matchId: string;
-    poolId: number;
-    winner: "player1" | "player2";
-}): Promise<{ vkIdHex: string; proof: Buffer; publicInputs: Buffer[]; verificationKeyPath: string }> {
-    const winnerSide = params.winner === "player1" ? 0 : 1;
-    const proved = await proveBotBettingSettlement({
-        matchIdFieldBytes: matchIdToBytes32(params.matchId),
-        poolId: params.poolId,
-        winnerSide,
-    });
-
-    return {
-        vkIdHex: proved.vkIdHex,
-        proof: proved.proof,
-        publicInputs: proved.publicInputs,
-        verificationKeyPath: proved.verificationKeyPath,
-    };
 }
 
 export function simulateBotMatch(matchId: string, bot1Id?: string, bot2Id?: string): BotMatch {
@@ -998,7 +977,8 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
             return;
         }
 
-        let lastTx: string | null = null;
+        let lastTx: string | null = pool.onchain_last_tx_id || null;
+        let onChainSettled = false;
         if (pool.onchain_pool_id) {
             if (!pool.onchain_status || pool.onchain_status === "open") {
                 const lockTx = await lockOnChainPool(Number(pool.onchain_pool_id));
@@ -1019,76 +999,54 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
                 anchorTxId: lastTx,
             });
 
-            try {
-                const settlementArtifacts = await getBotSettlementZkArtifacts({
-                    matchId: match.id,
-                    poolId: Number(pool.onchain_pool_id),
-                    winner: winner as "player1" | "player2",
-                });
-
-                await ensureZkBettingVerifierConfigured({
-                    vkIdHex: settlementArtifacts.vkIdHex,
-                    verificationKeyPath: settlementArtifacts.verificationKeyPath,
-                });
-
-                const settleTx = await settleOnChainPoolZk({
-                    poolId: Number(pool.onchain_pool_id),
-                    winner: winner as "player1" | "player2",
-                    vkIdHex: settlementArtifacts.vkIdHex,
-                    proof: settlementArtifacts.proof,
-                    publicInputs: settlementArtifacts.publicInputs,
-                });
-                lastTx = settleTx.txHash || lastTx;
-                console.log("[BotMatchService][Finalize] Settle tx", {
-                    matchId: match.id,
-                    poolId: pool.id,
-                    onchainPoolId: pool.onchain_pool_id,
-                    txHash: settleTx.txHash || null,
-                    skipped: settleTx.skipped || false,
-                    reason: settleTx.reason || null,
-                });
-            } catch (error) {
-                const onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
-                const alreadySettled = onchain?.status === 2;
-                console.warn("[BotMatchService][Finalize] Settle tx failed", {
-                    matchId: match.id,
-                    poolId: pool.id,
-                    onchainPoolId: pool.onchain_pool_id,
-                    error: error instanceof Error ? error.message : String(error ?? ""),
-                    onchainStatus: onchain?.status ?? null,
-                    onchainWinnerSide: onchain?.winnerSide ?? null,
-                    recoveredAsSettled: alreadySettled,
-                });
-                if (!alreadySettled) {
-                    throw error;
-                }
-            }
+            const onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
+            onChainSettled = onchain?.status === 2;
         }
 
-        await supabase
-            .from("betting_pools")
-            .update({
-                status: "resolved",
+        if (onChainSettled) {
+            await supabase
+                .from("betting_pools")
+                .update({
+                    status: "resolved",
+                    winner,
+                    onchain_status: "settled",
+                    onchain_last_tx_id: lastTx,
+                })
+                .eq("id", pool.id);
+
+            await settleBotBetsOffchain({
+                poolId: pool.id,
+                onchainPoolId: pool.onchain_pool_id ? Number(pool.onchain_pool_id) : null,
                 winner,
-                onchain_status: "settled",
-                onchain_last_tx_id: lastTx,
-            })
-            .eq("id", pool.id);
+                settleTxId: lastTx,
+                attemptRevealOnChain: false,
+            });
 
-        await settleBotBetsOffchain({
-            poolId: pool.id,
-            onchainPoolId: pool.onchain_pool_id ? Number(pool.onchain_pool_id) : null,
-            winner,
-            settleTxId: lastTx,
-            attemptRevealOnChain: false,
-        });
+            console.log("[BotMatchService][Finalize] Completed", {
+                matchId: match.id,
+                poolId: pool.id,
+                winner,
+                lastTx,
+                mode: "already-settled-onchain",
+            });
+        } else {
+            await supabase
+                .from("betting_pools")
+                .update({
+                    status: "locked",
+                    winner,
+                    onchain_status: "locked",
+                    onchain_last_tx_id: lastTx,
+                })
+                .eq("id", pool.id);
 
-        console.log("[BotMatchService][Finalize] Completed", {
-            matchId: match.id,
-            poolId: pool.id,
-            winner,
-            lastTx,
-        });
+            console.log("[BotMatchService][Finalize] Awaiting operator/browser settlement", {
+                matchId: match.id,
+                poolId: pool.id,
+                onchainPoolId: pool.onchain_pool_id,
+                winner,
+            });
+        }
 
         finalizedMatchIds.add(match.id);
     } catch (error) {
@@ -1260,5 +1218,118 @@ export function getMatchSyncInfo(matchId: string): {
             isOpen: false,
             secondsRemaining: 0,
         },
+    };
+}
+
+export async function getBotSettlementPlan(matchId: string): Promise<{
+    matchId: string;
+    poolId: string;
+    onchainPoolId: number;
+    winner: "player1" | "player2";
+    onchainStatus: string;
+    ready: boolean;
+}> {
+    const supabase = getSupabase();
+
+    const { data: pool } = await supabase
+        .from("betting_pools")
+        .select("id,match_id,onchain_pool_id,onchain_status,winner,status")
+        .eq("match_id", matchId)
+        .eq("match_type", "bot")
+        .single();
+
+    if (!pool) {
+        throw new Error("Bot betting pool not found");
+    }
+
+    const winner = pool.winner as "player1" | "player2" | null;
+    const onchainPoolId = Number(pool.onchain_pool_id || 0);
+
+    if (!winner) {
+        throw new Error("Pool winner is not available yet");
+    }
+
+    if (!onchainPoolId) {
+        throw new Error("Pool does not have an on-chain pool id");
+    }
+
+    const onchain = await getOnChainPoolStatus(onchainPoolId);
+    const onchainStatus = onchain?.status === 2
+        ? "settled"
+        : onchain?.status === 1
+            ? "locked"
+            : onchain?.status === 0
+                ? "open"
+                : (pool.onchain_status || "unknown");
+
+    const ready = winner !== null && (onchainStatus === "locked" || onchainStatus === "settled");
+
+    return {
+        matchId,
+        poolId: pool.id,
+        onchainPoolId,
+        winner,
+        onchainStatus,
+        ready,
+    };
+}
+
+export async function recordBotSettlementFromClient(params: {
+    matchId: string;
+    txId: string;
+}): Promise<{ success: boolean; poolId: string; onchainPoolId: number; winner: "player1" | "player2" }> {
+    const supabase = getSupabase();
+
+    const { data: pool } = await supabase
+        .from("betting_pools")
+        .select("id,match_id,onchain_pool_id,onchain_status,winner")
+        .eq("match_id", params.matchId)
+        .eq("match_type", "bot")
+        .single();
+
+    if (!pool) {
+        throw new Error("Bot betting pool not found");
+    }
+
+    const winner = pool.winner as "player1" | "player2" | null;
+    const onchainPoolId = Number(pool.onchain_pool_id || 0);
+    if (!winner) {
+        throw new Error("Pool winner is not set");
+    }
+    if (!onchainPoolId) {
+        throw new Error("Pool does not have an on-chain id");
+    }
+
+    const onchain = await getOnChainPoolStatus(onchainPoolId);
+    const settled = onchain?.status === 2;
+    if (!settled) {
+        throw new Error("On-chain pool is not settled yet");
+    }
+
+    await supabase
+        .from("betting_pools")
+        .update({
+            status: "resolved",
+            onchain_status: "settled",
+            onchain_last_tx_id: params.txId,
+            winner,
+        })
+        .eq("id", pool.id);
+
+    await settleBotBetsOffchain({
+        poolId: pool.id,
+        onchainPoolId,
+        winner,
+        settleTxId: params.txId,
+        attemptRevealOnChain: false,
+    });
+
+    finalizedMatchIds.add(params.matchId);
+
+    return {
+        success: true,
+        poolId: pool.id,
+        onchainPoolId,
+        winner,
     };
 }

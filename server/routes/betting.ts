@@ -4,7 +4,7 @@
  */
 
 import { getSupabase } from "../lib/supabase";
-import { getActiveMatch, simulateBotMatch } from "../lib/bot-match-service";
+import { getActiveMatch, getBotSettlementPlan, recordBotSettlementFromClient, simulateBotMatch } from "../lib/bot-match-service";
 import { getOnChainPoolStatus } from "../lib/zk-betting-contract";
 
 const lastBotPoolSnapshotLog = new Map<string, string>();
@@ -916,5 +916,37 @@ export async function handleGetBotBetHistory(req: Request): Promise<Response> {
     } catch (error) {
         console.error("[BotBetHistory] Error:", error);
         return Response.json({ success: false, error: "Internal server error" }, { status: 500 });
+    }
+}
+
+export async function handleGetBotSettlementPlan(matchId: string): Promise<Response> {
+    try {
+        const plan = await getBotSettlementPlan(matchId);
+        return Response.json({ success: true, plan });
+    } catch (error) {
+        return Response.json(
+            { error: error instanceof Error ? error.message : "Failed to get settlement plan" },
+            { status: 400 },
+        );
+    }
+}
+
+export async function handleRecordBotSettlement(req: Request): Promise<Response> {
+    try {
+        const body = await req.json() as { matchId?: string; txId?: string };
+        const matchId = String(body.matchId || "").trim();
+        const txId = String(body.txId || "").trim();
+
+        if (!matchId || !txId) {
+            return Response.json({ error: "matchId and txId are required" }, { status: 400 });
+        }
+
+        const recorded = await recordBotSettlementFromClient({ matchId, txId });
+        return Response.json({ success: true, ...recorded });
+    } catch (error) {
+        return Response.json(
+            { error: error instanceof Error ? error.message : "Failed to record settlement" },
+            { status: 400 },
+        );
     }
 }

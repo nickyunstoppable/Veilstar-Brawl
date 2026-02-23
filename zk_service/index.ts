@@ -2,8 +2,9 @@ import { ensureEnvLoaded } from "../server/lib/env";
 import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleResolvePrivateRound } from "../server/routes/matches/zk-round-commit";
 import { handleProvePrivateRoundPlan } from "../server/routes/matches/zk-round-prove";
 import { handleFinalizeWithZkProof } from "../server/routes/matches/zk-finalize";
+import { handleGetFinalizePlan } from "../server/routes/matches/zk-finalize-plan";
 import { handleProveAndFinalize } from "../server/routes/matches/zk-prove-finalize";
-import { handleGetRoundPlanArtifact } from "../server/routes/zk-artifacts";
+import { handleGetBettingSettleArtifact, handleGetRoundPlanArtifact } from "../server/routes/zk-artifacts";
 
 ensureEnvLoaded();
 
@@ -82,6 +83,11 @@ async function handleRequest(req: Request): Promise<Response> {
         return withCors(await handleGetRoundPlanArtifact(roundArtifactMatch[1]), req);
     }
 
+    const bettingArtifactMatch = pathname.match(/^\/api\/zk\/artifacts\/betting-settle\/(betting_settle\.wasm|betting_settle_final\.zkey|verification_key\.json)$/i);
+    if (bettingArtifactMatch && method === "GET") {
+        return withCors(await handleGetBettingSettleArtifact(bettingArtifactMatch[1]), req);
+    }
+
     const matchId = extractMatchId(pathname);
     if (matchId) {
         if (pathname === `/api/matches/${matchId}/zk/round/commit/prepare` && method === "POST") {
@@ -102,6 +108,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
         if (pathname === `/api/matches/${matchId}/zk/finalize` && method === "POST") {
             return withCors(await handleFinalizeWithZkProof(matchId, req), req);
+        }
+
+        if (pathname === `/api/matches/${matchId}/zk/finalize-plan` && method === "GET") {
+            return withCors(await handleGetFinalizePlan(matchId, req), req);
         }
 
         if (pathname === `/api/matches/${matchId}/zk/prove-finalize` && method === "POST") {

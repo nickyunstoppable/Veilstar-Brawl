@@ -23,10 +23,11 @@ import { handleMoveTimeoutRoute } from "./routes/matches/move-timeout";
 import { handleTimeoutVictory } from "./routes/matches/timeout";
 import { handleDisconnect } from "./routes/matches/disconnect";
 import { handleFinalizeWithZkProof } from "./routes/matches/zk-finalize";
+import { handleGetFinalizePlan } from "./routes/matches/zk-finalize-plan";
 import { handleProveAndFinalize } from "./routes/matches/zk-prove-finalize";
 import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleResolvePrivateRound } from "./routes/matches/zk-round-commit";
 import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
-import { handleGetRoundPlanArtifact } from "./routes/zk-artifacts";
+import { handleGetBettingSettleArtifact, handleGetRoundPlanArtifact } from "./routes/zk-artifacts";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 import { handleGetReplayData } from "./routes/replay-data";
@@ -36,7 +37,7 @@ import { ensureEnvLoaded } from "./lib/env";
 import { handleGetMatchPublic } from "./routes/matches/public";
 import { handleGetLiveMatches } from "./routes/matches/live";
 import { handleBotGamesPlaybackEnded, handleGetBotGames, handleBotGamesSync } from "./routes/bot-games";
-import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleGetUnresolvedBotBets, handleGetBotBetHistory } from "./routes/betting";
+import { handleGetBettingPool, handlePlaceBet, handleGetBotBettingPool, handlePlaceBotBet, handleGetUnresolvedBotBets, handleGetBotBetHistory, handleGetBotSettlementPlan, handleRecordBotSettlement } from "./routes/betting";
 import { startBotMatchLifecycleWorker } from "./lib/bot-match-service";
 
 ensureEnvLoaded();
@@ -110,6 +111,11 @@ async function handleRequest(req: Request): Promise<Response> {
     const roundArtifactMatch = pathname.match(/^\/api\/zk\/artifacts\/round-plan\/(round_plan\.wasm|round_plan_final\.zkey|verification_key\.json)$/i);
     if (roundArtifactMatch && method === "GET") {
         return corsResponse(await handleGetRoundPlanArtifact(roundArtifactMatch[1]), req);
+    }
+
+    const bettingArtifactMatch = pathname.match(/^\/api\/zk\/artifacts\/betting-settle\/(betting_settle\.wasm|betting_settle_final\.zkey|verification_key\.json)$/i);
+    if (bettingArtifactMatch && method === "GET") {
+        return corsResponse(await handleGetBettingSettleArtifact(bettingArtifactMatch[1]), req);
     }
 
     // -----------------------------------------------
@@ -193,6 +199,13 @@ async function handleRequest(req: Request): Promise<Response> {
     }
     if (pathname === "/api/bot-betting/history" && method === "GET") {
         return corsResponse(await handleGetBotBetHistory(req), req);
+    }
+    const botSettlementPlanMatch = pathname.match(/^\/api\/bot-betting\/settlement-plan\/([a-f0-9-]+)$/i);
+    if (botSettlementPlanMatch && method === "GET") {
+        return corsResponse(await handleGetBotSettlementPlan(botSettlementPlanMatch[1]), req);
+    }
+    if (pathname === "/api/bot-betting/settlement/record" && method === "POST") {
+        return corsResponse(await handleRecordBotSettlement(req), req);
     }
     // -----------------------------------------------
     // Player Profile & Match History
@@ -318,6 +331,11 @@ async function handleRequest(req: Request): Promise<Response> {
         // POST /api/matches/:matchId/zk/finalize
         if (pathname === `/api/matches/${matchId}/zk/finalize` && method === "POST") {
             return corsResponse(await handleFinalizeWithZkProof(matchId, req), req);
+        }
+
+        // GET /api/matches/:matchId/zk/finalize-plan
+        if (pathname === `/api/matches/${matchId}/zk/finalize-plan` && method === "GET") {
+            return corsResponse(await handleGetFinalizePlan(matchId, req), req);
         }
 
         // POST /api/matches/:matchId/zk/prove-finalize

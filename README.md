@@ -303,7 +303,7 @@ create_pool  →  commit_bet (open)  →  lock_pool  →  reveal_bet / admin_rev
 | `admin_reveal_bet(pool_id, bettor, side, salt)` | Admin | Admin-controlled reveal for automation. |
 | `settle_pool_zk(pool_id, winner, vk_id, proof, public_inputs)` | Admin | Settles pool with Groth16 proof. Cross-calls verifier. Validates `public_inputs[1]` matches pool_id to prevent replay. Validates `public_inputs[2]` matches winner_side. |
 | `claim_payout(pool_id)` | Bettor | Winner claims 2x net bet amount (fallback path). |
-| `admin_claim_payout(pool_id, bettor)` | Admin | Admin auto-claims on bettor's behalf immediately after settlement. This is the primary payout path — bettors receive funds automatically. |
+| `admin_claim_payout(pool_id, bettor)` | Admin | Optional admin-side payout claim helper after settlement. |
 | `sweep_fees()` | Admin | Sweeps accrued 1% fees to treasury. Rate-limited to 24 hours. |
 
 **Settlement validation in the contract** (Rust):
@@ -492,8 +492,7 @@ If only one player deposits before the deadline, `expire_stake` is called and th
 - `server/lib/stellar-contract.ts` — Soroban client wrapper for all contract interactions (start_game, end_game, submit_zk_commit, submit_zk_verification, submit_zk_match_outcome, reportMatchResultOnChain) with retry logic and idempotency classification
 - `server/lib/zk-round-prover.ts` — subprocess manager for `snarkjs groth16 fullprove`; bootstraps circuit artifacts on first call, manages per-request working directories, and serializes Groth16 calldata to the 256-byte format the contract expects
 - `server/lib/zk-finalizer-client.ts` — wraps the auto-prove-and-finalize flow; can delegate proof generation to a remote ZK service via `ZK_FINALIZE_API_BASE_URL`
-- `server/lib/bot-match-service.ts` — 24/7 bot lifecycle worker; provisions on-chain betting pools, locks pools when betting closes, reveals all bets before settlement, generates ZK settlement proofs, settles on-chain, and auto-claims payouts for winners
-- `server/lib/zk-betting-settle-prover.ts` — mirrors `zk-round-prover.ts` for the betting settlement circuit
+- `server/lib/bot-match-service.ts` — 24/7 bot lifecycle worker; provisions on-chain betting pools, locks pools when betting closes, and prepares pool metadata for browser/operator-triggered settlement
 - `server/lib/zk-betting-contract.ts` — admin client for the `zk-betting` contract; serialized admin tx queue prevents nonce race conditions
 - `server/lib/abandonment-monitor.ts` — background worker watching for disconnected players; triggers match cancellation after timeout
 
@@ -606,19 +605,18 @@ When the match animation starts, the lifecycle worker detects `elapsed >= BETTIN
 
 The BotBattleScene replays the pre-computed turns at a configurable `turnDurationMs`. At the end, the Phaser scene emits `bot_battle_match_end` and `bot_battle_request_new_match`.
 
-**5. ZK Settlement**
+**5. Browser/Operator Settlement**
 
-When `elapsed >= matchDurationMs + 5000`, `finalizeCompletedBotMatch` runs:
+When `elapsed >= matchDurationMs + 5000`, `finalizeCompletedBotMatch` runs lock/reveal preparation and marks the pool ready for settlement. Settlement proof generation is then triggered externally by a browser/operator flow:
 
-1. Locks pool if not already locked
-2. Reveals all bets on-chain (`admin_reveal_bet` for each bettor)
-3. Calls `getBotSettlementZkArtifacts`, which runs snarkjs against `betting_settle.circom` with `{match_id, pool_id, winner_side}` as inputs, producing a Groth16 proof
-4. Calls `ensureZkBettingVerifierConfigured` to upload the VK if not already registered
-5. Calls `settleOnChainPoolZk` — this hits the `zk-betting` contract, which cross-calls the verifier and settles atomically
+1. Fetches settlement metadata from `GET /api/bot-betting/settlement-plan/:matchId`
+2. Browser worker proves `betting_settle.circom` locally via `snarkjs`
+3. Operator submits `settle_pool_zk` on-chain from the browser signer flow
+4. Client records completion with `POST /api/bot-betting/settlement/record` so backend state reflects on-chain settlement
 
-**6. Automatic Payout**
+**6. Payout Claim**
 
-After `settle_pool_zk` succeeds, `settleBotBetsOffchain` processes each bet in the database. For winning bets, the server immediately calls `admin_claim_payout` on-chain, transferring 2x the net bet amount (after the 1% fee) directly to the bettor's Stellar address. Bettors do not need to take any action — the payout arrives in their wallet automatically. The `BotBettingPanel` shows a payout confirmation with the claim tx hash.
+After settlement, winning bettors claim via on-chain flow and backend records `claim_tx_id` for history/notifications.
 
 **7. Win Notification**
 
@@ -649,7 +647,6 @@ server/
     combat-resolver.ts               Authoritative round resolver
     stellar-contract.ts              Soroban client wrappers
     zk-round-prover.ts               snarkjs subprocess manager (round plan)
-    zk-betting-settle-prover.ts      snarkjs subprocess manager (bet settlement)
     zk-finalizer-client.ts           Auto-prove-and-finalize orchestration
     zk-betting-contract.ts           Admin client for zk-betting contract
     bot-match-service.ts             24/7 bot lifecycle worker

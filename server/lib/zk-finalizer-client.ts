@@ -30,27 +30,7 @@ export interface AutoProveFinalizeStatus {
 }
 
 export function getAutoProveFinalizeStatus(): AutoProveFinalizeStatus {
-    const autoEnabled = true;
-
-    const proveEnabled = (process.env.ZK_PROVE_ENABLED ?? "true") !== "false";
-    if (!proveEnabled) {
-        return { enabled: false, reason: "ZK_PROVE_ENABLED=false" };
-    }
-
-    const remoteBaseUrl = getRemoteZkBaseUrl();
-    if (remoteBaseUrl) {
-        return { enabled: true, reason: `remote zk finalize via ${remoteBaseUrl}` };
-    }
-
-    const proveCommand = process.env.ZK_PROVE_CMD?.trim();
-    if (!proveCommand) {
-        return {
-            enabled: false,
-            reason: "ZK_PROVE_CMD is not configured (and no ZK_FINALIZE_API_BASE_URL/VITE_ZK_API_BASE_URL)",
-        };
-    }
-
-    return { enabled: true, reason: "configured" };
+    return { enabled: false, reason: "backend prove-finalize disabled; browser proving required" };
 }
 
 export function shouldAutoProveFinalize(): boolean {
