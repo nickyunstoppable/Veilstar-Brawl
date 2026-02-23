@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
 
@@ -9,6 +10,13 @@ type WinnerSide = "player1" | "player2";
 
 const BETTING_SETTLE_CIRCUIT_DIR = (process.env.ZK_BETTING_SETTLE_CIRCUIT_DIR || "").trim()
   || resolve(process.cwd(), "zk_circuits", "zk_betting_settle_groth16");
+
+const REMOTE_ARTIFACT_BASE = (process.env.ZK_BETTING_SETTLE_ARTIFACT_BASE_URL || "").trim()
+  || (process.env.VITE_ZK_API_BASE_URL || "").trim()
+  || (process.env.API_BASE_URL || "").trim();
+const REMOTE_ARTIFACT_PREFIX = "/api/zk/artifacts/betting-settle";
+const DOWNLOAD_CACHE_DIR = resolve(tmpdir(), "vbb-zk-betting-settle-artifacts");
+const downloadInFlight = new Map<string, Promise<string>>();
 
 function toFieldFromSha256Hex(hex: string): bigint {
   return BigInt(`0x${hex}`) % BN254_FIELD_PRIME;
@@ -56,14 +64,78 @@ function matchIdToFieldDecimal(matchId: string): string {
   return toFieldFromSha256Hex(hashHex).toString(10);
 }
 
-function resolveArtifacts(): { wasmPath: string; zkeyPath: string; vkeyPath: string } {
-  const wasmPath = resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle.wasm");
-  const zkeyPath = resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle_final.zkey");
-  const vkeyPath = resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "verification_key.json");
+function pickExisting(candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
-  if (!existsSync(wasmPath)) throw new Error(`Missing betting settle wasm: ${wasmPath}`);
-  if (!existsSync(zkeyPath)) throw new Error(`Missing betting settle zkey: ${zkeyPath}`);
-  if (!existsSync(vkeyPath)) throw new Error(`Missing betting settle verification key: ${vkeyPath}`);
+function resolveLocalArtifacts(): { wasmPath: string; zkeyPath: string; vkeyPath: string } | null {
+  const wasmPath = pickExisting([
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle.wasm"),
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle_js", "betting_settle.wasm"),
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "betting_settle_js", "betting_settle.wasm"),
+  ]);
+  const zkeyPath = pickExisting([
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle_final.zkey"),
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "betting_settle_final.zkey"),
+  ]);
+  const vkeyPath = pickExisting([
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "verification_key.json"),
+    resolve(BETTING_SETTLE_CIRCUIT_DIR, "verification_key.json"),
+  ]);
+
+  if (!wasmPath || !zkeyPath || !vkeyPath) {
+    return null;
+  }
+
+  return { wasmPath, zkeyPath, vkeyPath };
+}
+
+async function downloadArtifact(fileName: string): Promise<string> {
+  const existing = resolve(DOWNLOAD_CACHE_DIR, fileName);
+  if (existsSync(existing)) return existing;
+
+  const inFlight = downloadInFlight.get(fileName);
+  if (inFlight) return inFlight;
+
+  const downloadPromise = (async () => {
+    if (!REMOTE_ARTIFACT_BASE) {
+      throw new Error(`Missing betting settle artifact base URL and local artifact ${fileName}`);
+    }
+
+    const base = REMOTE_ARTIFACT_BASE.replace(/\/$/, "");
+    const url = `${base}${REMOTE_ARTIFACT_PREFIX}/${fileName}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to download betting settle artifact ${fileName} (${response.status})`);
+    }
+
+    const data = await response.arrayBuffer();
+    await mkdir(DOWNLOAD_CACHE_DIR, { recursive: true });
+    const outPath = resolve(DOWNLOAD_CACHE_DIR, fileName);
+    await writeFile(outPath, Buffer.from(data));
+    return outPath;
+  })();
+
+  downloadInFlight.set(fileName, downloadPromise);
+  try {
+    return await downloadPromise;
+  } finally {
+    downloadInFlight.delete(fileName);
+  }
+}
+
+async function resolveArtifacts(): Promise<{ wasmPath: string; zkeyPath: string; vkeyPath: string }> {
+  const local = resolveLocalArtifacts();
+  if (local) return local;
+
+  const [wasmPath, zkeyPath, vkeyPath] = await Promise.all([
+    downloadArtifact("betting_settle.wasm"),
+    downloadArtifact("betting_settle_final.zkey"),
+    downloadArtifact("verification_key.json"),
+  ]);
 
   return { wasmPath, zkeyPath, vkeyPath };
 }
@@ -87,7 +159,7 @@ export async function proveBettingSettlement(params: {
   vkIdHex: string;
   verificationKeyPath: string;
 }> {
-  const { wasmPath, zkeyPath, vkeyPath } = resolveArtifacts();
+  const { wasmPath, zkeyPath, vkeyPath } = await resolveArtifacts();
   const winnerSide = params.winner === "player1" ? 0 : 1;
   const matchIdField = matchIdToFieldDecimal(params.matchId);
   const poolId = String(params.poolId >>> 0);
