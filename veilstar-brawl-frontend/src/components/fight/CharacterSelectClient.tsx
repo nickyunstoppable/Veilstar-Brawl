@@ -185,7 +185,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
     const currentRoundRef = useRef(1);
     const currentTurnRef = useRef(1);
     const privateRoundPlansRef = useRef<Record<number, PrivateRoundPlanState>>({});
-    const browserFinalizeAttemptedRef = useRef<Set<string>>(new Set());
+    const browserFinalizeInFlightRef = useRef<Set<string>>(new Set());
+    const browserFinalizeCompletedRef = useRef<Set<string>>(new Set());
 
 
 
@@ -220,7 +221,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         setPendingRegistrationNoStake(false);
         setRegistrationDeadlineMs(null);
         setRegistrationSecondsLeft(null);
-        browserFinalizeAttemptedRef.current.clear();
+        browserFinalizeInFlightRef.current.clear();
+        browserFinalizeCompletedRef.current.clear();
 
         if (stakeErrorTimerRef.current) {
             clearTimeout(stakeErrorTimerRef.current);
@@ -2105,8 +2107,13 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 return;
             }
 
-            if (browserFinalizeAttemptedRef.current.has(targetMatchId)) {
-                console.log("[BrowserFinalize] skipped: already attempted", { targetMatchId });
+            if (browserFinalizeCompletedRef.current.has(targetMatchId)) {
+                console.log("[BrowserFinalize] skipped: already completed", { targetMatchId });
+                return;
+            }
+
+            if (browserFinalizeInFlightRef.current.has(targetMatchId)) {
+                console.log("[BrowserFinalize] skipped: finalize already in-flight", { targetMatchId });
                 return;
             }
 
@@ -2138,7 +2145,7 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 return;
             }
 
-            browserFinalizeAttemptedRef.current.add(targetMatchId);
+            browserFinalizeInFlightRef.current.add(targetMatchId);
             console.log("[BrowserFinalize] attempting browser finalize", {
                 targetMatchId,
                 winnerAddress,
@@ -2163,6 +2170,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     onChainTxHash: result.onChainTxHash || result.onChainOutcomeTxHash || null,
                 });
 
+                browserFinalizeCompletedRef.current.add(targetMatchId);
+
                 EventBus.emit("game:zkProgress", {
                     matchId: targetMatchId,
                     stage: "browser_finalize_submitted",
@@ -2182,6 +2191,8 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     message: `Browser finalization failed: ${errorMessage}`,
                     color: "#ef4444",
                 });
+            } finally {
+                browserFinalizeInFlightRef.current.delete(targetMatchId);
             }
         };
 
