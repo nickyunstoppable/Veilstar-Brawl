@@ -8,9 +8,21 @@ const ROUND_PLAN_CIRCUIT_DIR = (process.env.ZK_GROTH16_ROUND_CIRCUIT_DIR || "").
 const BETTING_SETTLE_CIRCUIT_DIR = (process.env.ZK_BETTING_SETTLE_CIRCUIT_DIR || "").trim()
   || resolve(process.cwd(), "zk_circuits", "zk_betting_settle_groth16");
 
+function resolveFirstExistingPath(candidates: string[]): string {
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[0];
+}
+
 const ARTIFACT_FILES: Record<string, { absPath: string; contentType: string; cacheControl: string }> = {
   "round_plan.wasm": {
-    absPath: resolve(ROUND_PLAN_CIRCUIT_DIR, "artifacts", "round_plan.wasm"),
+    absPath: resolveFirstExistingPath([
+      resolve(ROUND_PLAN_CIRCUIT_DIR, "artifacts", "round_plan.wasm"),
+      resolve(ROUND_PLAN_CIRCUIT_DIR, "artifacts", "round_plan_js", "round_plan.wasm"),
+    ]),
     contentType: "application/wasm",
     cacheControl: "public, max-age=600",
   },
@@ -28,7 +40,10 @@ const ARTIFACT_FILES: Record<string, { absPath: string; contentType: string; cac
 
 const BETTING_ARTIFACT_FILES: Record<string, { absPath: string; contentType: string; cacheControl: string }> = {
   "betting_settle.wasm": {
-    absPath: resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle.wasm"),
+    absPath: resolveFirstExistingPath([
+      resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle.wasm"),
+      resolve(BETTING_SETTLE_CIRCUIT_DIR, "artifacts", "betting_settle_js", "betting_settle.wasm"),
+    ]),
     contentType: "application/wasm",
     cacheControl: "public, max-age=600",
   },
