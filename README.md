@@ -2,11 +2,14 @@
 
 A fully on-chain, zero-knowledge fighting game built on Stellar. Two players lock in their private round strategies simultaneously, neither can see the other's plan, and every match outcome is verified by a Groth16 proof running against BN254 elliptic-curve primitives on-chain. Spectators can put real XLM on the line in a commit-reveal betting pool that also settles through a ZK proof. The whole system — game contracts, verifier contract, betting contract, frontend, and backend — is deployed and live on Stellar Testnet.
 
+**[Live Demo](https://veilstar-brawl.vercel.app)** | **[Demo Video](https://youtu.be/f3NXDcAKKn8)**
+
 ---
 
 ## Table of Contents
 
-1. [Why This Exists](#why-this-exists)
+1. [Live Demo & Video](#live-demo--video)
+2. [Why This Exists](#why-this-exists)
 2. [ZK Mechanics Explained](#zk-mechanics-explained)
    - [Private Round Planning](#private-round-planning)
    - [The Groth16 Round-Plan Circuit](#the-groth16-round-plan-circuit)
@@ -38,6 +41,13 @@ A fully on-chain, zero-knowledge fighting game built on Stellar. Two players loc
 12. [Testing](#testing)
 13. [Deployment](#deployment)
 14. [Hackathon Criteria Checklist](#hackathon-criteria-checklist)
+
+---
+
+## Live Demo & Video
+
+- **Live Demo:** [veilstar-brawl.vercel.app](https://veilstar-brawl.vercel.app)
+- **Demo Video:** [youtu.be/f3NXDcAKKn8](https://youtu.be/f3NXDcAKKn8)
 
 ---
 

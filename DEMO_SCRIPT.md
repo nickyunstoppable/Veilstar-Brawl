@@ -32,18 +32,18 @@ If staking is enabled, both players deposit XLM here. The winner takes 2x. The d
 
 ## [0:55 – 1:35] LIVE DEMO — PRIVATE ROUND PLANNING & ZK COMMIT
 
-> *Show the Power Surge card selection, then the move planning UI. Submit the plan and watch the ZK pipeline indicator at the top of the screen step through COMMIT → VERIFY → LOCK.*
+> *Phase 1/3 — show the Power Surge card picker. Phase 2/3 — click through building the 10-move plan. Phase 3/3 — watch the ZK pipeline indicator center-top step through COMMIT → VERIFY → LOCK during fight resolution.*
 
 **SPOKEN:**
-"Here's where the ZK magic happens. Before the round starts I pick a Power Surge card — 'DAG Overclock' gives me plus 40% damage this round. That selection goes on-chain immediately.
+"Each round has three phases. Phase one: pick a Power Surge card. I'll take 'DAG Overclock' — plus 40% damage this round. The game waits here until my opponent also picks, then both selections are locked in together.
 
-Then I plan my full 10-move sequence privately — punch, kick, block, special, whatever I think will out-read my opponent.
+Phase two: I build my full 10-move plan privately. I'm clicking moves one at a time — punch, kick, block, special — the indicator counts up 1 of 10, 2 of 10, all the way to 10.
 
-When I submit, watch the pipeline up here at the top — COMMIT, VERIFY, LOCK. The client is running a Groth16 proof using a Circom circuit. It hashes all 10 moves plus a random nonce with the Poseidon hash function and submits only that 32-byte commitment to the Soroban contract.
+The moment I place that tenth move, the client generates a Groth16 proof using a Circom circuit. It hashes the entire 10-move sequence plus a random nonce with the Poseidon hash function, and my wallet signs one transaction submitting that 32-byte commitment on-chain.
 
-My opponent cannot see my moves. The server cannot see my moves. If I open Stellar Explorer right now — there's the commitment transaction, on-chain, sealed before resolution ever starts.
+My opponent cannot see those moves. The server cannot see them. If I open Stellar Explorer right now — there's the commitment, on-chain, sealed.
 
-When the round finishes, the contract verifies the proof against BN254 elliptic-curve primitives — the cryptographic opcodes Stellar Protocol 25 added natively. The indicator hits LOCK. `end_game` reverts without it."
+Phase three: the fight plays out. Watch the top of the screen — COMMIT, VERIFY, LOCK. The contract is running the proof against BN254 elliptic-curve primitives, the native cryptographic opcodes Stellar Protocol 25 added. When all three steps go green, the round is locked on-chain. `end_game` reverts without it."
 
 ---
 
