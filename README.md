@@ -77,7 +77,7 @@ The flow is:
 4. The player's Stellar wallet is prompted to sign an auth entry authorizing an on-chain `submit_zk_commit` call to the `veilstar-brawl` contract. The commitment is stored on-chain under a (session_id, match_salt, round, turn, player_index) key.
 5. The signed transaction is submitted to the backend, which sets it on-chain via Soroban.
 6. After both players have committed, the backend resolves turns one at a time using the privately planned moves. The resolution is server-authoritative and streamed to clients over Supabase Realtime channels.
-7. At round-end, the backend proves the finalized round plan, calls `submit_zk_verification` on the contract, which cross-calls the verifier to confirm the proof against the stored commitment and the VK.
+7. At round-end, the backend submits `submit_zk_verification` for each player using the committed round data, and the contract cross-calls the verifier to confirm consistency with the stored commitment and VK.
 8. After all rounds complete, `submit_zk_match_outcome` is called to record the winner with a Groth16 proof, and then `end_game` closes the match. If `ZkGateRequired` is set on the contract, `end_game` will revert if the outcome is not backed by an on-chain ZK match outcome record.
 
 The server cannot lie about moves because the commitment is stored on-chain before resolution. The server cannot lie about the winner because the winner must match the address inside the `ZkMatchOutcomeRecord`.
@@ -184,7 +184,7 @@ The flow:
 5. Bet details (including the salt) are recorded in the backend database, encrypted for later reveal.
 6. After betting closes, the backend locks the pool on-chain (`lock_pool`).
 7. Before settlement, the admin reveals all bets on-chain: for each bet, it calls `admin_reveal_bet(pool_id, bettor, side, salt)`. The contract verifies `SHA256(side || salt) == commitment` and records the side.
-8. The backend prover runs `snarkjs groth16 fullprove` against the `betting_settle.circom` circuit, generating a proof that binds `match_id`, `pool_id`, and `winner_side` together.
+8. The browser prover runs `snarkjs groth16 fullprove` against the `betting_settle.circom` circuit, generating a proof that binds `match_id`, `pool_id`, and `winner_side` together.
 9. Admin calls `settle_pool_zk(pool_id, winner, vk_id, proof, public_inputs)`. The contract cross-calls the verifier. Only if the proof is valid and the winner matches `winner_side` in the public inputs will the pool settle.
 10. After settlement, the admin automatically calls `admin_claim_payout` on behalf of every winning bettor. Winning bettors receive 2x their net bet amount directly to their Stellar address with no manual action required.
 
@@ -491,8 +491,8 @@ If only one player deposits before the deadline, `expire_stake` is called and th
 - `server/lib/combat-resolver.ts` — authoritative round resolver; receives both players' committed moves, replays prior rounds to rebuild engine state, resolves current turn, writes result, broadcasts over Supabase Realtime, and triggers ZK finalization for completed matches
 - `server/lib/stellar-contract.ts` — Soroban client wrapper for all contract interactions (start_game, end_game, submit_zk_commit, submit_zk_verification, submit_zk_match_outcome, reportMatchResultOnChain) with retry logic and idempotency classification
 - `server/lib/zk-round-prover.ts` — subprocess manager for `snarkjs groth16 fullprove`; bootstraps circuit artifacts on first call, manages per-request working directories, and serializes Groth16 calldata to the 256-byte format the contract expects
-- `server/lib/zk-finalizer-client.ts` — wraps the auto-prove-and-finalize flow; can delegate proof generation to a remote ZK service via `ZK_FINALIZE_API_BASE_URL`
-- `server/lib/bot-match-service.ts` — 24/7 bot lifecycle worker; provisions on-chain betting pools, locks pools when betting closes, and prepares pool metadata for browser/operator-triggered settlement
+- `server/lib/zk-finalizer-client.ts` — legacy helper for older auto-finalize behavior; backend prove-finalize path is disabled
+- `server/lib/bot-match-service.ts` — 24/7 bot lifecycle worker; provisions on-chain betting pools, locks pools when betting closes, and prepares pool metadata for browser-triggered settlement
 - `server/lib/zk-betting-contract.ts` — admin client for the `zk-betting` contract; serialized admin tx queue prevents nonce race conditions
 - `server/lib/abandonment-monitor.ts` — background worker watching for disconnected players; triggers match cancellation after timeout
 
@@ -565,11 +565,12 @@ After all 10 turns resolve (or a KO occurs), the backend calls `submit_zk_verifi
 
 **8. Match End (ZK Finalization)**
 
-When the last round ends and a match winner is determined, the backend triggers `proveAndFinalizeMatch`. This:
+When the last round ends and a match winner is determined, the winner client generates the finalization proof in the browser and submits it to `/api/matches/:matchId/zk/finalize`. The backend does not generate this finalization proof. The flow is:
 
-1. Computes the winner's final round-plan proof
-2. Calls `submit_zk_match_outcome(session_id, winner_address, vk_id, proof, [commitment])` on the contract — this stores the `ZkMatchOutcomeRecord`
-3. Calls `end_game(session_id, player1_won)` — which reads and validates the `ZkMatchOutcomeRecord`, pays the stake if configured, and calls `end_game` on the Game Hub
+1. Client requests canonical finalize inputs from `GET /api/matches/:matchId/zk/finalize-plan`
+2. Browser worker computes the winner's final round-plan proof
+3. Backend submits `submit_zk_match_outcome(session_id, winner_address, vk_id, proof, [commitment])` on-chain — storing `ZkMatchOutcomeRecord`
+4. Backend calls `end_game(session_id, player1_won)` — validating the stored outcome, settling stake, and calling Game Hub `end_game`
 
 The match is now fully settled on-chain with a cryptographic audit trail.
 
@@ -605,13 +606,13 @@ When the match animation starts, the lifecycle worker detects `elapsed >= BETTIN
 
 The BotBattleScene replays the pre-computed turns at a configurable `turnDurationMs`. At the end, the Phaser scene emits `bot_battle_match_end` and `bot_battle_request_new_match`.
 
-**5. Browser/Operator Settlement**
+**5. Browser Settlement**
 
-When `elapsed >= matchDurationMs + 5000`, `finalizeCompletedBotMatch` runs lock/reveal preparation and marks the pool ready for settlement. Settlement proof generation is then triggered externally by a browser/operator flow:
+When `elapsed >= matchDurationMs + 5000`, `finalizeCompletedBotMatch` runs lock/reveal preparation and marks the pool ready for settlement. Settlement proof generation is then triggered from the browser flow (not backend proving):
 
 1. Fetches settlement metadata from `GET /api/bot-betting/settlement-plan/:matchId`
 2. Browser worker proves `betting_settle.circom` locally via `snarkjs`
-3. Operator submits `settle_pool_zk` on-chain from the browser signer flow
+3. Browser signer submits `settle_pool_zk` on-chain
 4. Client records completion with `POST /api/bot-betting/settlement/record` so backend state reflects on-chain settlement
 
 **6. Payout Claim**
@@ -647,7 +648,7 @@ server/
     combat-resolver.ts               Authoritative round resolver
     stellar-contract.ts              Soroban client wrappers
     zk-round-prover.ts               snarkjs subprocess manager (round plan)
-    zk-finalizer-client.ts           Auto-prove-and-finalize orchestration
+    zk-finalizer-client.ts           Legacy helper; backend prove-finalize path disabled
     zk-betting-contract.ts           Admin client for zk-betting contract
     bot-match-service.ts             24/7 bot lifecycle worker
     matchmaker.ts                    ELO matchmaking queue
@@ -657,7 +658,7 @@ server/
     zk-round-commit.ts               Commit/resolve private round endpoint
     zk-round-prove.ts                Proof generation delegation endpoint
     zk-finalize.ts                   ZK match outcome + end_game endpoint
-    zk-prove-finalize.ts             Combined prove + finalize endpoint
+    zk-prove-finalize.ts             Disabled (returns 410; browser proving required)
     zk-round-commit.integration.test.ts
 
 veilstar-brawl-frontend/src/

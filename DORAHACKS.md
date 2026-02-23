@@ -211,7 +211,7 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 **Backend:** Bun runtime + TypeScript (deployed on Fly.io)  
 **Database:** Supabase (PostgreSQL + Realtime channels)  
 **ZK Proving (round plan):** snarkjs Groth16 fullProve in browser Web Worker (client-side)  
-**ZK Proving (finalization + betting):** snarkjs Groth16 fullProve in browser worker (operator/client-triggered)  
+**ZK Proving (finalization + betting):** snarkjs Groth16 fullProve in browser workers (proofs generated client-side, not by backend prove endpoints)  
 **Frontend Hosting:** Vercel  
 **Wallet:** Stellar Wallet Interface Standard + Launchtube fee sponsorship  
 
@@ -221,7 +221,7 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 |---|---|
 | `combat-resolver.ts` | Authoritative round resolver; resolves turns using committed moves, streams via Supabase Realtime |
 | `zk-round-prover.ts` | subprocess manager for `snarkjs groth16 fullprove` (round plan circuit) |
-| `bot-match-service.ts` | 24/7 bot lifecycle: provisions pools, locks, reveals, and publishes settlement-ready state for operator/browser finalize |
+| `bot-match-service.ts` | 24/7 bot lifecycle: provisions pools, locks, reveals, and publishes settlement-ready state for browser finalize |
 | `stellar-contract.ts` | Soroban client wrappers with retry logic and idempotency classification |
 | `matchmaker.ts` | ELO queue: ±100 starting range, expands 5 ELO/sec after 10 seconds waiting |
 
@@ -245,7 +245,9 @@ Optional per-match wager. Each player deposits `stake + 0.1% fee`. Winner takes 
 2. **30-second betting window** — spectators call `commit_bet` with `SHA256(side || salt)`, funds locked immediately on-chain
 3. Pool locks; match plays out in BotBattleScene
 4. `admin_reveal_bet` called on-chain for each bettor
-5. Browser/operator proves `betting_settle.circom` with `{match_id, pool_id, winner_side}` → `settle_pool_zk` verifies Groth16 proof cross-contract
+5. Browser proves `betting_settle.circom` with `{match_id, pool_id, winner_side}` → `settle_pool_zk` verifies Groth16 proof cross-contract
+
+For private PvP finalization, the winner browser also generates the final proof client-side and submits it to `/api/matches/:matchId/zk/finalize`; backend prove-finalize endpoints are disabled.
 6. Settlement completion is recorded via backend API so pool state and history reflect the on-chain tx
 7. `WinningNotification` component animates payout with claim tx hash
 
@@ -315,8 +317,7 @@ server/lib/
   stellar-contract.ts                 Soroban client wrappers
   zk-round-prover.ts                  snarkjs subprocess manager (round plan)
   zk-betting-contract.ts              on-chain betting admin/client wrappers
-  zk-finalizer-client.ts              Auto-prove-and-finalize orchestration
-  zk-betting-contract.ts              Admin client for zk-betting
+  zk-finalizer-client.ts              Legacy helper; backend prove-finalize is disabled
   bot-match-service.ts                24/7 bot lifecycle worker
 
 veilstar-brawl-frontend/src/
