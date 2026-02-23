@@ -2086,7 +2086,22 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
 
             if (browserFinalizeAttemptedRef.current.has(targetMatchId)) return;
 
-            const winnerAddress = String(payload.winnerAddress || "").trim();
+            const player1Address = sceneConfig.isHost
+                ? String(sceneConfig.playerAddress || "").trim()
+                : String(sceneConfig.opponentAddress || "").trim();
+            const player2Address = sceneConfig.isHost
+                ? String(sceneConfig.opponentAddress || "").trim()
+                : String(sceneConfig.playerAddress || "").trim();
+
+            const winnerRole = payload.winner === "player1" || payload.winner === "player2"
+                ? payload.winner
+                : null;
+            const fallbackWinnerAddress = winnerRole === "player1"
+                ? player1Address
+                : winnerRole === "player2"
+                    ? player2Address
+                    : "";
+            const winnerAddress = String(payload.winnerAddress || fallbackWinnerAddress || "").trim();
             if (!winnerAddress || winnerAddress !== publicKey) return;
 
             browserFinalizeAttemptedRef.current.add(targetMatchId);
