@@ -5,7 +5,8 @@
  */
 
 import { getSupabase } from "./supabase";
-import { claimOnChainPayoutAsAdmin, createOnChainBotPool, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, revealOnChainBetAsAdmin } from "./zk-betting-contract";
+import { claimOnChainPayoutAsAdmin, createOnChainBotPool, ensureZkBettingVerifierConfigured, getOnChainPoolStatus, isZkBettingConfigured, lockOnChainPool, revealOnChainBetAsAdmin, settleOnChainPoolZk } from "./zk-betting-contract";
+import { proveBettingSettlement } from "./zk-betting-settle-prover";
 import { SmartBotOpponent } from "./smart-bot-opponent";
 import { getOrCreateRoundDeck, type PowerSurgeCardId, type StoredSurgeDeck } from "./power-surge";
 import { calculateSurgeEffects, isBlockDisabled } from "./surge-effects";
@@ -999,8 +1000,87 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
                 anchorTxId: lastTx,
             });
 
-            const onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
+            let onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
             onChainSettled = onchain?.status === 2;
+
+            if (!onChainSettled) {
+                try {
+                    const prove = await proveBettingSettlement({
+                        matchId: match.id,
+                        poolId: Number(pool.onchain_pool_id),
+                        winner,
+                    });
+
+                    await ensureZkBettingVerifierConfigured({
+                        vkIdHex: prove.vkIdHex,
+                        verificationKeyPath: prove.verificationKeyPath,
+                    });
+
+                    const settle = await settleOnChainPoolZk({
+                        poolId: Number(pool.onchain_pool_id),
+                        winner,
+                        vkIdHex: prove.vkIdHex,
+                        proof: prove.proof,
+                        publicInputs: prove.publicInputs,
+                    });
+
+                    if (settle.txHash) {
+                        lastTx = settle.txHash;
+                    }
+
+                    console.log("[BotMatchService][Finalize] Auto settle attempt", {
+                        matchId: match.id,
+                        poolId: pool.id,
+                        onchainPoolId: pool.onchain_pool_id,
+                        winner,
+                        txHash: settle.txHash || null,
+                        skipped: settle.skipped || false,
+                        reason: settle.reason || null,
+                    });
+                } catch (error) {
+                    console.error("[BotMatchService][Finalize] Auto settle failed", {
+                        matchId: match.id,
+                        poolId: pool.id,
+                        onchainPoolId: pool.onchain_pool_id,
+                        winner,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+
+                onchain = await getOnChainPoolStatus(Number(pool.onchain_pool_id));
+                onChainSettled = onchain?.status === 2;
+            }
+        }
+
+        if (!pool.onchain_pool_id) {
+            await supabase
+                .from("betting_pools")
+                .update({
+                    status: "resolved",
+                    winner,
+                    onchain_status: "settled",
+                    onchain_last_tx_id: lastTx,
+                })
+                .eq("id", pool.id);
+
+            await settleBotBetsOffchain({
+                poolId: pool.id,
+                onchainPoolId: null,
+                winner,
+                settleTxId: lastTx,
+                attemptRevealOnChain: false,
+            });
+
+            console.log("[BotMatchService][Finalize] Completed", {
+                matchId: match.id,
+                poolId: pool.id,
+                winner,
+                lastTx,
+                mode: "offchain-fallback",
+            });
+
+            finalizedMatchIds.add(match.id);
+            return;
         }
 
         if (onChainSettled) {
@@ -1029,6 +1109,9 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
                 lastTx,
                 mode: "already-settled-onchain",
             });
+
+            finalizedMatchIds.add(match.id);
+            return;
         } else {
             await supabase
                 .from("betting_pools")
@@ -1040,15 +1123,15 @@ async function finalizeCompletedBotMatch(match: BotMatch): Promise<void> {
                 })
                 .eq("id", pool.id);
 
-            console.log("[BotMatchService][Finalize] Awaiting operator/browser settlement", {
+            console.log("[BotMatchService][Finalize] Awaiting automatic retry", {
                 matchId: match.id,
                 poolId: pool.id,
                 onchainPoolId: pool.onchain_pool_id,
                 winner,
             });
-        }
 
-        finalizedMatchIds.add(match.id);
+            return;
+        }
     } catch (error) {
         console.error("[BotMatchService] finalizeCompletedBotMatch error:", error);
     }
