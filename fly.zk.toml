@@ -16,6 +16,7 @@ primary_region = "iad"
   ZK_SYNC_ONCHAIN_VERIFY = "true"
   ZK_REVERIFY_ON_RESOLVE = "false"
   ZK_PRIVATE_ROUND_TURN_DELAY_MS = "1000"
+  CORS_ORIGINS = "https://veilstar-brawl.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
 
 [http_service]
   internal_port = 3011

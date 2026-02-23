@@ -1,3 +1,5 @@
+import { provePrivateRoundPlanInBrowser } from "./zkRoundBrowserProver";
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const ZK_API_BASE = import.meta.env.VITE_ZK_API_BASE_URL || API_BASE;
 const ZK_COMMIT_FETCH_TIMEOUT_MS = Number(import.meta.env.VITE_ZK_COMMIT_FETCH_TIMEOUT_MS || "45000");
@@ -183,17 +185,7 @@ export async function provePrivateRoundPlan(
     matchId: string,
     request: ProvePrivateRoundPlanRequest,
 ): Promise<ProvePrivateRoundPlanResponse> {
-    const response = await fetch(`${ZK_API_BASE}/api/matches/${matchId}/zk/round/prove`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-    });
-
-    const json = await parseJson<ProvePrivateRoundPlanResponse & { error?: string }>(response);
-    if (!response.ok) {
-        throw new Error(json?.error || `Failed to prove private round plan (${response.status})`);
-    }
-    return json;
+    return provePrivateRoundPlanInBrowser(matchId, request);
 }
 
 export async function preparePrivateRoundCommit(

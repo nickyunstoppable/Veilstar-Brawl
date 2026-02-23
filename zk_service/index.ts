@@ -3,6 +3,7 @@ import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleRe
 import { handleProvePrivateRoundPlan } from "../server/routes/matches/zk-round-prove";
 import { handleFinalizeWithZkProof } from "../server/routes/matches/zk-finalize";
 import { handleProveAndFinalize } from "../server/routes/matches/zk-prove-finalize";
+import { handleGetRoundPlanArtifact } from "../server/routes/zk-artifacts";
 
 ensureEnvLoaded();
 
@@ -10,8 +11,22 @@ const PORT = parseInt(process.env.PORT || process.env.ZK_SERVER_PORT || "3011", 
 
 function getCorsHeaders(req?: Request): Record<string, string> {
     const requestOrigin = req?.headers.get("origin") || "";
-    const configuredOrigin = process.env.CORS_ORIGIN || "";
-    const allowOrigin = configuredOrigin || requestOrigin || "*";
+    const configuredOrigins = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || "")
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean);
+
+    let allowOrigin = "";
+
+    if (configuredOrigins.length > 0) {
+        if (requestOrigin && configuredOrigins.includes(requestOrigin)) {
+            allowOrigin = requestOrigin;
+        } else {
+            allowOrigin = configuredOrigins[0];
+        }
+    } else {
+        allowOrigin = requestOrigin || "*";
+    }
 
     return {
         "Access-Control-Allow-Origin": allowOrigin,
@@ -60,6 +75,11 @@ async function handleRequest(req: Request): Promise<Response> {
             timestamp: new Date().toISOString(),
             uptime: process.uptime(),
         }), req);
+    }
+
+    const roundArtifactMatch = pathname.match(/^\/api\/zk\/artifacts\/round-plan\/(round_plan\.wasm|round_plan_final\.zkey|verification_key\.json)$/i);
+    if (roundArtifactMatch && method === "GET") {
+        return withCors(await handleGetRoundPlanArtifact(roundArtifactMatch[1]), req);
     }
 
     const matchId = extractMatchId(pathname);

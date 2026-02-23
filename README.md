@@ -73,7 +73,7 @@ The flow is:
 
 1. The player selects their 10 moves locally in the browser: `punch`, `kick`, `block`, `special`, or a combination depending on energy.
 2. The browser generates a 32-byte random `nonce`.
-3. The browser calls the backend's `/api/matches/:matchId/zk/round/prove` endpoint, which runs `snarkjs groth16 fullprove` in a subprocess against the compiled `round_plan.circom` circuit. The server returns the proof, the commitment (Poseidon hash output), and the public inputs.
+3. The browser spawns a dedicated Web Worker prover, fetches `/api/zk/artifacts/round-plan/round_plan.wasm` and `/api/zk/artifacts/round-plan/round_plan_final.zkey`, and runs `snarkjs groth16 fullProve` locally. The worker returns the proof, commitment (Poseidon hash output), and public inputs.
 4. The player's Stellar wallet is prompted to sign an auth entry authorizing an on-chain `submit_zk_commit` call to the `veilstar-brawl` contract. The commitment is stored on-chain under a (session_id, match_salt, round, turn, player_index) key.
 5. The signed transaction is submitted to the backend, which sets it on-chain via Soroban.
 6. After both players have committed, the backend resolves turns one at a time using the privately planned moves. The resolution is server-authoritative and streamed to clients over Supabase Realtime channels.
@@ -519,14 +519,14 @@ If only one player deposits before the deadline, `expire_stake` is called and th
 
 ### ZK Proving Pipeline
 
-The backend uses `snarkjs` for proof generation. Circom circuits are compiled at development time to generate:
+For private PvP rounds, proving runs in a browser Web Worker using `snarkjs` + `circomlibjs`. Circom circuits are compiled at development time to generate:
 
 - `*.r1cs` — the rank-1 constraint system
 - `*.wasm` — the witness computation WASM
 - `verification_key.json` — the Groth16 verification key
 - `*.zkey` — the proving key (ceremony output)
 
-The full artifact set is committed to the repository under `zk_circuits/*/artifacts/`. On first use, the server reads these artifacts and runs `snarkjs groth16 fullprove` with the witness inputs. A per-request temporary directory isolates parallel prove jobs.
+The full artifact set is committed to the repository under `zk_circuits/*/artifacts/`. At runtime, the worker fetches artifacts from `/api/zk/artifacts/round-plan/*` and executes proving entirely client-side for round plans.
 
 The verification key's 32-byte hash (computed from the canonical JSON representation) is the `vk_id` used in all on-chain calls. The admin uploads the VK to the verifier contract at deployment time using `bun run zk:onchain:setup`. Once uploaded, the VK hash is set on the game and betting contracts. Any proof submitted with a different VK ID is rejected by the contracts before the cross-contract call is made.
 
@@ -554,7 +554,7 @@ The backend broadcasts a `roundStart` event over the Supabase Realtime channel i
 
 **5. Private Round Planning**
 
-The player opens the Power Surge card selection UI, picks a card, then opens the move planning UI and allocates 10 moves. The frontend calls `POST /api/matches/:matchId/zk/round/prove` with the move plan. The server runs snarkjs and returns the proof, commitment hash, and nonce. The frontend prepares the Soroban auth entry for `submit_zk_commit`, prompts the wallet to sign it, and calls `POST /api/matches/:matchId/zk/round/commit` with the signed payload. The backend submits the commitment on-chain and waits for the opponent.
+The player opens the Power Surge card selection UI, picks a card, then opens the move planning UI and allocates 10 moves. The frontend starts a browser worker prover, which generates the round proof locally from fetched artifacts. The frontend prepares the Soroban auth entry for `submit_zk_commit`, prompts the wallet to sign it, and calls `POST /api/matches/:matchId/zk/round/commit` with the signed payload. The backend submits the commitment on-chain and waits for the opponent.
 
 **6. Turn Resolution**
 
@@ -872,7 +872,7 @@ bun run fly:secrets:sync
 
 **ZK-powered mechanic:**
 - Private round-plan commitment using Poseidon hash in a Circom 2.1.6 circuit
-- Groth16 proof generated server-side using snarkjs
+- Groth16 round-plan proof generated client-side in a browser Web Worker using snarkjs
 - On-chain verification via BN254 elliptic-curve primitives (Stellar Protocol 25)
 - Spectator betting settled with a separate Groth16 binding circuit
 - ZK gate enforced at the contract level: `end_game` reverts without a valid on-chain ZK outcome record when `zk_gate_required` is true

@@ -26,6 +26,7 @@ import { handleFinalizeWithZkProof } from "./routes/matches/zk-finalize";
 import { handleProveAndFinalize } from "./routes/matches/zk-prove-finalize";
 import { handleCommitPrivateRoundPlan, handlePreparePrivateRoundCommit, handleResolvePrivateRound } from "./routes/matches/zk-round-commit";
 import { handleProvePrivateRoundPlan } from "./routes/matches/zk-round-prove";
+import { handleGetRoundPlanArtifact } from "./routes/zk-artifacts";
 import { handleGetLeaderboard } from "./routes/leaderboard";
 import { handleGetPlayer, handleGetPlayerMatches } from "./routes/players";
 import { handleGetReplayData } from "./routes/replay-data";
@@ -104,6 +105,11 @@ async function handleRequest(req: Request): Promise<Response> {
             timestamp: new Date().toISOString(),
             uptime: process.uptime(),
         }), req);
+    }
+
+    const roundArtifactMatch = pathname.match(/^\/api\/zk\/artifacts\/round-plan\/(round_plan\.wasm|round_plan_final\.zkey|verification_key\.json)$/i);
+    if (roundArtifactMatch && method === "GET") {
+        return corsResponse(await handleGetRoundPlanArtifact(roundArtifactMatch[1]), req);
     }
 
     // -----------------------------------------------
