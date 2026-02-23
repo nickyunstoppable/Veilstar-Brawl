@@ -570,6 +570,15 @@ export async function resolveTurn(
                 console.warn(`[CombatResolver] On-chain finalize skipped for ${matchId}: ${onChainSkippedReason}`);
             }
 
+            console.log("[CombatResolver] match_ended payload", {
+                matchId,
+                winner: matchWinner,
+                winnerAddress: winnerAddr,
+                onChainOutcomeTxHash,
+                onChainResultPending,
+                proofFirstFinalizeRequired,
+            });
+
             await broadcastGameEvent(matchId, "match_ended", {
                 matchId,
                 winner: matchWinner,

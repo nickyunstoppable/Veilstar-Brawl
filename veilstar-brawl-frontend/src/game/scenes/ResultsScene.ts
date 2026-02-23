@@ -368,7 +368,24 @@ export class ResultsScene extends Scene {
         const url = `${API_BASE}/api/matches/${matchId}?lite=1`;
         try {
             const res = await fetch(url);
-            if (!res.ok) return;
+            if (!res.ok) {
+                if (res.status === 404) {
+                    console.warn("[ResultsScene] Stopping on-chain poll: match not found", {
+                        matchId,
+                        status: res.status,
+                        url,
+                    });
+                    this.stopOnChainPolling();
+                    return;
+                }
+
+                console.warn("[ResultsScene] On-chain poll non-OK response", {
+                    matchId,
+                    status: res.status,
+                    url,
+                });
+                return;
+            }
 
             const json = await res.json() as {
                 match?: {
@@ -387,8 +404,12 @@ export class ResultsScene extends Scene {
             this.resultsData.onChainTxHash = txHash;
             this.updateOnChainStatusToVerified(txHash);
             this.stopOnChainPolling();
-        } catch {
-            // Best-effort polling; keep trying silently.
+        } catch (error) {
+            console.warn("[ResultsScene] On-chain poll failed", {
+                matchId,
+                url,
+                error: error instanceof Error ? error.message : String(error),
+            });
         }
     }
 

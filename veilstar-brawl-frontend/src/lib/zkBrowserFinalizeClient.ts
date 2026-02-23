@@ -48,8 +48,19 @@ export async function proveAndFinalizeMatchInBrowser(params: {
       headers: { "Content-Type": "application/json" },
     },
   );
+  console.log("[BrowserFinalizeClient] start", {
+    matchId: params.matchId,
+    winnerAddress: params.winnerAddress,
+    apiBase: ZK_API_BASE,
+  });
 
   const planJson = (await planRes.json().catch(() => ({}))) as FinalizePlanResponse & { error?: string };
+  console.log("[BrowserFinalizeClient] finalize-plan response", {
+    matchId: params.matchId,
+    status: planRes.status,
+    ok: planRes.ok,
+    error: planJson?.error,
+  });
   if (!planRes.ok || !planJson?.success) {
     throw new Error(planJson?.error || `Failed to fetch finalize plan (${planRes.status})`);
   }
@@ -77,6 +88,14 @@ export async function proveAndFinalizeMatchInBrowser(params: {
   });
 
   const finalizeJson = (await finalizeRes.json().catch(() => ({}))) as FinalizeWithZkResponse;
+  console.log("[BrowserFinalizeClient] finalize response", {
+    matchId: params.matchId,
+    status: finalizeRes.status,
+    ok: finalizeRes.ok,
+    error: (finalizeJson as any)?.error,
+    onChainResultPending: finalizeJson?.onChainResultPending,
+    onChainTxHash: finalizeJson?.onChainTxHash || finalizeJson?.onChainOutcomeTxHash || null,
+  });
   if (!finalizeRes.ok) {
     throw new Error(finalizeJson?.error || `Failed to finalize with browser proof (${finalizeRes.status})`);
   }

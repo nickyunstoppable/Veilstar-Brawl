@@ -2069,7 +2069,13 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
         };
 
         const handleBrowserProofFinalize = async (data: unknown) => {
-            if (!PRIVATE_ROUNDS_ENABLED || !publicKey) return;
+            if (!PRIVATE_ROUNDS_ENABLED || !publicKey) {
+                console.log("[BrowserFinalize] skipped: private rounds disabled or wallet missing", {
+                    privateRounds: PRIVATE_ROUNDS_ENABLED,
+                    hasPublicKey: !!publicKey,
+                });
+                return;
+            }
 
             const payload = (data || {}) as {
                 matchId?: string;
@@ -2079,12 +2085,30 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 zkProofAccepted?: boolean;
             };
 
-            if (payload.zkProofAccepted || payload.onChainOutcomeTxHash) return;
+            console.log("[BrowserFinalize] event received", {
+                payload,
+                localMatchId: matchId,
+                wallet: publicKey,
+            });
+
+            if (payload.zkProofAccepted || payload.onChainOutcomeTxHash) {
+                console.log("[BrowserFinalize] skipped: already accepted/submitted", {
+                    zkProofAccepted: payload.zkProofAccepted,
+                    onChainOutcomeTxHash: payload.onChainOutcomeTxHash,
+                });
+                return;
+            }
 
             const targetMatchId = String(payload.matchId || matchId || "").trim();
-            if (!targetMatchId) return;
+            if (!targetMatchId) {
+                console.warn("[BrowserFinalize] skipped: missing target match id", { payloadMatchId: payload.matchId, localMatchId: matchId });
+                return;
+            }
 
-            if (browserFinalizeAttemptedRef.current.has(targetMatchId)) return;
+            if (browserFinalizeAttemptedRef.current.has(targetMatchId)) {
+                console.log("[BrowserFinalize] skipped: already attempted", { targetMatchId });
+                return;
+            }
 
             const player1Address = sceneConfig.isHost
                 ? String(sceneConfig.playerAddress || "").trim()
@@ -2102,9 +2126,23 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                     ? player2Address
                     : "";
             const winnerAddress = String(payload.winnerAddress || fallbackWinnerAddress || "").trim();
-            if (!winnerAddress || winnerAddress !== publicKey) return;
+            if (!winnerAddress || winnerAddress !== publicKey) {
+                console.log("[BrowserFinalize] skipped: this client is not winner", {
+                    targetMatchId,
+                    winnerRole,
+                    winnerAddress,
+                    player1Address,
+                    player2Address,
+                    wallet: publicKey,
+                });
+                return;
+            }
 
             browserFinalizeAttemptedRef.current.add(targetMatchId);
+            console.log("[BrowserFinalize] attempting browser finalize", {
+                targetMatchId,
+                winnerAddress,
+            });
 
             try {
                 EventBus.emit("game:zkProgress", {
@@ -2117,6 +2155,12 @@ export function CharacterSelectClient({ matchId, onMatchEnd, onExit }: Character
                 const result = await proveAndFinalizeMatchInBrowser({
                     matchId: targetMatchId,
                     winnerAddress,
+                });
+
+                console.log("[BrowserFinalize] finalize request accepted", {
+                    targetMatchId,
+                    onChainResultPending: !!result.onChainResultPending,
+                    onChainTxHash: result.onChainTxHash || result.onChainOutcomeTxHash || null,
                 });
 
                 EventBus.emit("game:zkProgress", {
