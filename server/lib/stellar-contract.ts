@@ -2020,9 +2020,37 @@ export async function setZkVerifierVkIdOnChain(
 
     const lockKey = getAdminGlobalLockKey(contractId, adminKeypair.publicKey());
     return withAdminSubmissionLock(lockKey, async () => {
+        const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
+        const isVkIdAlreadyConfigured = async (client: any): Promise<boolean> => {
+            try {
+                const getVkId = client?.get_zk_verifier_vk_id;
+                if (typeof getVkId !== "function") return false;
+
+                const readTx = await getVkId();
+                const raw = readTx?.result;
+
+                const resultBuffer =
+                    Buffer.isBuffer(raw)
+                        ? raw
+                        : raw instanceof Uint8Array
+                            ? Buffer.from(raw)
+                            : (raw?.result instanceof Uint8Array ? Buffer.from(raw.result) : null);
+
+                if (!resultBuffer) return false;
+                if (resultBuffer.length !== 32) return false;
+
+                return resultBuffer.equals(vkIdBytes);
+            } catch {
+                return false;
+            }
+        };
+
         try {
-            const vkIdBytes = normalizeHexToBytes32(vkIdHex, "vkId");
             const client = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+            if (await isVkIdAlreadyConfigured(client)) {
+                return { success: true };
+            }
+
             const setVkId = (client as any).set_zk_verifier_vk_id;
             if (typeof setVkId !== "function") {
                 return {
@@ -2036,6 +2064,20 @@ export async function setZkVerifierVkIdOnChain(
             return { success: true, txHash };
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
+
+            // signAndSend timeout can happen after the tx is accepted but before response resolves.
+            // Re-read on-chain state before reporting failure to avoid false negatives.
+            if (/signAndSend\s*timed\s*out/i.test(message) || /timeout/i.test(message)) {
+                try {
+                    const readClient = await createContractClient(adminKeypair.publicKey(), createSigner(adminKeypair), contractId);
+                    if (await isVkIdAlreadyConfigured(readClient)) {
+                        return { success: true };
+                    }
+                } catch {
+                    // ignore secondary read failures and fall through
+                }
+            }
+
             if (/"status"\s*:\s*"DUPLICATE"|\bDUPLICATE\b/i.test(message)) {
                 return { success: true };
             }

@@ -340,13 +340,13 @@ async function computeTranscriptHash(matchId: string): Promise<string> {
 
     const { data: match } = await supabase
         .from("matches")
-        .select("*")
+        .select("id, status, winner_address, player1_address, player2_address")
         .eq("id", matchId)
         .single();
 
     const { data: rounds } = await supabase
         .from("rounds")
-        .select("*")
+        .select("id, round_number, turn_number, player1_move, player2_move")
         .eq("match_id", matchId)
         .order("round_number", { ascending: true })
         .order("turn_number", { ascending: true });

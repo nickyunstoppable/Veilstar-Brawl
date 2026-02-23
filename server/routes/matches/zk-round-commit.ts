@@ -27,6 +27,8 @@ const ZK_GROTH16_VERIFIER_CONTRACT_ID = (process.env.ZK_GROTH16_VERIFIER_CONTRAC
 const ZK_GROTH16_VK_ID = (process.env.ZK_GROTH16_VK_ID || "").trim();
 const PRIVATE_ROUND_TURN_DELAY_MS = Number(process.env.ZK_PRIVATE_ROUND_TURN_DELAY_MS ?? "1200");
 const DEBUG_MATCH_END_FLOW = (process.env.DEBUG_MATCH_END_FLOW ?? "false") === "true";
+const ZK_ONCHAIN_SETUP_RETRY_ATTEMPTS = Number(process.env.ZK_ONCHAIN_SETUP_RETRY_ATTEMPTS ?? "6");
+const ZK_ONCHAIN_SETUP_RETRY_BASE_MS = Number(process.env.ZK_ONCHAIN_SETUP_RETRY_BASE_MS ?? "1000");
 const privateRoundResolveLocks = new Set<string>();
 const RESOLVE_LOCK_STALE_SECONDS = Number(process.env.ZK_RESOLVE_LOCK_STALE_SECONDS ?? "45");
 const RESOLVE_LOCK_OWNER = `${process.env.FLY_ALLOC_ID || process.env.HOSTNAME || "local"}:${process.pid}`;
@@ -270,7 +272,9 @@ function isRetryableSetupError(raw: string): boolean {
 async function runSetupWithRetry(
     label: string,
     fn: () => Promise<{ success: boolean; error?: string | null }>,
-    maxAttempts: number = 4,
+    maxAttempts: number = Number.isFinite(ZK_ONCHAIN_SETUP_RETRY_ATTEMPTS) && ZK_ONCHAIN_SETUP_RETRY_ATTEMPTS > 0
+        ? Math.floor(ZK_ONCHAIN_SETUP_RETRY_ATTEMPTS)
+        : 6,
 ): Promise<{ success: boolean; error?: string | null }> {
     let lastError: string | null = null;
 
@@ -286,7 +290,10 @@ async function runSetupWithRetry(
             return { success: false, error: errorText };
         }
 
-        const backoffMs = 200 * attempt;
+        const baseBackoff = Number.isFinite(ZK_ONCHAIN_SETUP_RETRY_BASE_MS) && ZK_ONCHAIN_SETUP_RETRY_BASE_MS > 0
+            ? Math.floor(ZK_ONCHAIN_SETUP_RETRY_BASE_MS)
+            : 1000;
+        const backoffMs = baseBackoff * attempt;
         console.warn(`[ZK Round Commit] Retryable setup error for ${label} (attempt ${attempt}/${maxAttempts}) - retrying in ${backoffMs}ms: ${errorText}`);
         await sleep(backoffMs);
     }
