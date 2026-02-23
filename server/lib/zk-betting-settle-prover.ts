@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const BN254_FIELD_PRIME = BigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
 
@@ -17,6 +18,9 @@ const REMOTE_ARTIFACT_BASE = (process.env.ZK_BETTING_SETTLE_ARTIFACT_BASE_URL ||
 const REMOTE_ARTIFACT_PREFIX = "/api/zk/artifacts/betting-settle";
 const DOWNLOAD_CACHE_DIR = resolve(tmpdir(), "vbb-zk-betting-settle-artifacts");
 const downloadInFlight = new Map<string, Promise<string>>();
+const SNARKJS_CLI_PATH = resolve(process.cwd(), "node_modules", "snarkjs", "build", "cli.cjs");
+const NODE_BIN = existsSync("/usr/bin/node") ? "/usr/bin/node" : "node";
+const SNARKJS_NODE_CLI = [NODE_BIN, SNARKJS_CLI_PATH];
 
 function toFieldFromSha256Hex(hex: string): bigint {
   return BigInt(`0x${hex}`) % BN254_FIELD_PRIME;
@@ -140,13 +144,23 @@ async function resolveArtifacts(): Promise<{ wasmPath: string; zkeyPath: string;
   return { wasmPath, zkeyPath, vkeyPath };
 }
 
-let groth16Promise: Promise<any> | null = null;
+async function runCommand(cmd: string[], cwd: string): Promise<void> {
+  const proc = Bun.spawn({
+    cmd,
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
-async function getGroth16(): Promise<any> {
-  if (!groth16Promise) {
-    groth16Promise = import("snarkjs").then((mod: any) => mod.groth16);
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`Command failed (exit=${exitCode}): ${cmd.join(" ")}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
-  return groth16Promise;
 }
 
 export async function proveBettingSettlement(params: {
@@ -173,27 +187,53 @@ export async function proveBettingSettlement(params: {
     witness_winner_side: String(winnerSide),
   };
 
-  const groth16 = await getGroth16();
-  const proveResult = await groth16.fullProve(input, wasmPath, zkeyPath);
+  const requestId = randomUUID().replaceAll("-", "");
+  const workDir = resolve(tmpdir(), `vbb-betting-settle-${requestId}`);
+  await mkdir(workDir, { recursive: true });
 
-  const publicSignals: unknown[] = Array.isArray((proveResult as any).publicSignals)
-    ? (proveResult as any).publicSignals
-    : [];
+  const inputPath = resolve(workDir, "input.json");
+  const proofPath = resolve(workDir, "proof.json");
+  const publicPath = resolve(workDir, "public.json");
 
-  if (publicSignals.length < 3) {
-    throw new Error("Groth16 publicSignals are missing betting settle outputs");
+  await writeFile(inputPath, JSON.stringify(input), "utf8");
+
+  try {
+    await runCommand([
+      ...SNARKJS_NODE_CLI,
+      "groth16",
+      "fullprove",
+      inputPath,
+      wasmPath,
+      zkeyPath,
+      proofPath,
+      publicPath,
+    ], process.cwd());
+
+    const [proofJsonRaw, publicJsonRaw] = await Promise.all([
+      readFile(proofPath, "utf8"),
+      readFile(publicPath, "utf8"),
+    ]);
+
+    const proofJson = JSON.parse(proofJsonRaw);
+    const publicSignals: unknown[] = JSON.parse(publicJsonRaw);
+
+    if (!Array.isArray(publicSignals) || publicSignals.length < 3) {
+      throw new Error("Groth16 publicSignals are missing betting settle outputs");
+    }
+
+    const proof = serializeGroth16ProofToCalldataBytes(proofJson);
+    const publicInputs = [0, 1, 2].map((index) => toBytes32FromDecimal(String(publicSignals[index])));
+
+    const vkBytes = await readFile(vkeyPath);
+    const vkIdHex = `0x${createHash("sha256").update(vkBytes).digest("hex")}`;
+
+    return {
+      proof,
+      publicInputs,
+      vkIdHex,
+      verificationKeyPath: vkeyPath,
+    };
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
-
-  const proof = serializeGroth16ProofToCalldataBytes((proveResult as any).proof);
-  const publicInputs = [0, 1, 2].map((index) => toBytes32FromDecimal(String(publicSignals[index])));
-
-  const vkBytes = await readFile(vkeyPath);
-  const vkIdHex = `0x${createHash("sha256").update(vkBytes).digest("hex")}`;
-
-  return {
-    proof,
-    publicInputs,
-    vkIdHex,
-    verificationKeyPath: vkeyPath,
-  };
 }
